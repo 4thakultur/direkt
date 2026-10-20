@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}Log in · Direkt{% endblock %}
+{% block body %}
+<main class="narrow">
+  <h1 class="brand-large">Direkt</h1>
+  <form method="post" action="/login" class="card stack">
+    <h2>Log in</h2>
+    {% if let Some(error) = error %}<p class="flash error">{{ error }}</p>{% endif %}
+    <label>Username
+      <input name="username" value="{{ username }}" autocomplete="username" required autofocus>
+    </label>
+    <label>Password
+      <input name="password" type="password" autocomplete="current-password" required>
+    </label>
+    <button type="submit" class="primary">Log in</button>
+  </form>
+</main>
+{% endblock %}

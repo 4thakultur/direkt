@@ -14,6 +14,10 @@ use std::path::Path;
 use std::time::Duration;
 use uuid::Uuid;
 
+mod auth;
+
+pub use auth::{AdminAccount, ApiToken};
+
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
 #[derive(Debug, Clone)]
@@ -137,20 +141,24 @@ impl Store {
         row.map(TryInto::try_into).transpose()
     }
 
-    /// Newest first, optionally filtered by transfer state.
+    /// Newest first. An empty `states` slice means all states.
     pub async fn list_downloads(
         &self,
-        state: Option<TransferState>,
+        states: &[TransferState],
         limit: i64,
         offset: i64,
     ) -> AppResult<Vec<Download>> {
+        let filter = (!states.is_empty()).then(|| {
+            let names: Vec<&str> = states.iter().map(|s| s.as_str()).collect();
+            serde_json::to_string(&names).expect("string list serializes")
+        });
         let rows: Vec<DownloadRow> = sqlx::query_as(
             "SELECT * FROM downloads
-             WHERE (?1 IS NULL OR state = ?1)
+             WHERE (?1 IS NULL OR state IN (SELECT value FROM json_each(?1)))
              ORDER BY created_at DESC, rowid DESC
              LIMIT ?2 OFFSET ?3",
         )
-        .bind(state.map(TransferState::as_str))
+        .bind(filter)
         .bind(limit)
         .bind(offset)
         .fetch_all(&self.pool)
@@ -496,11 +504,11 @@ async fn insert_event(
     Ok(())
 }
 
-fn from_millis(ms: i64) -> AppResult<DateTime<Utc>> {
+pub(crate) fn from_millis(ms: i64) -> AppResult<DateTime<Utc>> {
     DateTime::from_timestamp_millis(ms).ok_or_else(|| corrupt("timestamp out of range"))
 }
 
-fn corrupt(what: &str) -> AppError {
+pub(crate) fn corrupt(what: &str) -> AppError {
     tracing::error!(what, "corrupt database row");
     AppError::new(ErrorKind::Persistence, "stored data is corrupt")
 }
@@ -951,12 +959,15 @@ mod tests {
             .await
             .unwrap();
 
-        let all = s.list_downloads(None, 50, 0).await.unwrap();
+        let all = s.list_downloads(&[], 50, 0).await.unwrap();
         assert_eq!(all.iter().map(|d| d.id).collect::<Vec<_>>(), [b.id, a.id]);
-        let paused = s.list_downloads(Some(Paused), 50, 0).await.unwrap();
+        let paused = s.list_downloads(&[Paused], 50, 0).await.unwrap();
         assert_eq!(paused.len(), 1);
         assert_eq!(paused[0].id, a.id);
-        assert_eq!(s.list_downloads(None, 1, 1).await.unwrap()[0].id, a.id);
+        assert_eq!(s.list_downloads(&[], 1, 1).await.unwrap()[0].id, a.id);
+        let both = s.list_downloads(&[Paused, Queued], 50, 0).await.unwrap();
+        assert_eq!(both.len(), 2);
+        assert!(s.list_downloads(&[Failed], 50, 0).await.unwrap().is_empty());
     }
 
     #[tokio::test]

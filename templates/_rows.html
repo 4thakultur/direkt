@@ -1,0 +1,31 @@
+{% if let Some(error) = error %}<p class="flash error">{{ error }}</p>{% endif %}
+{% if rows.is_empty() %}
+<p class="empty muted">No downloads here.</p>
+{% endif %}
+<ul class="downloads">
+{% for d in rows %}
+  <li class="download state-{{ d.state }}">
+    <div class="row-main">
+      <a class="name" href="/downloads/{{ d.id }}" title="{{ d.display_url }}">{{ d.name }}</a>
+      <span class="badge {{ d.state }}">{{ d.state_label }}</span>
+      {% if let Some(post) = d.post_label %}<span class="badge post">{{ post }}</span>{% endif %}
+    </div>
+    {% if let Some(percent) = d.percent %}
+    <progress max="100" value="{{ percent }}">{{ percent }}%</progress>
+    {% endif %}
+    <div class="row-meta muted">
+      {% if !d.progress.is_empty() %}<span>{{ d.progress }}</span>{% endif %}
+      {% if let Some(speed) = d.speed %}<span>{{ speed }}</span>{% endif %}
+      {% if let Some(eta) = d.eta %}<span>{{ eta }} left</span>{% endif %}
+    </div>
+    {% if let Some(note) = d.note %}<p class="note">{{ note }}</p>{% endif %}
+    {% if let Some(note) = d.post_note %}<p class="note">{{ note }}</p>{% endif %}
+    <div class="actions">
+      {% if d.can_pause %}<button hx-post="/ui/downloads/{{ d.id }}/pause" hx-target="#flash">Pause</button>{% endif %}
+      {% if d.can_resume %}<button hx-post="/ui/downloads/{{ d.id }}/resume" hx-target="#flash">Resume</button>{% endif %}
+      {% if d.can_retry %}<button hx-post="/ui/downloads/{{ d.id }}/retry" hx-target="#flash">Retry</button>{% endif %}
+      {% if d.can_cancel %}<button class="danger" hx-post="/ui/downloads/{{ d.id }}/cancel" hx-target="#flash" hx-confirm="Cancel this download and delete its partial data?">Cancel</button>{% endif %}
+    </div>
+  </li>
+{% endfor %}
+</ul>

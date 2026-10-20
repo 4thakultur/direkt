@@ -74,11 +74,11 @@ impl DownloadService {
 
     pub async fn list(
         &self,
-        state: Option<TransferState>,
+        states: &[TransferState],
         limit: i64,
         offset: i64,
     ) -> AppResult<Vec<Download>> {
-        self.store.list_downloads(state, limit, offset).await
+        self.store.list_downloads(states, limit, offset).await
     }
 
     pub async fn events(&self, id: Uuid) -> AppResult<Vec<DownloadEvent>> {

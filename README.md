@@ -2,9 +2,19 @@
 
 A self-hostable direct download manager for homelabs, written in Rust.
 
-> **Status:** early development. The persistence layer, state machine,
-> configuration, and HTTP/HTTPS download engine exist; the API and web UI are
-> in progress.
+> **Status:** early development. HTTP/HTTPS downloads, the web UI, and the
+> API work. Telegram notifications, media organization, and Docker packaging
+> are next.
+
+## First run
+
+1. Start Direkt and open `http://<host>:8080`.
+2. Enter the one-time setup token from `<data_dir>/setup-token` (the log
+   shows the path) and create the administrator account.
+3. Paste a URL and download.
+
+Forgot the password? Run `direkt reset-admin` and set up again. See
+[`docs/security.md`](docs/security.md).
 
 ## Development
 
@@ -18,7 +28,7 @@ cargo clippy --all-targets
 See [`direkt.example.toml`](direkt.example.toml) for every configuration option, and
 [`docs/state-machine.md`](docs/state-machine.md) for the download lifecycle, and
 [`docs/download-engine.md`](docs/download-engine.md) for resume, retry, and
-network-security behavior.
+network-security behavior, and [`docs/api.md`](docs/api.md) for the HTTP API.
 
 `cargo test` needs no network access. One opt-in test downloads a real file
 over HTTPS: `cargo test -- --ignored real_https`.

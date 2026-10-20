@@ -43,12 +43,16 @@ pub struct Config {
 pub struct ServerConfig {
     /// Address and port the HTTP server listens on.
     pub listen: SocketAddr,
+    /// Mark the session cookie `Secure` (HTTPS only). Enable this when Direkt
+    /// is served over HTTPS, e.g. behind a TLS-terminating reverse proxy.
+    pub secure_cookies: bool,
 }
 
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             listen: SocketAddr::from(([0, 0, 0, 0], 8080)),
+            secure_cookies: false,
         }
     }
 }

@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block body %}
+<header class="topbar">
+  <a class="brand" href="/">Direkt</a>
+  <nav>
+    <a href="/">Downloads</a>
+    <a href="/settings">Settings</a>
+    <form method="post" action="/logout" class="inline">
+      <button type="submit" class="link">Log out</button>
+    </form>
+  </nav>
+</header>
+<main>
+{% block content %}{% endblock %}
+</main>
+{% endblock %}

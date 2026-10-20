@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block title %}Setup · Direkt{% endblock %}
+{% block body %}
+<main class="narrow">
+  <h1 class="brand-large">Direkt</h1>
+  <form method="post" action="/setup" class="card stack">
+    <h2>Create the administrator account</h2>
+    <p class="muted">
+      To prove you control this server, enter the one-time setup token from
+      <code>{{ token_path }}</code>. With Docker Compose:
+      <code>docker compose exec direkt cat {{ token_path }}</code>
+    </p>
+    {% if let Some(error) = error %}<p class="flash error">{{ error }}</p>{% endif %}
+    <label>Setup token
+      <input name="setup_token" autocomplete="off" required autofocus>
+    </label>
+    <label>Username
+      <input name="username" value="{{ username }}" autocomplete="username" required>
+    </label>
+    <label>Password <span class="muted">(at least 10 characters)</span>
+      <input name="password" type="password" autocomplete="new-password" minlength="10" required>
+    </label>
+    <label>Confirm password
+      <input name="password_confirm" type="password" autocomplete="new-password" minlength="10" required>
+    </label>
+    <button type="submit" class="primary">Create account</button>
+  </form>
+</main>
+{% endblock %}

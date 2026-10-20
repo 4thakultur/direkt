@@ -1,23 +1,49 @@
-use axum::extract::State;
-use axum::http::StatusCode;
-use axum::routing::get;
-use axum::{Json, Router};
+use direkt::auth::AuthService;
 use direkt::config::{Config, LogFormat};
 use direkt::engine::{Engine, EngineSettings};
 use direkt::net::NetworkPolicy;
 use direkt::providers::Providers;
+use direkt::service::DownloadService;
 use direkt::store::Store;
-use serde_json::json;
+use direkt::web::{self, AppState};
+use std::net::SocketAddr;
 use std::path::Path;
 use tracing_subscriber::EnvFilter;
 
-#[derive(Clone)]
-struct AppState {
-    store: Store,
+const USAGE: &str = "usage: direkt [serve | reset-admin]
+
+  serve        run the server (default)
+  reset-admin  delete the administrator account, all sessions, and all API
+               tokens; the next start offers first-run setup again
+
+Configuration is read from $DIREKT_CONFIG (default ./direkt.toml).";
+
+enum Command {
+    Serve,
+    ResetAdmin,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let command = match args
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .as_slice()
+    {
+        [] | ["serve"] => Command::Serve,
+        ["reset-admin"] => Command::ResetAdmin,
+        ["-h" | "--help" | "help"] => {
+            println!("{USAGE}");
+            return Ok(());
+        }
+        _ => {
+            eprintln!("{USAGE}");
+            std::process::exit(2);
+        }
+    };
+
     let (config, config_path) = match Config::load() {
         Ok(loaded) => loaded,
         Err(e) => {
@@ -27,19 +53,41 @@ async fn main() -> anyhow::Result<()> {
         }
     };
     init_logging(&config);
+
+    match command {
+        Command::Serve => serve(config, &config_path).await,
+        Command::ResetAdmin => reset_admin(&config).await,
+    }
+}
+
+async fn open_store(config: &Config) -> anyhow::Result<Store> {
+    ensure_dir(&config.storage.data_dir)?;
+    Store::open(&config.storage.data_dir.join("direkt.db"))
+        .await
+        .map_err(|e| anyhow::anyhow!("opening database: {e}"))
+}
+
+async fn reset_admin(config: &Config) -> anyhow::Result<()> {
+    let store = open_store(config).await?;
+    store
+        .reset_admin()
+        .await
+        .map_err(|e| anyhow::anyhow!("resetting administrator: {e}"))?;
+    store.close().await;
+    println!(
+        "Administrator account, sessions, and API tokens removed. \
+         Restart Direkt and open the web UI to run setup again."
+    );
+    Ok(())
+}
+
+async fn serve(config: Config, config_path: &Path) -> anyhow::Result<()> {
     tracing::info!(config = %config_path.display(), "starting direkt {}", env!("CARGO_PKG_VERSION"));
 
-    for dir in [
-        &config.storage.data_dir,
-        &config.storage.download_dir,
-        &config.storage.incomplete_dir,
-    ] {
+    for dir in [&config.storage.download_dir, &config.storage.incomplete_dir] {
         ensure_dir(dir)?;
     }
-
-    let store = Store::open(&config.storage.data_dir.join("direkt.db"))
-        .await
-        .map_err(|e| anyhow::anyhow!("opening database: {e}"))?;
+    let store = open_store(&config).await?;
     let report = store
         .recover_interrupted(chrono::Utc::now())
         .await
@@ -52,43 +100,49 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
+    let auth = AuthService::new(store.clone(), &config.storage.data_dir)
+        .await
+        .map_err(|e| anyhow::anyhow!("initializing authentication: {e}"))?;
+    if let Some(path) = auth.pending_setup_token_path() {
+        tracing::warn!(
+            setup_token_file = %path.display(),
+            "no administrator account yet: open the web UI and enter the setup token from this file"
+        );
+    }
+
     let policy = NetworkPolicy::new(config.network.allowed_private_networks.clone());
     let client = direkt::http_client::build_client(policy.clone())?;
+    let providers = Providers::default();
     let engine = Engine::new(
         store.clone(),
-        Providers::default(),
+        providers.clone(),
         client,
-        policy,
+        policy.clone(),
         EngineSettings::from_config(&config),
     );
     let dispatcher = engine.start();
+    let downloads = DownloadService::new(store.clone(), engine.clone(), providers, policy);
 
-    let app = Router::new()
-        .route("/healthz", get(health))
-        .with_state(AppState {
-            store: store.clone(),
-        });
+    let app = web::router(AppState {
+        downloads,
+        auth,
+        store: store.clone(),
+        secure_cookies: config.server.secure_cookies,
+    });
 
     let listener = tokio::net::TcpListener::bind(config.server.listen).await?;
     tracing::info!(addr = %config.server.listen, "listening");
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await?;
 
     engine.shutdown(dispatcher).await;
     store.close().await;
     tracing::info!("shutdown complete");
     Ok(())
-}
-
-async fn health(State(state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
-    match state.store.ping().await {
-        Ok(()) => (StatusCode::OK, Json(json!({ "status": "ok" }))),
-        Err(_) => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({ "status": "error", "database": "unavailable" })),
-        ),
-    }
 }
 
 fn init_logging(config: &Config) {

@@ -617,14 +617,14 @@ async fn concurrency_is_bounded() {
     loop {
         let downloading = h
             .store
-            .list_downloads(Some(TransferState::Downloading), 10, 0)
+            .list_downloads(&[TransferState::Downloading], 10, 0)
             .await
             .unwrap()
             .len();
         max_seen = max_seen.max(downloading);
         let completed = h
             .store
-            .list_downloads(Some(TransferState::Completed), 10, 0)
+            .list_downloads(&[TransferState::Completed], 10, 0)
             .await
             .unwrap()
             .len();

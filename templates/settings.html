@@ -1,0 +1,58 @@
+{% extends "app.html" %}
+{% block title %}Settings · Direkt{% endblock %}
+{% block content %}
+{% if let Some(message) = message %}<p class="flash ok">{{ message }}</p>{% endif %}
+{% if let Some(error) = error %}<p class="flash error">{{ error }}</p>{% endif %}
+
+<section class="card stack">
+  <h2>API tokens</h2>
+  <p class="muted">
+    Tokens let scripts and integrations use the <a href="/api/openapi.json">API</a>.
+    Send one as <code>Authorization: Bearer &lt;token&gt;</code>.
+  </p>
+  {% if let Some(secret) = new_token %}
+  <div class="secret">
+    <code>{{ secret }}</code>
+  </div>
+  {% endif %}
+  {% if !tokens.is_empty() %}
+  <table>
+    <thead><tr><th>Name</th><th>Created</th><th>Last used</th><th></th></tr></thead>
+    <tbody>
+    {% for t in tokens %}
+      <tr>
+        <td>{{ t.name }}</td>
+        <td class="muted">{{ t.created }}</td>
+        <td class="muted">{{ t.last_used }}</td>
+        <td>
+          <form method="post" action="/settings/tokens/{{ t.id }}/revoke" class="inline">
+            <button type="submit" class="danger">Revoke</button>
+          </form>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+  <form method="post" action="/settings/tokens" class="submit">
+    <input name="name" placeholder="Token name, e.g. phone shortcut" maxlength="64" required aria-label="Token name">
+    <button type="submit">Create token</button>
+  </form>
+</section>
+
+<section class="card">
+  <form method="post" action="/settings/password" class="stack">
+    <h2>Change password</h2>
+    <label>Current password
+      <input name="current_password" type="password" autocomplete="current-password" required>
+    </label>
+    <label>New password <span class="muted">(at least 10 characters)</span>
+      <input name="new_password" type="password" autocomplete="new-password" minlength="10" required>
+    </label>
+    <label>Confirm new password
+      <input name="new_password_confirm" type="password" autocomplete="new-password" minlength="10" required>
+    </label>
+    <button type="submit">Change password</button>
+  </form>
+</section>
+{% endblock %}

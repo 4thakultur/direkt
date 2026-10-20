@@ -7,7 +7,7 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorKind {
     /// The request or submitted URL is malformed or not permitted.
@@ -32,6 +32,13 @@ pub enum ErrorKind {
     MediaIdentification,
     /// A notification could not be delivered.
     Notification,
+    /// The caller is not logged in or presented invalid credentials.
+    Unauthorized,
+    /// The caller is authenticated but the request is not allowed (for
+    /// example a cross-site form submission).
+    Forbidden,
+    /// Too many attempts; the caller must wait before trying again.
+    RateLimited,
     /// The requested entity does not exist.
     NotFound,
     /// The operation conflicts with the current state of the entity.
@@ -54,6 +61,9 @@ impl ErrorKind {
             Self::Persistence => "persistence",
             Self::MediaIdentification => "media_identification",
             Self::Notification => "notification",
+            Self::Unauthorized => "unauthorized",
+            Self::Forbidden => "forbidden",
+            Self::RateLimited => "rate_limited",
             Self::NotFound => "not_found",
             Self::Conflict => "conflict",
             Self::Internal => "internal",
@@ -73,6 +83,9 @@ impl ErrorKind {
             "persistence" => Self::Persistence,
             "media_identification" => Self::MediaIdentification,
             "notification" => Self::Notification,
+            "unauthorized" => Self::Unauthorized,
+            "forbidden" => Self::Forbidden,
+            "rate_limited" => Self::RateLimited,
             "not_found" => Self::NotFound,
             "conflict" => Self::Conflict,
             "internal" => Self::Internal,
@@ -113,6 +126,10 @@ impl AppError {
 
     pub fn conflict(message: impl Into<String>) -> Self {
         Self::new(ErrorKind::Conflict, message)
+    }
+
+    pub fn unauthorized(message: impl Into<String>) -> Self {
+        Self::new(ErrorKind::Unauthorized, message)
     }
 
     pub fn internal(message: impl Into<String>) -> Self {
@@ -240,6 +257,9 @@ mod tests {
             ErrorKind::Persistence,
             ErrorKind::MediaIdentification,
             ErrorKind::Notification,
+            ErrorKind::Unauthorized,
+            ErrorKind::Forbidden,
+            ErrorKind::RateLimited,
             ErrorKind::NotFound,
             ErrorKind::Conflict,
             ErrorKind::Internal,
