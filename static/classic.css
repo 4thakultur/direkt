@@ -219,23 +219,6 @@ button.htmx-request { opacity: 0.55; pointer-events: none; }
 .field input { width: 100%; margin: 0; padding-left: 2.2rem; }
 .field:focus-within { color: var(--text); }
 .field.url { flex: 1 1 20rem; }
-/* The file password is rarely needed, so it waits behind a disclosure. */
-.more { flex-basis: 100%; order: 1; }
-.more > summary {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.3rem;
-  color: var(--muted);
-  font-size: 0.8rem;
-  cursor: pointer;
-  list-style: none;
-}
-.more > summary::-webkit-details-marker { display: none; }
-.more > summary::marker { content: ""; }
-.more > summary:hover, .more[open] > summary { color: var(--text); }
-.more .chevron { width: 12px; height: 12px; transform: rotate(-90deg); transition: transform 0.2s ease; }
-.more[open] .chevron { transform: none; }
-.more .field { max-width: 16rem; margin-top: 0.5rem; }
 .add .flash { flex-basis: 100%; margin: 0; overflow-wrap: anywhere; }
 
 /* Busy labels: htmx marks the form making a request with .htmx-request. */
@@ -260,6 +243,7 @@ button.htmx-request { opacity: 0.55; pointer-events: none; }
 .confirm .actions { margin-top: 0.5rem; }
 .confirm select { padding-block: 0.35rem; margin-top: 0.15rem; }
 .confirm .note { color: var(--muted); }
+.confirm .field.password { max-width: 16rem; margin-top: 0.5rem; }
 
 /* ---------------------------------------------------------------------------
    Network graph
@@ -846,7 +830,7 @@ th { font-size: 0.7rem; color: var(--dim); font-weight: 600; letter-spacing: 0.1
   .brand-text { display: none; }
   .nav { gap: 1rem; }
   .add button { flex: 1 1 100%; }
-  .more .field { max-width: none; }
+  .confirm .field.password { max-width: none; }
   .art-sm { width: 64px; font-size: 0.62rem; }
   .row { gap: 0.6rem; }
   .row .actions { gap: 0.3rem; }

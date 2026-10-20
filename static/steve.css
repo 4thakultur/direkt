@@ -300,26 +300,6 @@ button.htmx-request { opacity: 0.55; pointer-events: none; }
 .field input { width: 100%; margin: 0; padding: 0.75rem 0.9rem 0.75rem 2.6rem; font-size: 1.05rem; }
 .field:focus-within { color: var(--accent); }
 .field.url { flex: 1 1 20rem; }
-/* The file password is rarely needed, so it waits behind a disclosure
-   under the bar. */
-.more { flex-basis: 100%; order: 1; }
-.more > summary {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.3rem;
-  padding: 0.15rem 0.3rem;
-  color: var(--accent-text);
-  font-size: 0.88rem;
-  cursor: pointer;
-  list-style: none;
-  border-radius: var(--radius-sm);
-}
-.more > summary::-webkit-details-marker { display: none; }
-.more > summary::marker { content: ""; }
-.more > summary:focus-visible { box-shadow: 0 0 0 3px var(--ring); }
-.more .chevron { width: 13px; height: 13px; transform: rotate(-90deg); transition: transform 0.3s var(--spring); }
-.more[open] .chevron { transform: none; }
-.more .field { max-width: 20rem; margin-top: 0.5rem; }
 .add .flash { flex-basis: 100%; margin: 0; overflow-wrap: anywhere; }
 
 .when-busy { display: none; }
@@ -348,6 +328,8 @@ button.htmx-request { opacity: 0.55; pointer-events: none; }
 .confirm .actions button { padding: 0.55rem 1.4rem; font-weight: 600; }
 .confirm select { padding: 0.35rem 2rem 0.35rem 0.7rem; font-size: 0.9rem; margin-top: 0.1rem; }
 .confirm .note { color: var(--muted); }
+.confirm .field.password { max-width: 20rem; margin-top: 0.6rem; }
+.confirm .field.password input { background: var(--fill); }
 
 /* ---------------------------------------------------------------------------
    Network graph: an Activity Monitor style card
@@ -1102,6 +1084,7 @@ td button { padding: 0.3rem 0.85rem; font-size: 0.82rem; }
   .hero .icon-btn { width: 52px; height: 52px; }
   .hero .icon-btn .icon { width: 20px; height: 20px; }
   .confirm .actions { flex-direction: column-reverse; align-items: stretch; }
+  .confirm .field.password { max-width: none; }
   .confirm .actions button { padding: 0.8rem; font-size: 1.05rem; }
 
   .events li { grid-template-columns: 1fr; gap: 0; }
@@ -1161,12 +1144,6 @@ td button { padding: 0.3rem 0.85rem; font-size: 0.82rem; }
   .add { flex-direction: column; gap: 0; padding: 0; overflow: hidden; }
   .add .field input { border-radius: 0; background: none; padding-block: 0.9rem; font-size: 1.05rem; }
   .add .field input:focus { box-shadow: none; }
-  .add .more { flex: none; order: 0; border-top: 1px solid var(--separator); }
-  .add .more > summary { display: flex; padding: 0.8rem 0.9rem; border-radius: 0; font-size: 0.95rem; }
-  .add .more .field { max-width: none; margin: 0 0 0 2.6rem; border-top: 1px solid var(--separator); }
-  .add button.big { order: 1; }
-  .add .field.password input { padding-left: 0; }
-  .add .field.password .icon { left: -1.7rem; }
   .add .field, .add button { flex: none; }
   .add button.big {
     margin: 0.75rem;

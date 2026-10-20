@@ -154,7 +154,7 @@ pub struct DownloadList {
 }
 
 /// Either `url` (queue directly) or `preview_id` (queue a preview from
-/// `POST /api/v1/previews`, with its password and lookup results).
+/// `POST /api/v1/previews`, with its lookup results and password).
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct CreateDownload {
     /// An http or https URL.
@@ -163,7 +163,8 @@ pub struct CreateDownload {
     /// Password for a password-protected file (1fichier). Write-only: never
     /// returned or logged.
     pub password: Option<String>,
-    /// A preview to confirm, instead of `url` and `password`.
+    /// A preview to confirm, instead of `url`. A `password` sent with it
+    /// replaces the preview's.
     pub preview_id: Option<Uuid>,
     /// The download's type. With `preview_id`, defaults to the preview's.
     pub media_type: Option<MediaType>,
@@ -239,7 +240,12 @@ async fn create_download(
     ApiJson(body): ApiJson<CreateDownload>,
 ) -> ApiResult<impl IntoResponse> {
     let download = match (body.preview_id, body.url) {
-        (Some(id), None) => state.downloads.confirm(id, body.media_type).await?,
+        (Some(id), None) => {
+            state
+                .downloads
+                .confirm(id, body.media_type, body.password.as_deref())
+                .await?
+        }
         (None, Some(url)) => {
             state
                 .downloads

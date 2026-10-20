@@ -10,6 +10,7 @@ use axum::body::Body;
 use axum::http::Request as HttpRequest;
 use http_body_util::BodyExt;
 use serde_json::Value;
+use std::sync::Arc;
 use std::time::Duration;
 use tower::ServiceExt;
 
@@ -87,7 +88,15 @@ impl TestApp {
         )
         .await
         .unwrap();
-        let providers = Providers::standard(client.clone(), settings.onefichier_key(), account);
+        let providers = Providers::new(vec![
+            Arc::new(LockedProvider),
+            Arc::new(crate::providers::OneFichierProvider::new(
+                client.clone(),
+                settings.onefichier_key(),
+                account,
+            )),
+            Arc::new(crate::providers::HttpProvider::new(client.clone())),
+        ]);
         let engine_settings = EngineSettings {
             download_dir: dir.path().join("dl"),
             incomplete_dir: dir.path().join("inc"),
@@ -193,6 +202,39 @@ impl TestApp {
         }
         self.send(builder.body(Body::from(form.to_owned())).unwrap())
             .await
+    }
+}
+
+/// A hoster with password-protected files at `https://locked.test/…`. Its
+/// links are inspected without any request, unlike 1fichier's.
+struct LockedProvider;
+
+impl crate::providers::Provider for LockedProvider {
+    fn id(&self) -> &'static str {
+        "locked"
+    }
+
+    fn matches(&self, url: &url::Url) -> bool {
+        url.host_str() == Some("locked.test")
+    }
+
+    fn supports_password(&self) -> bool {
+        true
+    }
+
+    fn resolve<'a>(
+        &'a self,
+        _request: crate::providers::ResolveRequest<'a>,
+    ) -> crate::providers::BoxFuture<
+        'a,
+        Result<crate::providers::ResolvedResource, crate::error::TransferError>,
+    > {
+        Box::pin(async {
+            Err(crate::error::TransferError::block(
+                crate::error::ErrorKind::RemoteUnavailable,
+                "test hoster",
+            ))
+        })
     }
 }
 
@@ -1126,6 +1168,88 @@ async fn ui_token_management() {
         !page.body.contains(" open>"),
         "settings sections start collapsed"
     );
+}
+
+#[tokio::test]
+async fn file_password_is_asked_on_the_confirmation_menu() {
+    let (app, cookie) = TestApp::with_admin_local().await;
+    let auth = cookie_header(&cookie);
+
+    // Plain links take no password: no field, and a sent one is refused.
+    let url = format!("{}/files/movie.mkv", app.files);
+    let r = app
+        .post_form(
+            "/ui/downloads/preview",
+            &auth,
+            &format!("url={}", encode(&url)),
+        )
+        .await;
+    assert!(!r.body.contains("name=\"password\""), "{}", r.body);
+    let id = preview_id_in(&r.body);
+    let r = app
+        .post_form(
+            "/ui/downloads",
+            &auth,
+            &format!("preview_id={id}&media_type=movie&password=hunter2-secret"),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST);
+    assert!(r.body.contains("does not use a download password"));
+
+    // A hoster that takes one: the link form has no field, the menu does.
+    let page = app.get("/", &auth).await;
+    assert!(
+        !page.body.contains("name=\"password\""),
+        "not on the link form"
+    );
+    let url = "https://locked.test/file/movie.mkv";
+    let r = app
+        .post_form(
+            "/ui/downloads/preview",
+            &auth,
+            &format!("url={}", encode(url)),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    assert!(r.body.contains("id=\"file-password\" name=\"password\""));
+    let id = preview_id_in(&r.body);
+    let r = app
+        .post_form(
+            "/ui/downloads",
+            &auth,
+            &format!("preview_id={id}&media_type=movie&password=hunter2-secret"),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    assert!(!r.body.contains("hunter2-secret"));
+
+    let list = app.get("/api/v1/downloads", &auth).await;
+    assert!(!list.body.contains("hunter2-secret"));
+    let id = list.json()["items"][0]["id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let stored = app.store.get_download(id).await.unwrap().unwrap();
+    assert_eq!(stored.download_password.as_deref(), Some("hunter2-secret"));
+
+    // The API takes it with preview_id too.
+    let r = app
+        .post_json("/api/v1/previews", &auth, serde_json::json!({"url": url}))
+        .await;
+    assert_eq!(r.json()["accepts_password"], true);
+    let preview = r.json()["id"].as_str().unwrap().to_owned();
+    let r = app
+        .post_json(
+            "/api/v1/downloads",
+            &auth,
+            serde_json::json!({"preview_id": preview, "password": "other-secret"}),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::CREATED, "{}", r.body);
+    let id = r.json()["id"].as_str().unwrap().parse().unwrap();
+    let stored = app.store.get_download(id).await.unwrap().unwrap();
+    assert_eq!(stored.download_password.as_deref(), Some("other-secret"));
 }
 
 #[tokio::test]

@@ -6,8 +6,9 @@
 //! Submitting can take two steps: [`DownloadService::preview`] looks the link
 //! up (name, size, suggested type, title and artwork) and keeps the result,
 //! with the password, under a preview id for an hour;
-//! [`DownloadService::confirm`] then queues it with the type the user chose.
-//! The password never leaves the server in between.
+//! [`DownloadService::confirm`] then queues it with the type the user chose,
+//! and the password, when it is given there instead. The password never
+//! leaves the server.
 
 use crate::domain::{Download, DownloadEvent, MediaType, PostState, TransferState};
 use crate::engine::{Engine, LiveSnapshot, StopReason, ThroughputSnapshot, filename_from_url};
@@ -74,6 +75,9 @@ pub struct Preview {
     pub artwork_id: Option<String>,
     /// Why some details are missing, e.g. no TMDB key is set.
     pub notes: Vec<String>,
+    /// Whether the provider takes a download password, which can still be
+    /// given when confirming.
+    pub accepts_password: bool,
 }
 
 /// A preview waiting for confirmation. Holds the password: never serialized.
@@ -184,6 +188,7 @@ impl DownloadService {
             year: None,
             artwork_id: None,
             notes: Vec::new(),
+            accepts_password: provider.supports_password(),
         };
         self.describe(&mut preview, &notes).await;
         self.keep(Pending {
@@ -209,9 +214,23 @@ impl DownloadService {
         Ok(pending.preview)
     }
 
-    /// Queue a previewed link. `media_type` overrides the preview's type.
-    pub async fn confirm(&self, id: Uuid, media_type: Option<MediaType>) -> AppResult<Download> {
+    /// Queue a previewed link. `media_type` overrides the preview's type,
+    /// and a non-empty `password` the one given with the preview.
+    pub async fn confirm(
+        &self,
+        id: Uuid,
+        media_type: Option<MediaType>,
+        password: Option<&str>,
+    ) -> AppResult<Download> {
         let mut pending = self.pending(id)?;
+        if let Some(password) = normalize_password(password)? {
+            if !pending.preview.accepts_password {
+                return Err(AppError::invalid(
+                    "this kind of link does not use a download password",
+                ));
+            }
+            pending.password = Some(password.to_owned());
+        }
         if let Some(t) = media_type
             && t != pending.preview.media_type
         {
@@ -244,7 +263,7 @@ impl DownloadService {
         password: Option<&str>,
     ) -> AppResult<Download> {
         let preview = self.preview(raw_url, password).await?;
-        self.confirm(preview.id, None).await
+        self.confirm(preview.id, None, None).await
     }
 
     fn validate(

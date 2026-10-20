@@ -5,13 +5,6 @@
     <input name="url" type="url" placeholder="Paste a download link" value="{{ value }}" required aria-label="URL to download" autocomplete="off" spellcheck="false">
   </label>
   <button type="submit" class="primary big"><span class="when-idle">Download</span><span class="when-busy">Looking up…</span></button>
-  <details class="more">
-    <summary>File password<svg class="icon chevron" aria-hidden="true"><use href="#i-chevron"/></svg></summary>
-    <label class="field password">
-      <svg class="icon" aria-hidden="true"><use href="#i-lock"/></svg>
-      <input name="password" type="password" placeholder="Only if the file has one" autocomplete="off" aria-label="File password (optional)">
-    </label>
-  </details>
   {% if let Some(error) = error %}<p class="flash error">{{ error }}</p>{% endif %}
 </form>
 {% if let Some(p) = preview %}
@@ -37,6 +30,13 @@
       </div>
     </dl>
     {% for note in p.notes %}<p class="note">{{ note }}</p>{% endfor %}
+    {% if p.accepts_password %}
+    {#- hx-preserve keeps what was typed when changing the type re-renders the menu. #}
+    <label class="field password">
+      <svg class="icon" aria-hidden="true"><use href="#i-lock"/></svg>
+      <input id="file-password" name="password" type="password" placeholder="File password, if it has one" autocomplete="off" aria-label="File password (optional)" hx-preserve>
+    </label>
+    {% endif %}
     <div class="actions">
       <button type="submit" class="primary"><span class="when-idle">Start download</span><span class="when-busy">Starting…</span></button>
       <button type="button" hx-get="/ui/submit" hx-target="#submit" hx-swap="outerHTML">Cancel</button>

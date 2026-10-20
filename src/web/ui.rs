@@ -721,6 +721,8 @@ struct PreviewView {
     badge: String,
     types: Vec<TypeOption>,
     notes: Vec<String>,
+    /// Show the file password field.
+    accepts_password: bool,
 }
 
 struct TypeOption {
@@ -768,6 +770,7 @@ impl From<Preview> for PreviewView {
                 })
                 .collect(),
             notes: p.notes,
+            accepts_password: p.accepts_password,
         }
     }
 }
@@ -920,6 +923,9 @@ struct ConfirmBody {
     /// The link field, kept on screen if the confirmation fails.
     #[serde(default)]
     url: String,
+    /// Only on providers that take one; empty means none.
+    #[serde(default)]
+    password: Option<String>,
 }
 
 fn parse_media_type(value: &str) -> Result<MediaType, AppError> {
@@ -952,7 +958,12 @@ async fn confirm_download(
     Form(body): Form<ConfirmBody>,
 ) -> Response {
     let result = match parse_media_type(&body.media_type) {
-        Ok(t) => state.downloads.confirm(body.preview_id, Some(t)).await,
+        Ok(t) => {
+            state
+                .downloads
+                .confirm(body.preview_id, Some(t), body.password.as_deref())
+                .await
+        }
         Err(e) => Err(e),
     };
     match result {
