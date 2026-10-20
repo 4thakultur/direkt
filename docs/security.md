@@ -74,6 +74,11 @@ only as JPEG or PNG, and served to the browser from Direkt's own cache. At
 most four previews and two metadata lookups run at once. See
 [artwork.md](artwork.md).
 
+When signed in to 1fichier, Direkt submits forms it reads from 1fichier's
+pages (sign-in, two-factor code, file password) with the session cookie and
+passwords. It only submits a form whose target is on the same site as the
+page it came from.
+
 ## Files on disk
 
 The data directory (`storage.data_dir`) holds the database and the setup
@@ -102,7 +107,9 @@ Every response carries a strict Content-Security-Policy (no inline scripts,
 styles, or `eval`), `X-Frame-Options: DENY`, `nosniff`, and
 `Referrer-Policy: no-referrer`. API and page responses are `no-store`.
 Cookie-authenticated requests that change state must come from the same
-origin.
+origin, and so must login and setup form submissions: another site cannot
+sign a visitor in to an account of its choosing, or use up their sign-in
+attempts to lock them out.
 
 ## Remote access
 

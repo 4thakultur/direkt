@@ -634,6 +634,48 @@ async fn cross_site_cookie_requests_are_rejected() {
     assert_eq!(r.status, StatusCode::OK);
 }
 
+#[tokio::test]
+async fn cross_site_login_attempts_are_rejected_without_counting() {
+    let (app, _) = TestApp::with_admin().await;
+    let form = format!("username=admin&password={PASSWORD}");
+    // Far more than the limiter allows: none of them may count.
+    for _ in 0..10 {
+        let r = app
+            .post_form(
+                "/login",
+                &[("sec-fetch-site", "cross-site")],
+                "username=admin&password=wrong+password",
+            )
+            .await;
+        assert_eq!(r.status, StatusCode::FORBIDDEN);
+    }
+    let r = app
+        .post_form(
+            "/login",
+            &[("origin", "https://evil.example"), ("host", "direkt.lan")],
+            &form,
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::FORBIDDEN, "no login CSRF");
+    let r = app
+        .post_form(
+            "/setup",
+            &[("sec-fetch-site", "cross-site")],
+            "setup_token=x&username=a&password=b&password_confirm=b",
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::FORBIDDEN);
+
+    let r = app
+        .post_form("/login", &[("sec-fetch-site", "same-origin")], &form)
+        .await;
+    assert_eq!(
+        r.status,
+        StatusCode::SEE_OTHER,
+        "the real user is not locked out"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Downloads API
 // ---------------------------------------------------------------------------

@@ -157,10 +157,8 @@ impl Website {
             return Ok(LoginOutcome::Session(session));
         }
         if let Some(form) = find_form(&page.body, |f| f.has_input("tfa")) {
-            let action = page
-                .url
-                .join(form.action.as_deref().unwrap_or(""))
-                .map_err(|_| unexpected_login_page())?;
+            let action = form_target(&page.url, form.action.as_deref().unwrap_or(""))
+                .ok_or_else(unexpected_login_page)?;
             return Ok(LoginOutcome::TwoFactor(PendingTwoFactor {
                 action,
                 fields: form.fields_except(&["tfa"]),
@@ -269,7 +267,9 @@ impl Website {
                 .map(|(k, v)| (k.as_str(), v.as_str()))
                 .collect();
             let action = match form.action.as_deref() {
-                Some(a) if !a.is_empty() => page.url.join(a).unwrap_or(post_url),
+                Some(a) if !a.is_empty() => {
+                    form_target(&page.url, a).ok_or_else(unexpected_file_page)?
+                }
                 _ => post_url,
             };
             let reply = self
@@ -488,6 +488,22 @@ fn set_cookies(headers: &HeaderMap) -> Vec<(String, Option<String>)> {
             Some((name.to_owned(), (!deleted).then(|| value.to_owned())))
         })
         .collect()
+}
+
+/// The URL a form on `page` submits to, if it stays on the same site. The
+/// form gets the session cookie and a password, so a form pointing anywhere
+/// else (an injected or tampered page) is never followed.
+fn form_target(page: &Url, action: &str) -> Option<Url> {
+    let target = page.join(action).ok()?;
+    (target.origin() == page.origin()).then_some(target)
+}
+
+fn unexpected_file_page() -> TransferError {
+    TransferError::retry_after(
+        ErrorKind::ProviderRestricted,
+        "1fichier returned an unexpected file page",
+        Some(Duration::from_secs(5 * 60)),
+    )
 }
 
 fn unexpected_login_page() -> TransferError {
@@ -830,6 +846,30 @@ mod tests {
             location: None,
             cookies: Vec::new(),
             body: body.to_owned(),
+        }
+    }
+
+    #[test]
+    fn forms_only_submit_to_the_same_site() {
+        let page = Url::parse("https://1fichier.com/?abcde").unwrap();
+        let ok = |a: &str| form_target(&page, a).map(|u| u.to_string());
+        assert_eq!(ok(""), Some("https://1fichier.com/?abcde".into()));
+        assert_eq!(
+            ok("/login.pl"),
+            Some("https://1fichier.com/login.pl".into())
+        );
+        assert_eq!(
+            ok("?abcde&x=1"),
+            Some("https://1fichier.com/?abcde&x=1".into())
+        );
+        for foreign in [
+            "https://evil.example/steal",
+            "//evil.example/steal",
+            "http://1fichier.com/login.pl",
+            "https://1fichier.com:8443/login.pl",
+            "https://sub.1fichier.com/login.pl",
+        ] {
+            assert_eq!(ok(foreign), None, "{foreign}");
         }
     }
 

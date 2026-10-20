@@ -43,7 +43,7 @@ pub fn router(state: AppState) -> Router {
 
     Router::new()
         .merge(protected)
-        .merge(ui::public_routes())
+        .merge(ui::public_routes().route_layer(middleware::from_fn(reject_cross_site)))
         .route("/healthz", get(health))
         .route("/api/openapi.json", get(api::openapi_json))
         .fallback(not_found)
@@ -91,15 +91,7 @@ async fn require_auth(State(state): State<AppState>, request: Request, next: Nex
     if let Some(session) = read_cookie(request.headers(), SESSION_COOKIE) {
         match state.auth.session_valid(session).await {
             Ok(true) => {
-                if !same_origin(request.method(), request.headers()) {
-                    tracing::warn!(path = %request.uri().path(), "rejected cross-site request");
-                    return ApiError::from(AppError::new(
-                        ErrorKind::Forbidden,
-                        "cross-site request rejected",
-                    ))
-                    .into_response();
-                }
-                return next.run(request).await;
+                return reject_cross_site(request, next).await;
             }
             Ok(false) => {}
             Err(e) => return ApiError::from(e).into_response(),
@@ -117,6 +109,22 @@ fn unauthenticated(request: &Request, message: &str) -> Response {
         return (StatusCode::UNAUTHORIZED, [("hx-redirect", "/login")]).into_response();
     }
     Redirect::to("/login").into_response()
+}
+
+/// Refuse state-changing requests that a browser sent from another site.
+/// Guards cookie-authenticated requests, and also the login and setup forms,
+/// so another site cannot make a visitor's browser use up their sign-in
+/// attempts (locking them out) or sign them in to an attacker's session.
+async fn reject_cross_site(request: Request, next: Next) -> Response {
+    if !same_origin(request.method(), request.headers()) {
+        tracing::warn!(path = %request.uri().path(), "rejected cross-site request");
+        return ApiError::from(AppError::new(
+            ErrorKind::Forbidden,
+            "cross-site request rejected",
+        ))
+        .into_response();
+    }
+    next.run(request).await
 }
 
 /// Defence in depth against CSRF for cookie-authenticated requests, on top of
