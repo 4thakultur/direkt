@@ -26,7 +26,8 @@ const MAX_LIMIT: i64 = 500;
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/downloads", get(list_downloads).post(create_download))
-        .route("/downloads/{id}", get(get_download))
+        .route("/downloads/cancelled", delete(delete_cancelled_downloads))
+        .route("/downloads/{id}", get(get_download).delete(delete_download))
         .route("/downloads/{id}/events", get(download_events))
         .route("/downloads/{id}/pause", post(pause_download))
         .route("/downloads/{id}/resume", post(resume_download))
@@ -457,6 +458,39 @@ async fn cancel_download(
     )))
 }
 
+/// Delete a cancelled download and its event history.
+#[utoipa::path(
+    delete, path = "/api/v1/downloads/{id}", tag = "downloads",
+    params(("id" = Uuid, Path, description = "Download ID")),
+    responses(
+        (status = 204, description = "Deleted"),
+        (status = 404, body = ErrorBody),
+        (status = 409, description = "Not cancelled", body = ErrorBody),
+    )
+)]
+async fn delete_download(
+    State(state): State<AppState>,
+    ApiPath(id): ApiPath<Uuid>,
+) -> ApiResult<StatusCode> {
+    state.downloads.delete(id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Serialize, ToSchema)]
+struct Deleted {
+    deleted: usize,
+}
+
+/// Delete every cancelled download and its event history.
+#[utoipa::path(
+    delete, path = "/api/v1/downloads/cancelled", tag = "downloads",
+    responses((status = 200, body = Deleted))
+)]
+async fn delete_cancelled_downloads(State(state): State<AppState>) -> ApiResult<Json<Deleted>> {
+    let deleted = state.downloads.delete_cancelled().await?;
+    Ok(Json(Deleted { deleted }))
+}
+
 /// Re-queue a failed, blocked, or cancelled download. The optional body sets
 /// a new download password first (e.g. after "password required").
 #[utoipa::path(
@@ -714,7 +748,8 @@ async fn sign_out_onefichier(State(state): State<AppState>) -> ApiResult<Json<On
     ),
     paths(
         create_download, create_preview, retype_preview, list_downloads, get_download, download_events,
-        pause_download, resume_download, cancel_download, retry_download, get_stats,
+        pause_download, resume_download, cancel_download, retry_download,
+        delete_download, delete_cancelled_downloads, get_stats,
         list_tokens, create_token, revoke_token,
         get_onefichier, put_onefichier, delete_onefichier,
         sign_in_onefichier, sign_out_onefichier, refresh_onefichier_cdn,

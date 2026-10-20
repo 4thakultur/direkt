@@ -64,6 +64,7 @@ pub fn protected_routes() -> Router<AppState> {
         .route("/ui/previews/{id}/type", post(retype_preview))
         .route("/ui/downloads", post(confirm_download))
         .route("/ui/downloads/{id}/detail", get(detail_fragment))
+        .route("/ui/cancelled/delete", post(delete_cancelled))
         .route("/ui/downloads/{id}/{action}", post(download_action))
 }
 
@@ -181,12 +182,12 @@ struct DownloadView {
     can_resume: bool,
     can_retry: bool,
     can_cancel: bool,
+    /// Offered on the dashboard only: the detail page would outlive the row.
+    can_delete: bool,
     /// Downloading without a known size: show an indeterminate bar.
     indeterminate: bool,
     /// Short label on the cover tile, e.g. the file extension.
     badge: String,
-    /// Cover tile color, `0..TILE_HUES`.
-    hue: u8,
     /// Cached artwork id, shown instead of the badge.
     artwork: Option<String>,
     /// The type chosen at confirmation, e.g. "TV series".
@@ -196,9 +197,6 @@ struct DownloadView {
     /// When it finished, for the completed list.
     finished: Option<String>,
 }
-
-/// Number of `.hue-N` cover tile colors in the stylesheet.
-const TILE_HUES: u128 = 8;
 
 /// The file extension in capitals if it looks like one, else `FILE`.
 fn tile_badge(name: &str) -> String {
@@ -268,7 +266,6 @@ impl DownloadView {
             title: d.title,
             id: d.id.to_string(),
             badge: tile_badge(&name),
-            hue: (d.id.as_u128() % TILE_HUES) as u8,
             indeterminate: d.state == Downloading && percent.is_none(),
             finished: d.completed_at.map(|t| human_ago(t, Utc::now())),
             name,
@@ -291,6 +288,7 @@ impl DownloadView {
             can_resume: d.state == Paused,
             can_retry: matches!(d.state, Failed | Blocked | Cancelled),
             can_cancel: matches!(d.state, Queued | Downloading | Retrying | Paused | Blocked),
+            can_delete: d.state == Cancelled,
         }
     }
 }
@@ -564,6 +562,8 @@ struct Group {
     rows: Vec<DownloadView>,
     /// The list was cut at its limit; older entries exist.
     truncated: bool,
+    /// Offers "Delete all" (the cancelled list).
+    clearable: bool,
 }
 
 #[derive(Template)]
@@ -605,7 +605,6 @@ struct PreviewView {
     size: String,
     artwork: Option<String>,
     badge: String,
-    hue: u8,
     types: Vec<TypeOption>,
     notes: Vec<String>,
 }
@@ -638,7 +637,6 @@ impl From<Preview> for PreviewView {
         };
         Self {
             badge: tile_badge(&name),
-            hue: (p.id.as_u128() % TILE_HUES) as u8,
             id: p.id.to_string(),
             heading,
             filename,
@@ -724,6 +722,7 @@ async fn load_dashboard(state: &AppState) -> Dashboard {
     .into_iter()
     .filter(|(_, rows, _)| !rows.is_empty())
     .map(|(title, rows, truncated)| Group {
+        clearable: title == "Cancelled",
         title,
         rows,
         truncated,
@@ -863,6 +862,7 @@ async fn download_action(
         "resume" => service.resume(id).await.map(|_| "Resumed"),
         "retry" => service.retry(id, None).await.map(|_| "Queued for retry"),
         "cancel" => service.cancel(id).await.map(|_| "Cancelled"),
+        "delete" => service.delete(id).await.map(|()| "Deleted"),
         _ => Err(AppError::not_found("unknown action")),
     };
     match result {
@@ -878,6 +878,29 @@ async fn download_action(
             },
         )),
     }
+}
+
+async fn delete_cancelled(State(state): State<AppState>) -> Response {
+    let (status, flash) = match state.downloads.delete_cancelled().await {
+        Ok(n) => (
+            StatusCode::OK,
+            Flash {
+                ok: true,
+                message: format!(
+                    "Deleted {n} cancelled download{}",
+                    if n == 1 { "" } else { "s" }
+                ),
+            },
+        ),
+        Err(e) => (
+            status_for(&e),
+            Flash {
+                ok: false,
+                message: e.message,
+            },
+        ),
+    };
+    with_refresh(render_status(status, &flash))
 }
 
 #[derive(Template)]
@@ -901,8 +924,10 @@ async fn load_detail(
     let download = state.downloads.get(id).await?;
     let events = state.downloads.events(id).await?;
     let live = state.downloads.live(id);
+    let mut view = DownloadView::new(download, live);
+    view.can_delete = false;
     Ok((
-        DownloadView::new(download, live),
+        view,
         events.into_iter().rev().map(EventView::from).collect(),
     ))
 }

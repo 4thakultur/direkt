@@ -417,6 +417,28 @@ impl Store {
         Ok(result.rows_affected() == 1)
     }
 
+    /// Delete a cancelled download and its event history. Returns whether a
+    /// row was deleted; downloads in any other state are left alone.
+    pub async fn delete_cancelled(&self, id: Uuid) -> AppResult<bool> {
+        let result = sqlx::query("DELETE FROM downloads WHERE id = ?1 AND state = 'cancelled'")
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    /// Delete every cancelled download and its event history. Returns the
+    /// deleted ids.
+    pub async fn delete_all_cancelled(&self) -> AppResult<Vec<Uuid>> {
+        let ids: Vec<String> =
+            sqlx::query_scalar("DELETE FROM downloads WHERE state = 'cancelled' RETURNING id")
+                .fetch_all(&self.pool)
+                .await?;
+        ids.iter()
+            .map(|id| Uuid::parse_str(id).map_err(|_| corrupt("invalid download id")))
+            .collect()
+    }
+
     /// Record the final destination before the completed file is moved there.
     pub async fn set_file_path(&self, id: Uuid, path: &str, now: DateTime<Utc>) -> AppResult<bool> {
         let result = sqlx::query(
@@ -1025,6 +1047,30 @@ mod tests {
         let both = s.list_downloads(&[Paused, Queued], 50, 0).await.unwrap();
         assert_eq!(both.len(), 2);
         assert!(s.list_downloads(&[Failed], 50, 0).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn only_cancelled_downloads_are_deleted() {
+        let s = store().await;
+        let a = s.insert_download(new_dl("a"), t(0)).await.unwrap();
+        let b = s.insert_download(new_dl("b"), t(0)).await.unwrap();
+        let c = s.insert_download(new_dl("c"), t(0)).await.unwrap();
+        for id in [a.id, b.id] {
+            s.transition(id, Queued, Cancelled, TransitionDetails::default(), t(1))
+                .await
+                .unwrap();
+        }
+
+        assert!(!s.delete_cancelled(c.id).await.unwrap(), "queued is kept");
+        assert!(s.delete_cancelled(a.id).await.unwrap());
+        assert!(!s.delete_cancelled(a.id).await.unwrap());
+        assert!(s.get_download(a.id).await.unwrap().is_none());
+        assert!(s.list_events(a.id).await.unwrap().is_empty());
+
+        assert_eq!(s.delete_all_cancelled().await.unwrap(), [b.id]);
+        assert!(s.delete_all_cancelled().await.unwrap().is_empty());
+        let left = s.list_downloads(&[], 50, 0).await.unwrap();
+        assert_eq!(left.iter().map(|d| d.id).collect::<Vec<_>>(), [c.id]);
     }
 
     #[cfg(unix)]

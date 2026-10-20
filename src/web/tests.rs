@@ -302,6 +302,7 @@ async fn openapi_document_is_valid() {
         "/api/v1/downloads/{id}/resume",
         "/api/v1/downloads/{id}/cancel",
         "/api/v1/downloads/{id}/retry",
+        "/api/v1/downloads/cancelled",
         "/api/v1/stats",
         "/api/v1/tokens",
         "/api/v1/tokens/{id}",
@@ -770,6 +771,77 @@ async fn invalid_requests_get_actionable_errors() {
 // ---------------------------------------------------------------------------
 // UI
 // ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn only_cancelled_downloads_can_be_deleted() {
+    let (app, cookie) = TestApp::with_admin().await;
+    let auth = cookie_header(&cookie);
+    let mut ids = Vec::new();
+    for n in 0..3 {
+        let r = app
+            .post_json(
+                "/api/v1/downloads",
+                &auth,
+                serde_json::json!({"url": format!("https://example.com/{n}")}),
+            )
+            .await;
+        ids.push(r.json()["id"].as_str().unwrap().to_owned());
+    }
+    let delete = |uri: String| {
+        let mut builder = HttpRequest::delete(uri);
+        for (k, v) in &auth {
+            builder = builder.header(*k, *v);
+        }
+        app.send(builder.body(Body::empty()).unwrap())
+    };
+
+    let r = delete(format!("/api/v1/downloads/{}", ids[0])).await;
+    assert_eq!(r.status, StatusCode::CONFLICT, "queued downloads are kept");
+    assert!(r.body.contains("only cancelled"), "{}", r.body);
+
+    for id in &ids[..2] {
+        app.post_json(
+            &format!("/api/v1/downloads/{id}/cancel"),
+            &auth,
+            Value::Null,
+        )
+        .await;
+    }
+    let r = delete(format!("/api/v1/downloads/{}", ids[0])).await;
+    assert_eq!(r.status, StatusCode::NO_CONTENT);
+    let r = app
+        .get(&format!("/api/v1/downloads/{}", ids[0]), &auth)
+        .await;
+    assert_eq!(r.status, StatusCode::NOT_FOUND);
+
+    // The dashboard offers both buttons; the UI endpoint clears the rest.
+    let dash = app.get("/ui/dashboard", &auth).await;
+    assert!(dash.body.contains("/ui/cancelled/delete"), "{}", dash.body);
+    assert!(
+        dash.body
+            .contains(&format!("/ui/downloads/{}/delete", ids[1]))
+    );
+    let r = app.post_form("/ui/cancelled/delete", &auth, "").await;
+    assert_eq!(r.status, StatusCode::OK);
+    assert!(
+        r.body.contains("Deleted 1 cancelled download<"),
+        "{}",
+        r.body
+    );
+    assert_eq!(r.header("hx-trigger"), "downloads-changed");
+
+    let r = delete("/api/v1/downloads/cancelled".into()).await;
+    assert_eq!(r.json()["deleted"], 0);
+    let r = app.get("/api/v1/downloads", &auth).await;
+    let left = r.json();
+    let left: Vec<_> = left["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d["id"].clone())
+        .collect();
+    assert_eq!(left, [Value::from(ids[2].clone())]);
+}
 
 #[tokio::test]
 async fn ui_submit_and_actions() {

@@ -1,5 +1,5 @@
 <section class="hero state-{{ d.state }}">
-  <a class="art art-lg hue-{{ d.hue }}{% if d.artwork.is_some() %} has-art{% endif %}" href="/downloads/{{ d.id }}" tabindex="-1" aria-hidden="true">{% if let Some(art) = d.artwork %}<img src="/artwork/{{ art }}" alt="" decoding="async">{% else %}<span>{{ d.badge }}</span>{% endif %}</a>
+  <a class="art art-lg" href="/downloads/{{ d.id }}" tabindex="-1" aria-hidden="true">{% if let Some(art) = d.artwork %}<img src="/artwork/{{ art }}" alt="" decoding="async">{% else %}<span>{{ d.badge }}</span>{% endif %}</a>
   <div class="hero-body">
     <div class="hero-head">
       <div class="hero-title">

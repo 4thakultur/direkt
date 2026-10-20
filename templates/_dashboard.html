@@ -38,7 +38,10 @@
 
 {% for group in groups %}
 <section class="group">
-  <h2 class="group-title">{{ group.title }} <span class="count">{{ group.rows.len() }}{% if group.truncated %}+{% endif %}</span></h2>
+  <div class="group-head">
+    <h2 class="group-title">{{ group.title }} <span class="count">{{ group.rows.len() }}{% if group.truncated %}+{% endif %}</span></h2>
+    {% if group.clearable %}<button class="link danger" hx-post="/ui/cancelled/delete" hx-target="#flash" hx-confirm="Delete all cancelled downloads from the list?">Delete all</button>{% endif %}
+  </div>
   <ul class="rows">
   {% for d in group.rows %}{% include "_row.html" %}{% endfor %}
   </ul>

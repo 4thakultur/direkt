@@ -380,6 +380,44 @@ impl DownloadService {
             .await
     }
 
+    /// Delete a cancelled download and its history. Other states are refused,
+    /// so a running or finished download can't be dropped by accident.
+    pub async fn delete(&self, id: Uuid) -> AppResult<()> {
+        let download = self.get(id).await?;
+        if download.state != TransferState::Cancelled {
+            return Err(AppError::conflict(format!(
+                "only cancelled downloads can be deleted; this one is {}",
+                download.state.as_str()
+            )));
+        }
+        if !self.store.delete_cancelled(id).await? {
+            return Err(AppError::conflict(
+                "the download changed state; refresh and try again",
+            ));
+        }
+        self.forget_partial(id).await;
+        tracing::info!(%id, "cancelled download deleted by user");
+        Ok(())
+    }
+
+    /// Delete every cancelled download. Returns how many were deleted.
+    pub async fn delete_cancelled(&self) -> AppResult<usize> {
+        let ids = self.store.delete_all_cancelled().await?;
+        for &id in &ids {
+            self.forget_partial(id).await;
+        }
+        tracing::info!(count = ids.len(), "cancelled downloads deleted by user");
+        Ok(ids.len())
+    }
+
+    /// Cancelling already removes partial data; this catches a leftover from
+    /// a failed removal. The row is gone, so a failure here is only logged.
+    async fn forget_partial(&self, id: Uuid) {
+        if let Err(e) = self.engine.remove_partial(id).await {
+            tracing::warn!(%id, error = %e, "could not remove partial file of deleted download");
+        }
+    }
+
     /// Resume a paused download.
     pub async fn resume(&self, id: Uuid) -> AppResult<Download> {
         self.requeue(id, &[TransferState::Paused], "resume").await
