@@ -8,6 +8,7 @@
 
 use crate::config::{Secret, validate_onefichier_key};
 use crate::error::{AppError, AppResult};
+use crate::providers::{AccountView, OneFichierAccount, SignInOutcome};
 use crate::store::Store;
 use chrono::Utc;
 use serde::Serialize;
@@ -58,6 +59,9 @@ pub enum KeySource {
 /// The 1fichier API key as shown to users: never the key itself.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, utoipa::ToSchema)]
 pub struct OneFichierSettings {
+    /// The signed-in account, used in preference to the API key.
+    pub account: AccountView,
+    /// Whether an API key is configured.
     pub configured: bool,
     /// `SECRET_MASK` when configured, otherwise absent.
     pub api_key: Option<String>,
@@ -71,12 +75,17 @@ pub struct SettingsService {
     store: Store,
     onefichier_key: SecretCell,
     env_locked: bool,
+    onefichier_account: Arc<OneFichierAccount>,
 }
 
 impl SettingsService {
     /// Load settings. `env_key` is the key from the environment, if any; it
     /// takes precedence over the stored one.
-    pub async fn load(store: Store, env_key: Option<Secret>) -> AppResult<Self> {
+    pub async fn load(
+        store: Store,
+        env_key: Option<Secret>,
+        onefichier_account: Arc<OneFichierAccount>,
+    ) -> AppResult<Self> {
         let env_locked = env_key.is_some();
         let key = match env_key {
             Some(key) => Some(key),
@@ -86,6 +95,7 @@ impl SettingsService {
             store,
             onefichier_key: SecretCell::new(key),
             env_locked,
+            onefichier_account,
         })
     }
 
@@ -97,6 +107,7 @@ impl SettingsService {
     pub fn onefichier(&self) -> OneFichierSettings {
         let configured = self.onefichier_key.get().is_some();
         OneFichierSettings {
+            account: self.onefichier_account.view(),
             configured,
             api_key: configured.then(|| SECRET_MASK.to_owned()),
             source: match (configured, self.env_locked) {
@@ -128,6 +139,26 @@ impl SettingsService {
         Ok(self.onefichier())
     }
 
+    /// Sign in to 1fichier. Returns whether a two-factor code is needed to
+    /// complete the sign-in.
+    pub async fn sign_in_onefichier(
+        &self,
+        email: &str,
+        password: &str,
+        code: Option<&str>,
+    ) -> AppResult<bool> {
+        let outcome = self
+            .onefichier_account
+            .sign_in(email, password, code)
+            .await?;
+        Ok(matches!(outcome, SignInOutcome::TwoFactorRequired))
+    }
+
+    pub async fn sign_out_onefichier(&self) -> AppResult<OneFichierSettings> {
+        self.onefichier_account.sign_out().await?;
+        Ok(self.onefichier())
+    }
+
     fn ensure_editable(&self) -> AppResult<()> {
         if self.env_locked {
             return Err(AppError::conflict(format!(
@@ -146,10 +177,34 @@ mod tests {
 
     const KEY: &str = "AbCdEfGhIjKlMnOpQrStUvWxYz012345";
 
+    async fn account(store: &Store) -> Arc<OneFichierAccount> {
+        Arc::new(
+            OneFichierAccount::load(
+                store.clone(),
+                crate::providers::Website::new(
+                    crate::http_client::build_no_redirect_client(
+                        Default::default(),
+                        crate::providers::BROWSER_USER_AGENT,
+                    )
+                    .unwrap(),
+                    crate::providers::Throttle::new(std::time::Duration::ZERO),
+                ),
+            )
+            .await
+            .unwrap(),
+        )
+    }
+
+    async fn load(store: &Store, env: Option<Secret>) -> SettingsService {
+        SettingsService::load(store.clone(), env, account(store).await)
+            .await
+            .unwrap()
+    }
+
     #[tokio::test]
     async fn key_is_stored_masked_and_applied_live() {
         let store = Store::open_in_memory().await.unwrap();
-        let settings = SettingsService::load(store.clone(), None).await.unwrap();
+        let settings = load(&store, None).await;
         let cell = settings.onefichier_key();
         assert_eq!(settings.onefichier().source, KeySource::None);
         assert!(cell.get().is_none());
@@ -168,7 +223,7 @@ mod tests {
         assert!(!format!("{shown:?}{cell:?}").contains(KEY));
 
         // Survives a restart.
-        let reloaded = SettingsService::load(store.clone(), None).await.unwrap();
+        let reloaded = load(&store, None).await;
         assert_eq!(reloaded.onefichier_key().get().unwrap().expose(), KEY);
 
         let err = settings.set_onefichier_key("not a key").await.unwrap_err();
@@ -181,14 +236,7 @@ mod tests {
 
         settings.clear_onefichier_key().await.unwrap();
         assert!(cell.get().is_none());
-        assert!(
-            SettingsService::load(store, None)
-                .await
-                .unwrap()
-                .onefichier_key()
-                .get()
-                .is_none()
-        );
+        assert!(load(&store, None).await.onefichier_key().get().is_none());
     }
 
     #[tokio::test]
@@ -198,9 +246,7 @@ mod tests {
             .set_setting(ONEFICHIER_KEY, "StoredKey_0123456789abcdef", Utc::now())
             .await
             .unwrap();
-        let settings = SettingsService::load(store, Some(Secret::new(KEY)))
-            .await
-            .unwrap();
+        let settings = load(&store, Some(Secret::new(KEY))).await;
         assert_eq!(settings.onefichier_key().get().unwrap().expose(), KEY);
         let shown = settings.onefichier();
         assert_eq!(shown.source, KeySource::Environment);

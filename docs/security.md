@@ -39,12 +39,15 @@ Restart Direkt and complete setup again.
 
 ## Provider credentials
 
-Provider API keys (currently 1fichier) are entered on the Settings page, or
-supplied as environment variables, which take precedence. They are stored in
-the database in plain text, like a configuration file would hold them, so
-restrict access to `data_dir` and to its backups. Once saved, a key is never
-shown again (the UI displays `************************`), returned by the API,
-or written to the logs.
+Provider credentials (the 1fichier API key, or the 1fichier account email,
+password and session) are entered on the Settings page. The API key can
+instead come from an environment variable, which takes precedence. They are
+stored in the database in plain text so that Direkt can sign
+in again unattended. Restrict access to `data_dir` and its backups. If the
+database leaks, the 1fichier password leaks too: use a password that isn't
+used anywhere else. Once saved, keys and passwords are never shown again (the
+UI displays `************************`), returned by the API, or written to the
+logs.
 
 ## Browser hardening
 

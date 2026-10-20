@@ -69,9 +69,7 @@ impl Resolve for PolicyResolver {
 
 pub fn build_client(policy: NetworkPolicy) -> reqwest::Result<Client> {
     let redirect_policy = policy.clone();
-    Client::builder()
-        .dns_resolver(PolicyResolver { policy })
-        .no_proxy()
+    base_builder(policy)
         .redirect(redirect::Policy::custom(move |attempt| {
             if attempt.previous().len() >= MAX_REDIRECTS {
                 return attempt.error(TooManyRedirects);
@@ -81,10 +79,29 @@ pub fn build_client(policy: NetworkPolicy) -> reqwest::Result<Client> {
                 Err(e) => attempt.error(e),
             }
         }))
-        .connect_timeout(CONNECT_TIMEOUT)
-        .read_timeout(READ_TIMEOUT)
         .user_agent(concat!("Direkt/", env!("CARGO_PKG_VERSION")))
         .build()
+}
+
+/// Like [`build_client`], but redirects are returned to the caller instead of
+/// followed (for site flows that read the `Location` header). `user_agent`
+/// lets site integrations present a browser user agent.
+pub fn build_no_redirect_client(
+    policy: NetworkPolicy,
+    user_agent: &str,
+) -> reqwest::Result<Client> {
+    base_builder(policy)
+        .redirect(redirect::Policy::none())
+        .user_agent(user_agent)
+        .build()
+}
+
+fn base_builder(policy: NetworkPolicy) -> reqwest::ClientBuilder {
+    Client::builder()
+        .dns_resolver(PolicyResolver { policy })
+        .no_proxy()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .read_timeout(READ_TIMEOUT)
 }
 
 /// Check a URL's scheme and, for IP-literal hosts, its address. Domain names

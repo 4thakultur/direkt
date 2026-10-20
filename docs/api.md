@@ -55,6 +55,8 @@ Every error uses the same body:
 | GET | `/api/v1/settings/onefichier` | Whether a 1fichier API key is configured, and its source. The key is shown only as `************************`. |
 | PUT | `/api/v1/settings/onefichier` | Set the key: `{"api_key": "…"}`. Returns `409` if it comes from `DIREKT_ONEFICHIER_API_KEY`. |
 | DELETE | `/api/v1/settings/onefichier` | Remove the stored key |
+| POST | `/api/v1/settings/onefichier/account` | Sign in to 1fichier: `{"email": "…", "password": "…", "code": "123456"}` (`code` only for two-factor accounts). Returns `two_factor_required: true` when a code is needed; repeat the request with `code` within 10 minutes. |
+| DELETE | `/api/v1/settings/onefichier/account` | Sign out and delete the stored email, password and session |
 
 Download passwords are write-only: no endpoint ever returns them.
 

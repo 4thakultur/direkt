@@ -39,6 +39,10 @@ pub fn routes() -> Router<AppState> {
                 .put(put_onefichier)
                 .delete(delete_onefichier),
         )
+        .route(
+            "/settings/onefichier/account",
+            post(sign_in_onefichier).delete(sign_out_onefichier),
+        )
 }
 
 type ApiResult<T> = Result<T, ApiError>;
@@ -444,6 +448,64 @@ async fn delete_onefichier(State(state): State<AppState>) -> ApiResult<Json<OneF
     Ok(Json(state.settings.clear_onefichier_key().await?))
 }
 
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct OneFichierSignIn {
+    /// Email address of the 1fichier account.
+    pub email: String,
+    /// Account password. Send `************************` to reuse the stored
+    /// password of the same account.
+    pub password: String,
+    /// Two-factor code (6 digits), for accounts that use 2FA. Can be sent with
+    /// the first request, or in a second request after
+    /// `two_factor_required` was returned.
+    pub code: Option<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct OneFichierSignInResult {
+    /// The sign-in is waiting for a two-factor code: repeat the request with
+    /// `code` within 10 minutes.
+    pub two_factor_required: bool,
+    pub settings: OneFichierSettings,
+}
+
+/// Sign in to 1fichier with email and password. Downloads then use the
+/// account instead of the API key. The password is stored so Direkt can sign
+/// in again when the session ends; it is never returned.
+#[utoipa::path(
+    post, path = "/api/v1/settings/onefichier/account", tag = "settings",
+    request_body = OneFichierSignIn,
+    responses(
+        (status = 200, body = OneFichierSignInResult),
+        (status = 400, description = "Missing or malformed input", body = ErrorBody),
+        (status = 422, description = "1fichier rejected the credentials or code", body = ErrorBody),
+        (status = 503, description = "1fichier is rate limiting sign-ins", body = ErrorBody),
+    )
+)]
+async fn sign_in_onefichier(
+    State(state): State<AppState>,
+    ApiJson(body): ApiJson<OneFichierSignIn>,
+) -> ApiResult<Json<OneFichierSignInResult>> {
+    let two_factor_required = state
+        .settings
+        .sign_in_onefichier(&body.email, &body.password, body.code.as_deref())
+        .await?;
+    Ok(Json(OneFichierSignInResult {
+        two_factor_required,
+        settings: state.settings.onefichier(),
+    }))
+}
+
+/// Sign out of 1fichier and forget the stored email, password and session.
+#[utoipa::path(
+    delete, path = "/api/v1/settings/onefichier/account", tag = "settings",
+    responses((status = 200, body = OneFichierSettings))
+)]
+async fn sign_out_onefichier(State(state): State<AppState>) -> ApiResult<Json<OneFichierSettings>> {
+    Ok(Json(state.settings.sign_out_onefichier().await?))
+}
+
 // ---------------------------------------------------------------------------
 // OpenAPI
 // ---------------------------------------------------------------------------
@@ -461,6 +523,7 @@ async fn delete_onefichier(State(state): State<AppState>) -> ApiResult<Json<OneF
         pause_download, resume_download, cancel_download, retry_download,
         list_tokens, create_token, revoke_token,
         get_onefichier, put_onefichier, delete_onefichier,
+        sign_in_onefichier, sign_out_onefichier,
     ),
     components(schemas(ErrorBody, ErrorKind)),
     modifiers(&SecuritySchemes),

@@ -1,30 +1,74 @@
 # 1fichier
 
-Direkt downloads 1fichier files with a **premium account** through the
-official API. This is the same method JDownloader uses in its "premium API"
-mode.
+Direkt downloads 1fichier files with a **premium account**. There are two ways
+to connect it, both under **Settings → 1fichier**:
 
-## Setup
+- **Account sign-in** with your 1fichier email and password. This works like
+  a browser session and is the same as JDownloader's account login.
+- **API key** for the official API, the same as JDownloader's "premium API"
+  mode.
+
+If both are set, downloads use the account.
+
+## Account sign-in
+
+1. Under **Settings → 1fichier → Account**, enter your email and password,
+   then click **Sign in**.
+2. If your account uses two-factor authentication, Direkt asks for the
+   6-digit code. Enter it and click **Sign in** again within 10 minutes. This
+   works for both authenticator-app and emailed codes.
+3. Settings then shows the account and the end date of its premium
+   subscription.
+
+What Direkt sends and keeps:
+
+- It posts the 1fichier login form with *long session* and *cookie for the
+  other 1fichier domains*. It never sends *delete all old sessions*, so your
+  browser sessions stay logged in.
+- It stores the email, the password and the session cookie in its database
+  (`<data_dir>/direkt.db`) in plain text. Storing the password lets Direkt sign
+  in again by itself when 1fichier ends the session. The password is never
+  shown again (the field displays `************************`), returned by the
+  API, or logged. Protect `data_dir` and its backups accordingly.
+- **Sign out** deletes the stored email, password and session.
+
+When the session ends:
+
+- Direkt signs in again with the stored credentials, once per download
+  attempt. Only one worker at a time does this; the others reuse the new
+  session.
+- If 1fichier rejects the stored credentials, Direkt stops trying, so it
+  doesn't trip 1fichier's lockout after repeated failures. Downloads wait in
+  *needs attention*, and the Settings page asks you to sign in again.
+- Accounts with two-factor authentication can't be signed in again
+  automatically. Their downloads wait until you sign in again under Settings.
+
+How a download works: Direkt opens the file page with the session. 1fichier
+redirects premium accounts to the direct link, or answers the page's download
+form (`did=0`, SSL download) with that redirect. For password-protected files,
+Direkt submits the page's password form. Pages are requested in English, and
+1fichier's error pages map to the same wait / needs attention / failed rules
+as the API (see the table below). Direkt sends at most one request per second
+to 1fichier, counting site and API requests together.
+
+1fichier's API documentation advises against cookie-based sign-in in
+programs. Sign-in therefore depends on 1fichier's web pages and can break
+when they change. The API key is the more stable fallback.
+
+## API key
 
 1. Log in on 1fichier.com and copy your API key from
    *My account → Settings → API key*. 1fichier gives API keys only to
    customers (Premium, Premium Light, Premium GOLD, Access, CDN).
-2. In Direkt, open **Settings → 1fichier**, paste the key, and click
+2. In Direkt, open **Settings → 1fichier → API key**, paste the key, and click
    **Save**. It takes effect on the next download attempt, with no restart
-   needed. Once saved, the field shows only `************************`. To
-   replace the key, clear the field and paste the new one. **Remove key**
-   deletes it.
+   needed. Once saved, the field shows only `************************`.
 
-   Alternatively, set the `DIREKT_ONEFICHIER_API_KEY` environment variable,
-   for example from a Docker secret or an `.env` file. If it's set, it takes
-   precedence, and the Settings field is shown locked.
+   Alternatively, set the `DIREKT_ONEFICHIER_API_KEY` environment variable.
+   If it's set, it takes precedence, and the Settings field is shown locked.
 
-The key is never logged, rendered in a page, or returned by the API, which
-only reports whether a key is configured and where it comes from. A key saved
-through Settings is stored in the database (`<data_dir>/direkt.db`), so
-protect backups of that directory. Without a key, 1fichier links are still
-accepted, but they stop in *needs attention* until a key is configured and you
-retry them.
+Without a sign-in or a key, 1fichier links are still accepted, but they stop
+in *needs attention* until you configure one and retry them.
 
 ## Supported links
 
@@ -52,7 +96,7 @@ curl -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
 1fichier answers "password required" for every kind of access-restricted
 file, not only password-protected ones.
 
-## How it works
+## How the API mode works
 
 Each attempt calls `POST https://api.1fichier.com/v1/download/get_token.cgi`
 once, with `{"url": "<link>", "pass": "<password>"}`. The response is a direct
@@ -94,10 +138,11 @@ limits too often ends up *failed* and can be retried by hand.
 
 ## Not supported
 
-- Free (non-premium) downloads. These need the website flow with wait timers,
-  and 1fichier allows API downloads only for customers.
-- Logging in with email and password (website cookies) as an alternative to
-  the API key.
+- Free (non-premium) downloads. These need wait timers and are refused for
+  API keys. A signed-in free account stops in *needs attention*.
+- Automatic re-sign-in for accounts with two-factor authentication.
+- Captchas on the sign-in page. JDownloader doesn't handle these either; if
+  1fichier asks for one, sign-in fails with an error.
 - 1fichier folder links.
 - Downloading `.html` files from 1fichier. An HTML response is treated as an
   error page.

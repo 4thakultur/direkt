@@ -40,6 +40,10 @@ pub fn status_for(kind: ErrorKind) -> StatusCode {
         ErrorKind::NotFound => StatusCode::NOT_FOUND,
         ErrorKind::Conflict => StatusCode::CONFLICT,
         ErrorKind::Persistence => StatusCode::SERVICE_UNAVAILABLE,
+        // A remote service (e.g. a file host during sign-in) refused or failed.
+        ErrorKind::AuthenticationFailed => StatusCode::UNPROCESSABLE_ENTITY,
+        ErrorKind::ProviderRestricted => StatusCode::SERVICE_UNAVAILABLE,
+        ErrorKind::Network | ErrorKind::RemoteUnavailable => StatusCode::BAD_GATEWAY,
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }

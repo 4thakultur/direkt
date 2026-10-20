@@ -43,6 +43,8 @@ pub fn protected_routes() -> Router<AppState> {
         .route("/settings/password", post(change_password))
         .route("/settings/onefichier", post(save_onefichier))
         .route("/settings/onefichier/remove", post(remove_onefichier))
+        .route("/settings/onefichier/sign-in", post(sign_in_onefichier))
+        .route("/settings/onefichier/sign-out", post(sign_out_onefichier))
         .route("/logout", post(logout))
         .route("/ui/rows", get(rows_fragment))
         .route("/ui/downloads", post(submit_download))
@@ -733,6 +735,42 @@ async fn save_onefichier(
                 |_| "1fichier API key saved. Retry any 1fichier downloads that need attention.",
             )
         };
+    settings_result(&state, result).await
+}
+
+#[derive(Deserialize)]
+struct SignInForm {
+    email: String,
+    password: String,
+    #[serde(default)]
+    code: Option<String>,
+}
+
+async fn sign_in_onefichier(
+    State(state): State<AppState>,
+    Form(form): Form<SignInForm>,
+) -> Response {
+    let result = state
+        .settings
+        .sign_in_onefichier(&form.email, &form.password, form.code.as_deref())
+        .await
+        .map(|two_factor_required| {
+            if two_factor_required {
+                "1fichier sent a two-factor request: enter the 6-digit code and sign in again \
+                 within 10 minutes."
+            } else {
+                "Signed in to 1fichier. Retry any 1fichier downloads that need attention."
+            }
+        });
+    settings_result(&state, result).await
+}
+
+async fn sign_out_onefichier(State(state): State<AppState>) -> Response {
+    let result = state
+        .settings
+        .sign_out_onefichier()
+        .await
+        .map(|_| "Signed out of 1fichier; the stored email and password were deleted.");
     settings_result(&state, result).await
 }
 

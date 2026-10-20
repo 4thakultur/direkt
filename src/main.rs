@@ -2,7 +2,7 @@ use direkt::auth::AuthService;
 use direkt::config::{Config, LogFormat};
 use direkt::engine::{Engine, EngineSettings};
 use direkt::net::NetworkPolicy;
-use direkt::providers::Providers;
+use direkt::providers::{OneFichierAccount, Providers};
 use direkt::service::DownloadService;
 use direkt::settings::SettingsService;
 use direkt::store::Store;
@@ -114,13 +114,24 @@ async fn serve(config: Config, config_path: &Path) -> anyhow::Result<()> {
     let env_onefichier_key =
         direkt::config::onefichier_key_from_env(|name| std::env::var(name).ok())
             .map_err(|e| anyhow::anyhow!("{e}"))?;
-    let settings = SettingsService::load(store.clone(), env_onefichier_key)
-        .await
-        .map_err(|e| anyhow::anyhow!("loading settings: {e}"))?;
-
     let policy = NetworkPolicy::new(config.network.allowed_private_networks.clone());
+    let onefichier_account = OneFichierAccount::open(store.clone(), policy.clone())
+        .await
+        .map_err(|e| anyhow::anyhow!("loading 1fichier account: {e}"))?;
+    let settings = SettingsService::load(
+        store.clone(),
+        env_onefichier_key,
+        onefichier_account.clone(),
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("loading settings: {e}"))?;
+
     let client = direkt::http_client::build_client(policy.clone())?;
-    let providers = Providers::standard(client.clone(), settings.onefichier_key());
+    let providers = Providers::standard(
+        client.clone(),
+        settings.onefichier_key(),
+        onefichier_account,
+    );
     let engine = Engine::new(
         store.clone(),
         providers.clone(),

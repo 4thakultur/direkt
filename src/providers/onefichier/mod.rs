@@ -1,6 +1,11 @@
-//! 1fichier.com premium downloads through the official API.
+//! 1fichier.com premium downloads.
 //!
-//! Each transfer attempt makes exactly one API call,
+//! Two ways to authenticate, configured under Settings:
+//! * **Account sign-in** (preferred when configured): email and password,
+//!   used like a browser session. See [`website`] and [`account`].
+//! * **API key** through the official API. See [`api`].
+//!
+//! API mode: each transfer attempt makes exactly one API call,
 //! `POST https://api.1fichier.com/v1/download/get_token.cgi`, authenticated
 //! with `Authorization: Bearer <API key>` and the body
 //! `{"url": "<file link>", "pass": "<password>"}`. The response carries a
@@ -23,15 +28,20 @@
 //! blocks, and the latter is limited to one call per 5 minutes per user.
 
 use super::{BoxFuture, Provider, ResolveRequest, ResolvedResource};
-use crate::config::Secret;
 use crate::error::{AppError, ErrorKind, TransferError};
-use crate::http_client::classify_reqwest_error;
 use crate::settings::SecretCell;
-use reqwest::StatusCode;
-use serde::Deserialize;
+use std::future::Future;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::Mutex;
 use url::Url;
+
+mod account;
+mod api;
+mod website;
+
+pub use account::{AccountView, OneFichierAccount, SignInOutcome};
+#[cfg(test)]
+pub(crate) use website::{BROWSER_USER_AGENT, Website};
 
 /// Every domain 1fichier serves file links on (official list, domain IDs 0-10).
 const DOMAINS: [&str; 11] = [
@@ -48,221 +58,78 @@ const DOMAINS: [&str; 11] = [
     "dl4free.com",
 ];
 
-const API_BASE: &str = "https://api.1fichier.com/v1/";
-/// Spacing between API calls. The documented limit is 3/s; 1fichier's admin
-/// told JDownloader developers that 1/s is fine.
-const DEFAULT_MIN_INTERVAL: Duration = Duration::from_secs(1);
-const API_TIMEOUT: Duration = Duration::from_secs(60);
-const MAX_RESPONSE_BYTES: usize = 64 * 1024;
+/// Spacing between requests to 1fichier (API and site). The documented API
+/// limit is 3/s; 1fichier's admin told JDownloader developers that 1/s is fine.
+pub(crate) const DEFAULT_MIN_INTERVAL: Duration = Duration::from_secs(1);
 const MAX_PASSWORD_CHARS: usize = 256;
 
-const FLOOD_WAIT: Duration = Duration::from_secs(5 * 60);
-const IP_LOCK_WAIT: Duration = Duration::from_secs(60 * 60);
-const UNKNOWN_ERROR_WAIT: Duration = Duration::from_secs(5 * 60);
+/// Serializes and spaces requests to a host.
+pub(crate) struct Throttle {
+    min_interval: Duration,
+    last: tokio::sync::Mutex<Option<Instant>>,
+}
+
+impl Throttle {
+    pub(crate) fn new(min_interval: Duration) -> Arc<Self> {
+        Arc::new(Self {
+            min_interval,
+            last: tokio::sync::Mutex::new(None),
+        })
+    }
+
+    /// Run `request` no sooner than `min_interval` after the previous one.
+    /// The lock is held across the request on purpose, so requests are
+    /// strictly sequential.
+    pub(crate) async fn run<T>(&self, request: impl Future<Output = T>) -> T {
+        let mut last = self.last.lock().await;
+        if let Some(previous) = *last {
+            tokio::time::sleep(self.min_interval.saturating_sub(previous.elapsed())).await;
+        }
+        let result = request.await;
+        *last = Some(Instant::now());
+        result
+    }
+}
 
 pub struct OneFichierProvider {
-    client: reqwest::Client,
+    api: api::ApiClient,
     /// Read on every attempt, so a key changed in the settings applies at once.
     api_key: SecretCell,
-    api_base: Url,
-    min_interval: Duration,
-    /// Time of the last API call. Held across the call itself so requests
-    /// are serialized and spaced, as the API's rate limit requires.
-    last_call: Mutex<Option<Instant>>,
+    account: Arc<OneFichierAccount>,
 }
 
 impl OneFichierProvider {
-    pub fn new(client: reqwest::Client, api_key: SecretCell) -> Self {
-        Self::with_endpoint(
-            client,
+    /// `api_client` is the policy-enforcing client that follows redirects.
+    pub fn new(
+        api_client: reqwest::Client,
+        api_key: SecretCell,
+        account: Arc<OneFichierAccount>,
+    ) -> Self {
+        Self::with_api_base(
+            api_client,
             api_key,
-            Url::parse(API_BASE).expect("constant URL"),
-            DEFAULT_MIN_INTERVAL,
+            account,
+            Url::parse(api::API_BASE).expect("constant URL"),
         )
     }
 
-    /// Use a different API endpoint and call spacing (tests).
-    pub(crate) fn with_endpoint(
-        client: reqwest::Client,
+    /// Use a different API endpoint (tests).
+    pub(crate) fn with_api_base(
+        api_client: reqwest::Client,
         api_key: SecretCell,
+        account: Arc<OneFichierAccount>,
         api_base: Url,
-        min_interval: Duration,
     ) -> Self {
         Self {
-            client,
+            api: api::ApiClient {
+                client: api_client,
+                base: api_base,
+                throttle: account.throttle(),
+            },
             api_key,
-            api_base,
-            min_interval,
-            last_call: Mutex::new(None),
+            account,
         }
     }
-
-    async fn get_token(
-        &self,
-        api_key: &Secret,
-        file_url: &Url,
-        password: Option<&str>,
-    ) -> Result<Url, TransferError> {
-        let mut body = serde_json::json!({ "url": file_url.as_str() });
-        if let Some(password) = password {
-            body["pass"] = password.into();
-        }
-        let endpoint = self
-            .api_base
-            .join("download/get_token.cgi")
-            .expect("relative path joins");
-
-        let mut last_call = self.last_call.lock().await;
-        if let Some(previous) = *last_call {
-            tokio::time::sleep(self.min_interval.saturating_sub(previous.elapsed())).await;
-        }
-        let result = self
-            .client
-            .post(endpoint)
-            .bearer_auth(api_key.expose())
-            .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .body(body.to_string())
-            .timeout(API_TIMEOUT)
-            .send()
-            .await;
-        *last_call = Some(Instant::now());
-        let response = result.map_err(|e| classify_reqwest_error(&e))?;
-        drop(last_call);
-
-        let status = response.status();
-        let bytes = read_limited(response).await?;
-        let parsed: Option<TokenResponse> = serde_json::from_slice(&bytes).ok();
-        match parsed {
-            Some(r) if r.status.eq_ignore_ascii_case("OK") => {
-                let link = r.url.as_deref().and_then(|u| Url::parse(u).ok());
-                match link {
-                    Some(link) if matches!(link.scheme(), "http" | "https") => Ok(link),
-                    _ => Err(TransferError::retry_after(
-                        ErrorKind::ProviderRestricted,
-                        "1fichier API returned no usable download link",
-                        Some(UNKNOWN_ERROR_WAIT),
-                    )),
-                }
-            }
-            Some(r) => Err(classify_api_error(status, r.message.as_deref())),
-            None => Err(classify_api_error(status, None)),
-        }
-    }
-}
-
-#[derive(Deserialize)]
-struct TokenResponse {
-    #[serde(default)]
-    status: String,
-    url: Option<String>,
-    message: Option<String>,
-}
-
-async fn read_limited(mut response: reqwest::Response) -> Result<Vec<u8>, TransferError> {
-    let mut body = Vec::new();
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|e| classify_reqwest_error(&e))?
-    {
-        if body.len() + chunk.len() > MAX_RESPONSE_BYTES {
-            return Err(TransferError::retry(
-                ErrorKind::Network,
-                "1fichier API response is too large",
-            ));
-        }
-        body.extend_from_slice(&chunk);
-    }
-    Ok(body)
-}
-
-/// Map a failed API call to an engine action. Order matters: more specific
-/// messages are checked before their substrings (e.g. "Flood detected: IP
-/// Locked" before "IP Locked").
-fn classify_api_error(status: StatusCode, message: Option<&str>) -> TransferError {
-    let raw = message.map(clean_message).unwrap_or_default();
-    let m = raw.to_ascii_lowercase();
-    let detail = if raw.is_empty() {
-        format!("HTTP {}", status.as_u16())
-    } else {
-        format!("1fichier: {raw}")
-    };
-    let has = |needle: &str| m.contains(needle);
-
-    if has("flood detected") || status == StatusCode::TOO_MANY_REQUESTS {
-        return TransferError::retry_after(
-            ErrorKind::ProviderRestricted,
-            format!("1fichier API rate limit reached; waiting before trying again ({detail})"),
-            Some(FLOOD_WAIT),
-        );
-    }
-    if has("not authenticated") || has("no such user") {
-        return TransferError::block(
-            ErrorKind::AuthenticationFailed,
-            format!("1fichier rejected the API key; check it under Settings ({detail})"),
-        );
-    }
-    if has("owner locked") {
-        return TransferError::block(
-            ErrorKind::AuthenticationFailed,
-            format!("the 1fichier account is locked ({detail})"),
-        );
-    }
-    if has("must be a customer") {
-        return TransferError::block(
-            ErrorKind::AuthenticationFailed,
-            format!("1fichier API downloads need an active premium subscription ({detail})"),
-        );
-    }
-    if has("password not provided") {
-        return TransferError::block(
-            ErrorKind::AuthenticationFailed,
-            "this 1fichier file is password protected or access restricted; retry with its password",
-        );
-    }
-    if has("invalid password") {
-        return TransferError::block(
-            ErrorKind::AuthenticationFailed,
-            "1fichier rejected the download password; retry with the correct password",
-        );
-    }
-    if has("ip locked") {
-        return TransferError::retry_after(
-            ErrorKind::ProviderRestricted,
-            format!("1fichier temporarily locked this IP address ({detail})"),
-            Some(IP_LOCK_WAIT),
-        );
-    }
-    if has("allowed at a time") {
-        return TransferError::retry_after(
-            ErrorKind::ProviderRestricted,
-            format!("the 1fichier account is in use from too many locations ({detail})"),
-            Some(FLOOD_WAIT),
-        );
-    }
-    if has("resource not allowed") {
-        return TransferError::fail(
-            ErrorKind::RemoteUnavailable,
-            format!("access to this 1fichier file is restricted by its owner ({detail})"),
-        );
-    }
-    if has("resource not found") || status == StatusCode::NOT_FOUND || status == StatusCode::GONE {
-        return TransferError::fail(
-            ErrorKind::RemoteUnavailable,
-            format!("file not found on 1fichier; it was deleted or the link is wrong ({detail})"),
-        );
-    }
-    if status.is_server_error() {
-        return TransferError::retry(
-            ErrorKind::Network,
-            format!("1fichier API is temporarily unavailable ({detail})"),
-        );
-    }
-    TransferError::retry_after(
-        ErrorKind::ProviderRestricted,
-        format!("1fichier API error ({detail})"),
-        Some(UNKNOWN_ERROR_WAIT),
-    )
 }
 
 /// Make a server-provided message safe and short enough to show to users.
@@ -330,13 +197,6 @@ impl Provider for OneFichierProvider {
         request: ResolveRequest<'a>,
     ) -> BoxFuture<'a, Result<ResolvedResource, TransferError>> {
         Box::pin(async move {
-            let Some(api_key) = self.api_key.get() else {
-                return Err(TransferError::block(
-                    ErrorKind::AuthenticationFailed,
-                    "1fichier downloads need a premium API key: add it under Settings \
-                     (or set DIREKT_ONEFICHIER_API_KEY), then retry",
-                ));
-            };
             if request
                 .password
                 .is_some_and(|p| p.chars().count() > MAX_PASSWORD_CHARS)
@@ -346,9 +206,21 @@ impl Provider for OneFichierProvider {
                     "download password is too long",
                 ));
             }
-            let link = self
-                .get_token(&api_key, request.url, request.password)
-                .await?;
+            let link = if self.account.is_signed_in() {
+                self.account
+                    .direct_link(request.url, request.password)
+                    .await?
+            } else if let Some(api_key) = self.api_key.get() {
+                self.api
+                    .get_token(&api_key, request.url, request.password)
+                    .await?
+            } else {
+                return Err(TransferError::block(
+                    ErrorKind::AuthenticationFailed,
+                    "1fichier downloads need a premium account: sign in under Settings \
+                     (or add an API key), then retry",
+                ));
+            };
             Ok(ResolvedResource {
                 url: link,
                 filename_hint: None,
@@ -361,18 +233,30 @@ impl Provider for OneFichierProvider {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::error::Disposition;
+    use api::{FLOOD_WAIT, IP_LOCK_WAIT, UNKNOWN_ERROR_WAIT, classify_api_error};
+    use reqwest::StatusCode;
 
-    fn provider() -> OneFichierProvider {
-        let client = crate::http_client::build_client(Default::default()).unwrap();
-        OneFichierProvider::new(client, SecretCell::default())
+    /// A provider with no sign-in and no API key.
+    pub(crate) async fn unconfigured_account() -> Arc<OneFichierAccount> {
+        let store = crate::store::Store::open_in_memory().await.unwrap();
+        let client =
+            crate::http_client::build_no_redirect_client(Default::default(), BROWSER_USER_AGENT)
+                .unwrap();
+        let website = Website::new(client, Throttle::new(Duration::ZERO));
+        Arc::new(OneFichierAccount::load(store, website).await.unwrap())
     }
 
-    #[test]
-    fn canonicalizes_file_links() {
-        let p = provider();
+    async fn provider() -> OneFichierProvider {
+        let client = crate::http_client::build_client(Default::default()).unwrap();
+        OneFichierProvider::new(client, SecretCell::default(), unconfigured_account().await)
+    }
+
+    #[tokio::test]
+    async fn canonicalizes_file_links() {
+        let p = provider().await;
         let c = |s: &str| {
             p.canonicalize(&Url::parse(s).unwrap())
                 .map(|u| u.to_string())
@@ -413,9 +297,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn matches_only_file_domains() {
-        let p = provider();
+    #[tokio::test]
+    async fn matches_only_file_domains() {
+        let p = provider().await;
         let m = |s: &str| p.matches(&Url::parse(s).unwrap());
         for domain in DOMAINS {
             assert!(m(&format!("https://{domain}/?abcde")), "{domain}");
@@ -505,7 +389,7 @@ mod tests {
 
     #[tokio::test]
     async fn missing_api_key_blocks_without_calling_the_api() {
-        let p = provider();
+        let p = provider().await;
         let url = Url::parse("https://1fichier.com/?abcde12345").unwrap();
         let err = p
             .resolve(ResolveRequest {

@@ -55,10 +55,15 @@ impl TestApp {
         let auth = AuthService::new(store.clone(), dir.path()).await.unwrap();
         let policy = NetworkPolicy::default();
         let client = crate::http_client::build_client(policy.clone()).unwrap();
-        let settings = crate::settings::SettingsService::load(store.clone(), env_onefichier_key)
-            .await
-            .unwrap();
-        let providers = Providers::standard(client.clone(), settings.onefichier_key());
+        let account = crate::providers::unconfigured_onefichier_account().await;
+        let settings = crate::settings::SettingsService::load(
+            store.clone(),
+            env_onefichier_key,
+            account.clone(),
+        )
+        .await
+        .unwrap();
+        let providers = Providers::standard(client.clone(), settings.onefichier_key(), account);
         let engine_settings = EngineSettings {
             download_dir: dir.path().join("dl"),
             incomplete_dir: dir.path().join("inc"),
@@ -214,6 +219,11 @@ async fn openapi_document_is_valid() {
     assert!(doc["components"]["schemas"]["DownloadDto"].is_object());
     assert!(doc["components"]["schemas"]["RetryDownload"].is_object());
     assert!(doc["paths"].get("/api/v1/settings/onefichier").is_some());
+    assert!(
+        doc["paths"]
+            .get("/api/v1/settings/onefichier/account")
+            .is_some()
+    );
     assert!(doc["components"]["schemas"]["CreateDownload"]["properties"]["password"].is_object());
 }
 
@@ -957,4 +967,68 @@ async fn environment_key_locks_the_setting() {
         )
         .await;
     assert_eq!(r.status, StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn onefichier_account_endpoints_validate_input() {
+    // Only inputs rejected before contacting 1fichier: these tests must never
+    // reach the real site.
+    let (app, cookie) = TestApp::with_admin().await;
+    let auth = cookie_header(&cookie);
+    let r = app.get("/api/v1/settings/onefichier", &auth).await;
+    assert_eq!(r.json()["account"]["signed_in"], false);
+
+    let r = app
+        .post_json(
+            "/api/v1/settings/onefichier/account",
+            &auth,
+            serde_json::json!({"email": "not-an-email", "password": "x"}),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST);
+    let r = app
+        .post_json(
+            "/api/v1/settings/onefichier/account",
+            &auth,
+            serde_json::json!({"email": "me@example.com", "password": crate::settings::SECRET_MASK}),
+        )
+        .await;
+    assert_eq!(
+        r.status,
+        StatusCode::BAD_REQUEST,
+        "no stored password to reuse"
+    );
+    let r = app
+        .post_json(
+            "/api/v1/settings/onefichier/account",
+            &auth,
+            serde_json::json!({"email": "me@example.com", "password": "x", "code": "12ab"}),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST);
+
+    let r = app
+        .send(
+            HttpRequest::delete("/api/v1/settings/onefichier/account")
+                .header("cookie", &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::OK);
+
+    let page = app.get("/settings", &auth).await;
+    assert!(
+        page.body
+            .contains("action=\"/settings/onefichier/sign-in\"")
+    );
+    let r = app
+        .post_form(
+            "/settings/onefichier/sign-in",
+            &auth,
+            "email=bad&password=x",
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST);
+    assert!(r.body.contains("email address of your 1fichier account"));
 }

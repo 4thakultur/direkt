@@ -7,9 +7,50 @@
 <section class="card stack">
   <h2>1fichier</h2>
   <p class="muted">
-    Premium API key for downloading 1fichier links. Find it on 1fichier.com
-    under <em>My account → Settings → API key</em>.
+    A premium account is required. Sign in with your 1fichier account, or use
+    an API key. When both are set, downloads use the account.
   </p>
+
+  <h3>Account</h3>
+  {% if onefichier.account.signed_in %}
+  <p>
+    Signed in as <strong>{% if let Some(email) = onefichier.account.email %}{{ email }}{% endif %}</strong>
+    {% if let Some(until) = onefichier.account.premium_until %}· Premium until {{ until }}{% else %}· <span class="note">No premium subscription found</span>{% endif %}
+    {% if onefichier.account.two_factor %}· two-factor authentication{% endif %}
+  </p>
+  {% endif %}
+  {% if let Some(attention) = onefichier.account.attention %}<p class="flash error">{{ attention }}</p>{% endif %}
+  <form method="post" action="/settings/onefichier/sign-in" class="stack">
+    <label>Email
+      <input name="email" type="email" autocomplete="off" required
+             value="{% if let Some(email) = onefichier.account.email %}{{ email }}{% endif %}">
+    </label>
+    <label>Password
+      <input name="password" type="text" autocomplete="off" spellcheck="false" required
+             value="{% if let Some(mask) = onefichier.account.password %}{{ mask }}{% endif %}">
+    </label>
+    {% if onefichier.account.two_factor_pending || onefichier.account.two_factor %}
+    <label>Two-factor code
+      <input name="code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code"
+             {% if onefichier.account.two_factor_pending %}required autofocus{% endif %}>
+    </label>
+    {% endif %}
+    <div class="actions">
+      <button type="submit" class="primary">{% if onefichier.account.signed_in %}Sign in again{% else %}Sign in{% endif %}</button>
+    </div>
+  </form>
+  {% if onefichier.account.signed_in %}
+  <form method="post" action="/settings/onefichier/sign-out" class="inline">
+    <button type="submit" class="danger">Sign out</button>
+  </form>
+  {% endif %}
+  <p class="muted">
+    Direkt stores the email and password so it can sign in again when 1fichier
+    ends the session. Accounts with two-factor authentication must sign in here
+    again when that happens.
+  </p>
+
+  <h3>API key</h3>
   {% if !onefichier.editable %}
   <p class="note">
     The key is set by the <code>DIREKT_ONEFICHIER_API_KEY</code> environment

@@ -39,6 +39,45 @@ struct ServerState {
     /// When empty, the API returns a link to `/plainrange/movie.bin`.
     api_script: Mutex<std::collections::VecDeque<(u16, String)>>,
     api_calls: Mutex<Vec<ApiCall>>,
+    site: Mutex<Site>,
+}
+
+/// Mock of the 1fichier website.
+#[derive(Default)]
+struct Site {
+    email: String,
+    password: String,
+    /// Two-factor code required after the password, if any.
+    two_factor_code: Option<String>,
+    valid_sessions: Vec<String>,
+    issued: u32,
+    /// Serve a download form instead of redirecting straight to the file.
+    link_via_form: bool,
+    file_password: Option<String>,
+    not_premium: bool,
+    /// Page served for every login attempt (e.g. a rate-limit message).
+    login_page: Option<String>,
+    login_bodies: Vec<String>,
+    /// (method, query, body, cookie header) of file-page requests.
+    page_requests: Vec<(String, String, String, String)>,
+}
+
+impl Site {
+    fn session_of(&self, headers: &HeaderMap) -> Option<String> {
+        let cookies = headers.get(header::COOKIE)?.to_str().ok()?;
+        cookies
+            .split(';')
+            .filter_map(|c| c.trim().strip_prefix("SID="))
+            .find(|sid| self.valid_sessions.iter().any(|v| v == sid))
+            .map(str::to_owned)
+    }
+
+    fn issue_session(&mut self) -> String {
+        self.issued += 1;
+        let sid = format!("sid{}", self.issued);
+        self.valid_sessions.push(sid.clone());
+        sid
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -68,6 +107,11 @@ impl TestServer {
             base: Mutex::new(String::new()),
             api_script: Mutex::new(Default::default()),
             api_calls: Mutex::new(Vec::new()),
+            site: Mutex::new(Site {
+                email: "me@example.com".into(),
+                password: "hunter2-password".into(),
+                ..Default::default()
+            }),
         });
         let app = Router::new()
             .route("/files/{name}", get(serve_file))
@@ -81,6 +125,10 @@ impl TestServer {
                 "/v1/download/get_token.cgi",
                 axum::routing::post(mock_get_token),
             )
+            .route("/login.pl", axum::routing::post(site_login))
+            .route("/console/index.pl", get(site_console))
+            .route("/console/abo.pl", get(site_subscription))
+            .route("/", get(site_file_page).post(site_file_page))
             .with_state(state.clone());
         let listener = tokio::net::TcpListener::bind(SocketAddr::from((ip, 0)))
             .await
@@ -121,6 +169,10 @@ impl TestServer {
             .lock()
             .unwrap()
             .push_back((status, body.to_string()));
+    }
+
+    fn site(&self) -> std::sync::MutexGuard<'_, Site> {
+        self.state.site.lock().unwrap()
     }
 
     fn api_base(&self) -> url::Url {
@@ -313,6 +365,155 @@ async fn mock_get_token(
         .into_response()
 }
 
+fn form_fields(body: &str) -> Vec<(String, String)> {
+    url::form_urlencoded::parse(body.as_bytes())
+        .into_owned()
+        .collect()
+}
+
+fn html(body: String) -> Response {
+    ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], body).into_response()
+}
+
+const LOGGED_IN_NAV: &str =
+    r#"<nav><a href="/console/index.pl">Account</a> <a href="/logout.pl">Logout</a></nav>"#;
+
+async fn site_login(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    let mut site = state.site.lock().unwrap();
+    site.login_bodies.push(body.clone());
+    if let Some(page) = site.login_page.clone() {
+        return html(page);
+    }
+    let fields = form_fields(&body);
+    let get = |k: &str| fields.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+    let credentials_ok = get("mail").as_deref() == Some(site.email.as_str())
+        && get("pass").as_deref() == Some(site.password.as_str());
+
+    let signed_in = |site: &mut Site| {
+        let sid = site.issue_session();
+        Response::builder()
+            .status(StatusCode::FOUND)
+            .header(header::LOCATION, "/console/index.pl")
+            .header(header::SET_COOKIE, format!("SID={sid}; path=/; HttpOnly"))
+            .body(Body::empty())
+            .unwrap()
+    };
+
+    match (&site.two_factor_code.clone(), get("tfa")) {
+        (Some(expected), Some(code)) => {
+            let cookies = headers.get(header::COOKIE).map(|v| v.to_str().unwrap()).unwrap_or("");
+            if get("step").as_deref() == Some("2") && cookies.contains("TFA=pending") && code == *expected {
+                signed_in(&mut site)
+            } else {
+                html(r#"<form action="/login.pl" method="post"><input type="hidden" name="step" value="2"><input name="tfa"></form><p>Invalid code</p>"#.into())
+            }
+        }
+        (Some(_), None) if credentials_ok => Response::builder()
+            .header(header::CONTENT_TYPE, "text/html")
+            .header(header::SET_COOKIE, "TFA=pending; path=/")
+            .body(Body::from(format!(
+                r#"<form action="/login.pl" method="post"><input type="hidden" name="mail" value="{}"><input type="hidden" name="step" value="2"><input name="tfa" maxlength="6"><input type="submit" name="valider" value="OK"></form>"#,
+                site.email
+            )))
+            .unwrap(),
+        (None, _) if credentials_ok => signed_in(&mut site),
+        _ => html("<div class=\"bloc2\">Invalid email address or password</div>".into()),
+    }
+}
+
+async fn site_console(State(state): State<Arc<ServerState>>, headers: HeaderMap) -> Response {
+    let site = state.site.lock().unwrap();
+    match site.session_of(&headers) {
+        Some(_) => html(format!("{LOGGED_IN_NAV}<h1>Console</h1>")),
+        None => (StatusCode::FOUND, [(header::LOCATION, "/login.pl")]).into_response(),
+    }
+}
+
+async fn site_subscription(State(state): State<Arc<ServerState>>, headers: HeaderMap) -> Response {
+    let site = state.site.lock().unwrap();
+    if site.session_of(&headers).is_none() {
+        return (StatusCode::FOUND, [(header::LOCATION, "/login.pl")]).into_response();
+    }
+    if site.not_premium {
+        return html(format!("{LOGGED_IN_NAV}<p>You have no subscription.</p>"));
+    }
+    html(format!(
+        "{LOGGED_IN_NAV}<p>Your subscription is valid until <b>2027-01-31</b></p>"
+    ))
+}
+
+async fn site_file_page(
+    State(state): State<Arc<ServerState>>,
+    method: axum::http::Method,
+    axum::extract::RawQuery(query): axum::extract::RawQuery,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    let mut site = state.site.lock().unwrap();
+    let cookie = headers
+        .get(header::COOKIE)
+        .map(|v| v.to_str().unwrap().to_owned())
+        .unwrap_or_default();
+    site.page_requests.push((
+        method.to_string(),
+        query.clone().unwrap_or_default(),
+        body.clone(),
+        cookie,
+    ));
+    let download_link = format!("{}/plainrange/movie.bin", state.base.lock().unwrap());
+    let redirect = || {
+        (
+            StatusCode::FOUND,
+            [(header::LOCATION, download_link.clone())],
+        )
+            .into_response()
+    };
+
+    if site.session_of(&headers).is_none() {
+        return html(r#"<a href="/login.pl">Login</a><form method="post"><input type="hidden" name="did" value="0"></form>"#.into());
+    }
+    if site.not_premium {
+        return html(format!(
+            r#"{LOGGED_IN_NAV}<span class="warn">Warning ! Without premium status, you can download only one file at a time</span>"#
+        ));
+    }
+    let password_form = format!(
+        r#"{LOGGED_IN_NAV}<form method="post"><input type="hidden" name="adz" value="7"><input type="password" name="pass"><input type="checkbox" name="save"><input type="submit" value="Download"></form>"#
+    );
+    if let Some(expected) = site.file_password.clone() {
+        if method == axum::http::Method::POST {
+            let fields = form_fields(&body);
+            let get = |k: &str| fields.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+            if get("pass").as_deref() == Some(expected.as_str())
+                && get("did").as_deref() == Some("1")
+                && get("adz").as_deref() == Some("7")
+                && get("save").is_none()
+            {
+                return redirect();
+            }
+        }
+        return html(password_form);
+    }
+    if site.link_via_form {
+        if method == axum::http::Method::POST {
+            let fields = form_fields(&body);
+            if fields.contains(&("did".into(), "0".into()))
+                && fields.iter().any(|(k, _)| k == "dlssl")
+            {
+                return redirect();
+            }
+        }
+        return html(format!(
+            r#"{LOGGED_IN_NAV}<form method="post"><input type="hidden" name="did" value="0"><input type="submit" name="dlssl" value="SSL Download"></form>"#
+        ));
+    }
+    redirect()
+}
+
 async fn serve_no_range(State(state): State<Arc<ServerState>>, headers: HeaderMap) -> Response {
     if let Some(resp) = record(&state, &headers) {
         return resp;
@@ -354,28 +555,47 @@ struct Harness {
     _dirs: tempfile::TempDir,
 }
 
-/// 1fichier (API at `api_base`, which defaults to an unreachable address)
-/// followed by plain HTTP, like production.
-fn standard_test_providers(
-    client: reqwest::Client,
-    onefichier: Option<(url::Url, Option<crate::config::Secret>, Duration)>,
-) -> Providers {
-    let (api_base, key, interval) = onefichier.unwrap_or_else(|| {
-        (
-            url::Url::parse("http://127.0.0.1:9/v1/").unwrap(),
-            None,
-            Duration::ZERO,
-        )
-    });
+/// How the 1fichier provider is wired in a test.
+struct OneFichierSetup {
+    api_base: url::Url,
+    api_key: Option<crate::config::Secret>,
+    account: Arc<crate::providers::OneFichierAccount>,
+}
+
+/// 1fichier followed by plain HTTP, like production.
+fn standard_test_providers(client: reqwest::Client, setup: OneFichierSetup) -> Providers {
     Providers::new(vec![
-        Arc::new(crate::providers::OneFichierProvider::with_endpoint(
+        Arc::new(crate::providers::OneFichierProvider::with_api_base(
             client,
-            crate::settings::SecretCell::new(key),
-            api_base,
-            interval,
+            crate::settings::SecretCell::new(setup.api_key),
+            setup.account,
+            setup.api_base,
         )),
         Arc::new(crate::providers::HttpProvider),
     ])
+}
+
+/// A 1fichier account whose website is the test server.
+async fn site_account(
+    server: &TestServer,
+    interval: Duration,
+) -> Arc<crate::providers::OneFichierAccount> {
+    let client = crate::http_client::build_no_redirect_client(
+        loopback_policy(),
+        crate::providers::BROWSER_USER_AGENT,
+    )
+    .unwrap();
+    let website = crate::providers::Website::with_base(
+        client,
+        url::Url::parse(&server.url("/")).unwrap(),
+        crate::providers::Throttle::new(interval),
+    );
+    let store = Store::open_in_memory().await.unwrap();
+    Arc::new(
+        crate::providers::OneFichierAccount::load(store, website)
+            .await
+            .unwrap(),
+    )
 }
 
 fn loopback_policy() -> NetworkPolicy {
@@ -384,8 +604,14 @@ fn loopback_policy() -> NetworkPolicy {
 
 impl Harness {
     async fn new(policy: NetworkPolicy, tweak: impl FnOnce(&mut EngineSettings)) -> Self {
-        Self::with_providers(policy, tweak, |client| {
-            standard_test_providers(client, None)
+        // 1fichier without sign-in or API key.
+        let setup = OneFichierSetup {
+            api_base: url::Url::parse("http://127.0.0.1:9/v1/").unwrap(),
+            api_key: None,
+            account: crate::providers::unconfigured_onefichier_account().await,
+        };
+        Self::with_providers(policy, tweak, move |client| {
+            standard_test_providers(client, setup)
         })
         .await
     }
@@ -1024,12 +1250,15 @@ const TEST_API_KEY: &str = "TestKey_0123456789abcdefghijklmn";
 const FILE_LINK: &str = "https://1fichier.com/?abcde12345";
 
 async fn onefichier_harness(server: &TestServer, key: Option<&str>, interval: Duration) -> Harness {
-    let api_base = server.api_base();
-    let key = key.map(crate::config::Secret::new);
+    let setup = OneFichierSetup {
+        api_base: server.api_base(),
+        api_key: key.map(crate::config::Secret::new),
+        account: site_account(server, interval).await,
+    };
     Harness::with_providers(
         loopback_policy(),
         |_| {},
-        move |client| standard_test_providers(client, Some((api_base, key, interval))),
+        move |client| standard_test_providers(client, setup),
     )
     .await
 }
@@ -1226,19 +1455,16 @@ async fn onefichier_html_error_page_is_not_saved() {
 async fn onefichier_api_calls_are_spaced() {
     let server = TestServer::start([127, 0, 0, 1], content(1000)).await;
     let interval = Duration::from_millis(300);
-    let h = Harness::with_providers(loopback_policy(), |s| s.max_concurrent = 3, {
-        let api_base = server.api_base();
-        move |client| {
-            standard_test_providers(
-                client,
-                Some((
-                    api_base,
-                    Some(crate::config::Secret::new(TEST_API_KEY)),
-                    interval,
-                )),
-            )
-        }
-    })
+    let setup = OneFichierSetup {
+        api_base: server.api_base(),
+        api_key: Some(crate::config::Secret::new(TEST_API_KEY)),
+        account: site_account(&server, interval).await,
+    };
+    let h = Harness::with_providers(
+        loopback_policy(),
+        |s| s.max_concurrent = 3,
+        move |client| standard_test_providers(client, setup),
+    )
     .await;
     let mut ids = Vec::new();
     for _ in 0..3 {
@@ -1284,6 +1510,332 @@ async fn submission_validates_links_and_passwords() {
             .unwrap()
             .download_password
             .is_none()
+    );
+}
+
+// --- 1fichier account (website) ----------------------------------------------
+
+const SITE_EMAIL: &str = "me@example.com";
+const SITE_PASSWORD: &str = "hunter2-password";
+
+/// A harness whose 1fichier provider uses `account` (and optionally an API key).
+async fn site_harness(
+    server: &TestServer,
+    account: Arc<crate::providers::OneFichierAccount>,
+    api_key: Option<&str>,
+    tweak: impl FnOnce(&mut EngineSettings),
+) -> Harness {
+    let setup = OneFichierSetup {
+        api_base: server.api_base(),
+        api_key: api_key.map(crate::config::Secret::new),
+        account,
+    };
+    Harness::with_providers(loopback_policy(), tweak, move |client| {
+        standard_test_providers(client, setup)
+    })
+    .await
+}
+
+async fn signed_in_account(server: &TestServer) -> Arc<crate::providers::OneFichierAccount> {
+    let account = site_account(server, Duration::ZERO).await;
+    let outcome = account
+        .sign_in(SITE_EMAIL, SITE_PASSWORD, None)
+        .await
+        .unwrap();
+    assert!(matches!(outcome, crate::providers::SignInOutcome::SignedIn));
+    account
+}
+
+#[tokio::test]
+async fn account_sign_in_and_download_prefers_account() {
+    let server = TestServer::start([127, 0, 0, 1], content(300_000)).await;
+    let account = signed_in_account(&server).await;
+    let view = account.view();
+    assert!(view.signed_in);
+    assert_eq!(view.email.as_deref(), Some(SITE_EMAIL));
+    assert_eq!(view.password.as_deref(), Some(crate::settings::SECRET_MASK));
+    assert_eq!(view.premium_until.as_deref(), Some("2027-01-31"));
+
+    // The login form: long session, cookie for other domains, never "purge".
+    let login = server.site().login_bodies[0].clone();
+    let fields = form_fields(&login);
+    for expected in [("lt", "on"), ("other", "on"), ("valider", "ok")] {
+        assert!(
+            fields.contains(&(expected.0.into(), expected.1.into())),
+            "{login}"
+        );
+    }
+    assert!(
+        !fields.iter().any(|(k, _)| k == "purge" || k == "restrict"),
+        "{login}"
+    );
+
+    // An API key is configured too, but the account is preferred.
+    let h = site_harness(&server, account, Some(TEST_API_KEY), |_| {}).await;
+    let d = h.service.submit(FILE_LINK, None).await.unwrap();
+    let d = h.wait_state(d.id, TransferState::Completed).await;
+    assert_eq!(file_contents(&d), server.state.content);
+    assert_eq!(d.filename.as_deref(), Some("Movie.2024.mkv"));
+    assert!(server.api_calls().is_empty());
+
+    let requests = server.site().page_requests.clone();
+    assert_eq!(requests.len(), 1);
+    let (method, query, _, cookie) = &requests[0];
+    assert_eq!(method, "GET");
+    assert_eq!(query, "abcde12345");
+    assert!(
+        cookie.contains("SID=sid1") && cookie.contains("LG=en"),
+        "{cookie}"
+    );
+}
+
+#[tokio::test]
+async fn account_download_through_the_download_form() {
+    let server = TestServer::start([127, 0, 0, 1], content(1000)).await;
+    server.site().link_via_form = true;
+    let account = signed_in_account(&server).await;
+    let h = site_harness(&server, account, None, |_| {}).await;
+    let d = h.service.submit(FILE_LINK, None).await.unwrap();
+    let d = h.wait_state(d.id, TransferState::Completed).await;
+    assert_eq!(file_contents(&d), server.state.content);
+    let requests = server.site().page_requests.clone();
+    let (method, query, body, _) = requests.last().unwrap();
+    assert_eq!(method, "POST");
+    assert!(query.contains("lg=en"), "{query}");
+    assert_eq!(
+        form_fields(body),
+        vec![
+            ("did".into(), "0".into()),
+            ("dlssl".into(), "SSL Download".into())
+        ]
+    );
+}
+
+#[tokio::test]
+async fn account_session_expiry_signs_in_again_once() {
+    let server = TestServer::start([127, 0, 0, 1], content(1000)).await;
+    let account = signed_in_account(&server).await;
+    server.site().valid_sessions.clear();
+    let h = site_harness(&server, account, None, |s| s.max_concurrent = 3).await;
+    let mut ids = Vec::new();
+    for _ in 0..3 {
+        ids.push(h.service.submit(FILE_LINK, None).await.unwrap().id);
+    }
+    for id in ids {
+        let d = h.wait_state(id, TransferState::Completed).await;
+        assert_eq!(file_contents(&d), server.state.content);
+    }
+    assert_eq!(
+        server.site().login_bodies.len(),
+        2,
+        "one sign-in plus one renewal for all workers"
+    );
+}
+
+#[tokio::test]
+async fn account_rejected_credentials_stop_automatic_sign_in() {
+    let server = TestServer::start([127, 0, 0, 1], content(10)).await;
+    let account = signed_in_account(&server).await;
+    {
+        let mut site = server.site();
+        site.password = "changed-on-the-website".into();
+        site.valid_sessions.clear();
+    }
+    let h = site_harness(&server, account.clone(), None, |_| {}).await;
+    let first = h.service.submit(FILE_LINK, None).await.unwrap();
+    let first = h.wait_state(first.id, TransferState::Blocked).await;
+    assert!(
+        first
+            .error
+            .unwrap()
+            .message
+            .contains("rejected the stored email or password")
+    );
+    let second = h.service.submit(FILE_LINK, None).await.unwrap();
+    h.wait_state(second.id, TransferState::Blocked).await;
+    assert_eq!(
+        server.site().login_bodies.len(),
+        2,
+        "no further sign-in attempts"
+    );
+    assert!(account.view().attention.is_some());
+
+    // Signing in again from the settings clears the problem.
+    // ("Sign in again" with the masked field reuses the stored password.)
+    server.site().password = SITE_PASSWORD.into();
+    account
+        .sign_in(SITE_EMAIL, crate::settings::SECRET_MASK, None)
+        .await
+        .unwrap();
+    assert!(account.view().attention.is_none());
+    h.service.retry(second.id, None).await.unwrap();
+    h.wait_state(second.id, TransferState::Completed).await;
+}
+
+#[tokio::test]
+async fn account_with_two_factor_authentication() {
+    let server = TestServer::start([127, 0, 0, 1], content(10)).await;
+    server.site().two_factor_code = Some("123456".into());
+    let account = site_account(&server, Duration::ZERO).await;
+
+    let outcome = account
+        .sign_in(SITE_EMAIL, SITE_PASSWORD, None)
+        .await
+        .unwrap();
+    assert!(matches!(
+        outcome,
+        crate::providers::SignInOutcome::TwoFactorRequired
+    ));
+    assert!(account.view().two_factor_pending);
+    assert!(!account.view().signed_in);
+
+    let err = account
+        .sign_in(SITE_EMAIL, SITE_PASSWORD, Some("12"))
+        .await
+        .unwrap_err();
+    assert_eq!(err.kind, ErrorKind::InvalidRequest);
+    account
+        .sign_in(SITE_EMAIL, SITE_PASSWORD, Some("123456"))
+        .await
+        .unwrap();
+    let view = account.view();
+    assert!(view.signed_in && view.two_factor && !view.two_factor_pending);
+    let second_step = form_fields(&server.site().login_bodies[1]);
+    assert!(second_step.contains(&("tfa".into(), "123456".into())));
+    assert!(
+        second_step.contains(&("step".into(), "2".into())),
+        "hidden fields are kept"
+    );
+
+    // When the session ends, a 2FA account cannot sign in by itself.
+    server.site().valid_sessions.clear();
+    let h = site_harness(&server, account, None, |_| {}).await;
+    let d = h.service.submit(FILE_LINK, None).await.unwrap();
+    let d = h.wait_state(d.id, TransferState::Blocked).await;
+    assert!(d.error.unwrap().message.contains("two-factor"));
+    assert_eq!(
+        server.site().login_bodies.len(),
+        2,
+        "no automatic sign-in attempt"
+    );
+}
+
+#[tokio::test]
+async fn account_sign_in_errors() {
+    let server = TestServer::start([127, 0, 0, 1], content(10)).await;
+    let account = site_account(&server, Duration::ZERO).await;
+    let err = account
+        .sign_in(SITE_EMAIL, "wrong password", None)
+        .await
+        .unwrap_err();
+    assert_eq!(err.kind, ErrorKind::AuthenticationFailed);
+    assert!(!account.view().signed_in);
+    let err = account
+        .sign_in("not-an-email", "x", None)
+        .await
+        .unwrap_err();
+    assert_eq!(err.kind, ErrorKind::InvalidRequest);
+    let err = account
+        .sign_in(SITE_EMAIL, crate::settings::SECRET_MASK, None)
+        .await
+        .unwrap_err();
+    assert!(err.message.contains("enter your 1fichier password"));
+
+    server.site().login_page =
+        Some("<div>More than 5 login try per 10 minutes is not allowed</div>".into());
+    let err = account
+        .sign_in(SITE_EMAIL, SITE_PASSWORD, None)
+        .await
+        .unwrap_err();
+    assert_eq!(err.kind, ErrorKind::ProviderRestricted);
+}
+
+#[tokio::test]
+async fn account_password_protected_file() {
+    let server = TestServer::start([127, 0, 0, 1], content(1000)).await;
+    server.site().file_password = Some("file-pass".into());
+    let account = signed_in_account(&server).await;
+    let h = site_harness(&server, account, None, |_| {}).await;
+
+    let d = h.service.submit(FILE_LINK, None).await.unwrap();
+    let d = h.wait_state(d.id, TransferState::Blocked).await;
+    assert!(d.error.unwrap().message.contains("password protected"));
+
+    h.service.retry(d.id, Some("wrong")).await.unwrap();
+    let d = h.wait_state(d.id, TransferState::Blocked).await;
+    assert!(
+        d.error
+            .unwrap()
+            .message
+            .contains("rejected the download password")
+    );
+
+    h.service.retry(d.id, Some("file-pass")).await.unwrap();
+    let d = h.wait_state(d.id, TransferState::Completed).await;
+    assert_eq!(file_contents(&d), server.state.content);
+}
+
+#[tokio::test]
+async fn account_without_premium_needs_attention() {
+    let server = TestServer::start([127, 0, 0, 1], content(10)).await;
+    server.site().not_premium = true;
+    let account = signed_in_account(&server).await;
+    assert_eq!(account.view().premium_until, None);
+    let h = site_harness(&server, account, None, |_| {}).await;
+    let d = h.service.submit(FILE_LINK, None).await.unwrap();
+    let d = h.wait_state(d.id, TransferState::Blocked).await;
+    assert!(d.error.unwrap().message.contains("no active premium"));
+}
+
+#[tokio::test]
+async fn account_sign_out_falls_back_to_api_key() {
+    let server = TestServer::start([127, 0, 0, 1], content(1000)).await;
+    let account = signed_in_account(&server).await;
+    account.sign_out().await.unwrap();
+    assert!(!account.view().signed_in);
+    let h = site_harness(&server, account, Some(TEST_API_KEY), |_| {}).await;
+    let d = h.service.submit(FILE_LINK, None).await.unwrap();
+    h.wait_state(d.id, TransferState::Completed).await;
+    assert_eq!(server.api_calls().len(), 1);
+    assert!(server.site().page_requests.is_empty());
+}
+
+#[tokio::test]
+async fn account_session_survives_restart() {
+    let server = TestServer::start([127, 0, 0, 1], content(1000)).await;
+    let store = Store::open_in_memory().await.unwrap();
+    let website = |server: &TestServer| {
+        crate::providers::Website::with_base(
+            crate::http_client::build_no_redirect_client(
+                loopback_policy(),
+                crate::providers::BROWSER_USER_AGENT,
+            )
+            .unwrap(),
+            url::Url::parse(&server.url("/")).unwrap(),
+            crate::providers::Throttle::new(Duration::ZERO),
+        )
+    };
+    let first = crate::providers::OneFichierAccount::load(store.clone(), website(&server))
+        .await
+        .unwrap();
+    first
+        .sign_in(SITE_EMAIL, SITE_PASSWORD, None)
+        .await
+        .unwrap();
+
+    let reloaded = Arc::new(
+        crate::providers::OneFichierAccount::load(store, website(&server))
+            .await
+            .unwrap(),
+    );
+    assert!(reloaded.view().signed_in);
+    let h = site_harness(&server, reloaded, None, |_| {}).await;
+    let d = h.service.submit(FILE_LINK, None).await.unwrap();
+    h.wait_state(d.id, TransferState::Completed).await;
+    assert_eq!(
+        server.site().login_bodies.len(),
+        1,
+        "the stored session was reused"
     );
 }
 

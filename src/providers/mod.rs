@@ -9,7 +9,11 @@ mod http;
 mod onefichier;
 
 pub use http::HttpProvider;
-pub use onefichier::OneFichierProvider;
+#[cfg(test)]
+pub(crate) use onefichier::tests::unconfigured_account as unconfigured_onefichier_account;
+pub use onefichier::{AccountView, OneFichierAccount, OneFichierProvider, SignInOutcome};
+#[cfg(test)]
+pub(crate) use onefichier::{BROWSER_USER_AGENT, Throttle, Website};
 
 use crate::error::{AppError, TransferError};
 use crate::settings::SecretCell;
@@ -92,9 +96,17 @@ impl Providers {
 
     /// All built-in providers. `client` must be the policy-enforcing client
     /// from [`crate::http_client::build_client`].
-    pub fn standard(client: reqwest::Client, onefichier_key: SecretCell) -> Self {
+    pub fn standard(
+        client: reqwest::Client,
+        onefichier_key: SecretCell,
+        onefichier_account: Arc<OneFichierAccount>,
+    ) -> Self {
         Self::new(vec![
-            Arc::new(OneFichierProvider::new(client, onefichier_key)),
+            Arc::new(OneFichierProvider::new(
+                client,
+                onefichier_key,
+                onefichier_account,
+            )),
             Arc::new(HttpProvider),
         ])
     }
@@ -112,14 +124,15 @@ impl Providers {
 mod tests {
     use super::*;
 
-    fn providers() -> Providers {
+    async fn providers() -> Providers {
         let client = crate::http_client::build_client(Default::default()).unwrap();
-        Providers::standard(client, SecretCell::default())
+        let account = onefichier::tests::unconfigured_account().await;
+        Providers::standard(client, SecretCell::default(), account)
     }
 
-    #[test]
-    fn hosters_take_precedence_over_http() {
-        let providers = providers();
+    #[tokio::test]
+    async fn hosters_take_precedence_over_http() {
+        let providers = providers().await;
         let p = |s: &str| providers.for_url(&Url::parse(s).unwrap()).map(|p| p.id());
         assert_eq!(p("https://example.com/file.zip"), Some("http"));
         assert_eq!(p("https://1fichier.com/?abcde12345"), Some("1fichier"));
@@ -133,9 +146,9 @@ mod tests {
         assert!(providers.get("nope").is_none());
     }
 
-    #[test]
-    fn non_http_urls_have_no_provider() {
+    #[tokio::test]
+    async fn non_http_urls_have_no_provider() {
         let url = Url::parse("ftp://example.com/file.zip").unwrap();
-        assert!(providers().for_url(&url).is_none());
+        assert!(providers().await.for_url(&url).is_none());
     }
 }
