@@ -102,7 +102,8 @@ pub enum PostState {
     Completed,
     /// Identification or organization failed; the downloaded file is preserved.
     Failed,
-    /// Post-processing is disabled; the file stays in the download directory.
+    /// Not organized (no library folder for it, or not a video file); the
+    /// file stays in the download directory.
     Skipped,
 }
 
@@ -139,14 +140,15 @@ impl PostState {
                 | (Pending, Processing | Skipped)
                 // `Processing -> Pending` recovers an organization step that
                 // was interrupted by a restart.
-                | (Processing, Completed | Failed | Pending)
-                | (Failed, Pending)
+                | (Processing, Completed | Failed | Skipped | Pending)
+                // "Organize again", e.g. after setting a library folder.
+                | (Failed | Skipped, Pending)
         )
     }
 }
 
-/// What a download is, chosen when it is confirmed. Media organization will
-/// route files by it.
+/// What a download is, chosen when it is confirmed. Media organization
+/// routes files by it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum MediaType {
@@ -235,8 +237,14 @@ pub struct Download {
     pub media_type: Option<MediaType>,
     /// Title found by the metadata lookup, e.g. "Cyberpunk: Edgerunners".
     pub title: Option<String>,
+    /// Release year found by the metadata lookup.
+    pub year: Option<u16>,
     /// Cached artwork, served at `/artwork/{id}`.
     pub artwork_id: Option<String>,
+    /// Where media organization is moving the file, recorded before the
+    /// move so an interrupted move can be recognized.
+    #[serde(skip)]
+    pub post_target: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
@@ -331,5 +339,7 @@ mod tests {
         assert!(!PostState::None.can_transition_to(PostState::Completed));
         assert!(!PostState::Completed.can_transition_to(PostState::Pending));
         assert!(PostState::Failed.can_transition_to(PostState::Pending));
+        assert!(PostState::Skipped.can_transition_to(PostState::Pending));
+        assert!(!PostState::Completed.can_transition_to(PostState::Processing));
     }
 }

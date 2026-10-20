@@ -111,9 +111,10 @@ fn exists_no_follow(path: &Path) -> io::Result<bool> {
 /// Move `src` to `dst` without ever replacing an existing `dst`.
 ///
 /// Uses an atomic no-replace rename when the platform and filesystem support
-/// it. Otherwise it falls back to copying into a newly created file and then
-/// removing `src`. The copy also covers moves between filesystems. If
-/// `dst` exists, fails with `AlreadyExists` and leaves both files untouched.
+/// it. Otherwise (for example between filesystems) it copies `src` next to
+/// `dst` under a temporary name, links the copy into place, and then removes
+/// `src`. If `dst` exists, fails with `AlreadyExists` and leaves both files
+/// untouched.
 pub fn move_no_clobber(src: &Path, dst: &Path) -> io::Result<()> {
     match rename_no_replace(src, dst) {
         Ok(()) => return Ok(()),
@@ -121,8 +122,84 @@ pub fn move_no_clobber(src: &Path, dst: &Path) -> io::Result<()> {
         Err(e) if is_rename_unsupported(&e) => {}
         Err(e) => return Err(e),
     }
-    copy_no_clobber(src, dst)?;
+    copy_then_link(src, dst)?;
     fs::remove_file(src)
+}
+
+/// Copy `src` to `dst` (which must not exist) through a temporary file next
+/// to it, so an interrupted copy never leaves a partial file at `dst`. A
+/// temporary file left by an interrupted earlier attempt is replaced.
+fn copy_then_link(src: &Path, dst: &Path) -> io::Result<()> {
+    if exists_no_follow(dst)? {
+        return Err(io::Error::from(io::ErrorKind::AlreadyExists));
+    }
+    let tmp = temp_sibling(dst)?;
+    match fs::remove_file(&tmp) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+    copy_no_clobber(src, &tmp)?;
+    let linked = match rename_no_replace(&tmp, dst) {
+        Ok(()) => return Ok(()),
+        Err(e) if is_rename_unsupported(&e) => match fs::hard_link(&tmp, dst) {
+            // No hard links either (e.g. some network or FAT filesystems):
+            // copy into a newly created `dst` as a last resort.
+            Err(e) if is_link_unsupported(&e) => copy_no_clobber(&tmp, dst),
+            other => other,
+        },
+        Err(e) => Err(e),
+    };
+    let _ = fs::remove_file(&tmp);
+    linked
+}
+
+/// `.<name>.direkt-partial` next to `path`: hidden, and without a media
+/// extension, so media servers ignore it.
+fn temp_sibling(path: &Path) -> io::Result<PathBuf> {
+    let name = path
+        .file_name()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "not a file path"))?;
+    let mut tmp = std::ffi::OsString::from(".");
+    tmp.push(name);
+    tmp.push(".direkt-partial");
+    Ok(path.with_file_name(tmp))
+}
+
+fn is_link_unsupported(e: &io::Error) -> bool {
+    matches!(
+        e.kind(),
+        io::ErrorKind::Unsupported | io::ErrorKind::PermissionDenied
+    )
+}
+
+/// Create the directories `components` below the existing directory `root`,
+/// returning the deepest one. Existing directories are reused; a component
+/// that exists as anything else, including a symlink, is refused with
+/// `AlreadyExists`, so files are never placed through a link.
+pub fn create_dirs_in(root: &Path, components: &[&str]) -> io::Result<PathBuf> {
+    let mut dir = root.to_path_buf();
+    for component in components {
+        if Path::new(component).components().count() != 1 || matches!(*component, "" | "." | "..") {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "not a single path component",
+            ));
+        }
+        dir.push(component);
+        if let Err(e) = fs::create_dir(&dir)
+            && e.kind() != io::ErrorKind::AlreadyExists
+        {
+            return Err(e);
+        }
+        if !fs::symlink_metadata(&dir)?.file_type().is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!("{} exists and is not a folder", dir.display()),
+            ));
+        }
+    }
+    Ok(dir)
 }
 
 #[cfg(target_os = "linux")]
@@ -394,6 +471,68 @@ mod tests {
         std::os::unix::fs::symlink(&victim, &dst).unwrap();
         assert!(move_no_clobber(&src, &dst).is_err());
         assert_eq!(fs::read(&victim).unwrap(), b"precious");
+    }
+
+    #[test]
+    fn copy_then_link_uses_a_temporary_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src.mkv");
+        let dst = dir.path().join("dst.mkv");
+        fs::write(&src, b"movie").unwrap();
+        // Left behind by an interrupted copy.
+        let tmp = dir.path().join(".dst.mkv.direkt-partial");
+        fs::write(&tmp, b"mo").unwrap();
+
+        copy_then_link(&src, &dst).unwrap();
+        assert_eq!(fs::read(&dst).unwrap(), b"movie");
+        assert!(!tmp.exists(), "the temporary file is cleaned up");
+
+        fs::write(&src, b"other").unwrap();
+        let err = copy_then_link(&src, &dst).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(&dst).unwrap(), b"movie");
+        assert!(!tmp.exists());
+    }
+
+    #[test]
+    fn library_folders_are_created_without_following_links() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let season = create_dirs_in(root, &["Show (2020)", "Season 01"]).unwrap();
+        assert_eq!(season, root.join("Show (2020)/Season 01"));
+        assert!(season.is_dir());
+        // Existing folders are reused.
+        assert_eq!(
+            create_dirs_in(root, &["Show (2020)", "Season 01"]).unwrap(),
+            season
+        );
+
+        fs::write(root.join("file"), b"x").unwrap();
+        assert_eq!(
+            create_dirs_in(root, &["file", "Season 01"])
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::AlreadyExists
+        );
+        for bad in ["..", ".", "", "a/b"] {
+            assert_eq!(
+                create_dirs_in(root, &[bad]).unwrap_err().kind(),
+                io::ErrorKind::InvalidInput,
+                "{bad:?}"
+            );
+        }
+        #[cfg(unix)]
+        {
+            let elsewhere = tempfile::tempdir().unwrap();
+            std::os::unix::fs::symlink(elsewhere.path(), root.join("Linked")).unwrap();
+            assert_eq!(
+                create_dirs_in(root, &["Linked", "Season 01"])
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::AlreadyExists
+            );
+            assert!(!elsewhere.path().join("Season 01").exists());
+        }
     }
 
     #[test]

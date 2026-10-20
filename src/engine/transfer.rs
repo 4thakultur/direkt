@@ -662,7 +662,9 @@ mod tests {
             completed_at: None,
             media_type: None,
             title: None,
+            year: None,
             artwork_id: None,
+            post_target: None,
         };
         assert_eq!(
             if_range_validator(&dl).as_deref(),

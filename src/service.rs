@@ -17,7 +17,7 @@ use crate::media::parse::{detect, guess_as};
 use crate::media::{Artwork, ArtworkService, Lookup};
 use crate::net::{NetworkPolicy, redact_url, validate_submission_url};
 use crate::providers::{Provider, Providers, ResolveRequest, ResourceInfo};
-use crate::store::{NewDownload, Store, TransitionDetails};
+use crate::store::{NewDownload, PostDetails, Store, TransitionDetails};
 use chrono::Utc;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -250,6 +250,7 @@ impl DownloadService {
             filename: preview.filename,
             media_type: Some(preview.media_type),
             title: preview.title,
+            year: preview.year,
             artwork_id: preview.artwork_id,
         })
         .await
@@ -499,6 +500,44 @@ impl DownloadService {
         if let Err(e) = self.engine.remove_partial(id).await {
             tracing::warn!(%id, error = %e, "could not remove partial file of deleted download");
         }
+    }
+
+    /// Organize a completed download again: after organizing failed, or when
+    /// it was skipped (for example before a library folder was set).
+    pub async fn organize(&self, id: Uuid) -> AppResult<Download> {
+        let download = self.get(id).await?;
+        if download.state != TransferState::Completed {
+            return Err(AppError::conflict(
+                "only completed downloads can be organized",
+            ));
+        }
+        let from = match download.post_state {
+            state @ (PostState::Failed | PostState::Skipped) => state,
+            PostState::Completed => {
+                return Err(AppError::conflict("this download is already organized"));
+            }
+            _ => {
+                return Err(AppError::conflict(
+                    "this download is already waiting to be organized",
+                ));
+            }
+        };
+        let updated = self
+            .store
+            .transition_post_with(
+                id,
+                from,
+                PostState::Pending,
+                PostDetails {
+                    message: Some("organizing requested by user".into()),
+                    ..Default::default()
+                },
+                Utc::now(),
+            )
+            .await?;
+        tracing::info!(%id, "organizing requested");
+        self.engine.wake_post_processing();
+        Ok(updated)
     }
 
     /// Resume a paused download.

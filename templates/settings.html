@@ -143,6 +143,49 @@
   </div>
 </details>
 
+<details class="panel" id="library"{% if open == "library" %} open{% endif %}>
+  <summary>
+    <span class="panel-icon tint-teal" aria-hidden="true"><svg class="icon"><use href="#i-folder"/></svg></span>
+    <span class="panel-title">
+      <span class="panel-name">Media library</span>
+      <span class="panel-desc">Where movies and series are organized for Jellyfin and Plex</span>
+    </span>
+    <span class="pill{% if library.summary != "Off" %} ok{% endif %}">{{ library.summary }}</span>
+    <svg class="icon chevron" aria-hidden="true"><use href="#i-chevron"/></svg>
+  </summary>
+  <div class="panel-body stack">
+    <p class="muted">
+      When a movie or an episode finishes downloading, Direkt renames it and
+      moves it into the folder below, the way Jellyfin and Plex expect, so a
+      library scan picks it up without any help. It uses the type and title
+      from the confirmation menu, and the file name for the season and episode.
+      Existing files are never replaced. Games, music, software and archives
+      stay in the download folder.
+    </p>
+    {% if library.any_locked %}
+    <p class="note">
+      Folders set by the <code>DIREKT_MOVIES_DIR</code>, <code>DIREKT_TV_DIR</code>
+      or <code>DIREKT_UNSORTED_DIR</code> environment variables can't be changed here.
+    </p>
+    {% endif %}
+    <form method="post" action="/settings/library" class="stack">
+      {% for f in library.folders %}
+      <label>{{ f.label }} <span class="muted">({{ f.hint }})</span>
+        <input name="{{ f.name }}" type="text" value="{{ f.path }}" placeholder="{{ f.placeholder }}"
+               autocomplete="off" spellcheck="false"{% if !f.editable %} disabled{% endif %}>
+      </label>
+      {% endfor %}
+      <p class="muted small">
+        Absolute paths to existing folders that Direkt can write to; in Docker,
+        paths inside the container. Leave a folder empty to turn it off. Without
+        a fallback folder, videos that can't be identified stay in the download
+        folder and are marked for attention.
+      </p>
+      {% if library.any_editable %}<button type="submit" class="primary">Save</button>{% endif %}
+    </form>
+  </div>
+</details>
+
 <details class="panel" id="tokens"{% if open == "tokens" %} open{% endif %}>
   <summary>
     <span class="panel-icon tint-gray" aria-hidden="true"><svg class="icon"><use href="#i-key"/></svg></span>

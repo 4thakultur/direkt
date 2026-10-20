@@ -56,15 +56,26 @@ own the same job.
 
 ```
 none ──transfer completed──► pending ──► processing ──► completed
-                               │  ▲          │
-                               │  └─restart──┤
-                               ▼             ▼
-                            skipped        failed ──retry──► pending
+                               │  ▲          │  │
+                               │  └─restart──┘  ├──► skipped ──organize again──► pending
+                               ▼                └──► failed  ──organize again──► pending
+                            skipped
 ```
 
-Post-processing starts only after the transfer is `completed`. A post-processing
-failure is recorded in `post_error` and **never** changes the transfer state.
-The downloaded file stays where it is.
+| From         | Allowed next states                              |
+|--------------|--------------------------------------------------|
+| `none`       | `pending` (when the transfer completes)          |
+| `pending`    | `processing`, `skipped`                          |
+| `processing` | `completed`, `failed`, `skipped`, `pending` (restart) |
+| `failed`     | `pending` (organize again)                       |
+| `skipped`    | `pending` (organize again)                       |
+| `completed`  | — (final)                                        |
+
+Post-processing is media organization; see
+[media-organization.md](media-organization.md). It starts only after the
+transfer is `completed`. A post-processing failure is recorded in
+`post_error` and **never** changes the transfer state. The downloaded file
+stays where it is.
 
 ## Enforcement
 

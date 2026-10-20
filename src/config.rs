@@ -108,6 +108,47 @@ pub fn tmdb_key_from_env(
     Ok(Some(Secret::new(key)))
 }
 
+/// Environment variables with the media library folders. Each overrides and
+/// locks the folder set on the settings page.
+pub const MOVIES_DIR_ENV: &str = "DIREKT_MOVIES_DIR";
+pub const TV_DIR_ENV: &str = "DIREKT_TV_DIR";
+pub const UNSORTED_DIR_ENV: &str = "DIREKT_UNSORTED_DIR";
+
+/// Library folders set in the environment.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LibraryEnv {
+    pub movies: Option<PathBuf>,
+    pub tv: Option<PathBuf>,
+    pub unsorted: Option<PathBuf>,
+}
+
+/// Read the library folders from the environment (blank counts as unset).
+/// They must be absolute; whether they exist is reported when organizing,
+/// since a volume may be mounted after startup.
+pub fn library_from_env(var: impl Fn(&str) -> Option<String>) -> Result<LibraryEnv, ConfigError> {
+    let folder = |name: &str| -> Result<Option<PathBuf>, ConfigError> {
+        let Some(value) = var(name).filter(|v| !v.trim().is_empty()) else {
+            return Ok(None);
+        };
+        let path = PathBuf::from(value.trim());
+        if !path.is_absolute()
+            || path
+                .components()
+                .any(|c| c == std::path::Component::ParentDir)
+        {
+            return Err(ConfigError::Invalid(format!(
+                "{name} must be an absolute path without \"..\""
+            )));
+        }
+        Ok(Some(path))
+    };
+    Ok(LibraryEnv {
+        movies: folder(MOVIES_DIR_ENV)?,
+        tv: folder(TV_DIR_ENV)?,
+        unsorted: folder(UNSORTED_DIR_ENV)?,
+    })
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ServerConfig {
@@ -400,6 +441,29 @@ mod tests {
         assert!(tmdb_key_from_env(|_| None).unwrap().is_none());
         let err = tmdb_key_from_env(|_| Some("not-a-key".into())).unwrap_err();
         assert!(err.to_string().contains(TMDB_API_KEY_ENV), "{err}");
+    }
+
+    #[test]
+    fn reads_library_folders_from_env() {
+        let env = library_from_env(|name| match name {
+            MOVIES_DIR_ENV => Some(" /media/movies ".into()),
+            TV_DIR_ENV => Some("   ".into()),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(
+            env,
+            LibraryEnv {
+                movies: Some("/media/movies".into()),
+                tv: None,
+                unsorted: None,
+            }
+        );
+        for bad in ["media/movies", "/media/../etc"] {
+            let err =
+                library_from_env(|name| (name == TV_DIR_ENV).then(|| bad.to_owned())).unwrap_err();
+            assert!(err.to_string().contains(TV_DIR_ENV), "{err}");
+        }
     }
 
     #[test]

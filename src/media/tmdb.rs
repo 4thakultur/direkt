@@ -211,6 +211,7 @@ mod tests {
             year,
             season: None,
             episode: None,
+            last_episode: None,
         }
     }
 

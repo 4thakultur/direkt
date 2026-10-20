@@ -4,8 +4,8 @@ A self-hostable direct download manager for homelabs, written in Rust.
 
 > **Status:** early development. HTTP/HTTPS downloads, 1fichier premium
 > downloads, the web UI (with a confirmation step showing type, title, size
-> and artwork), and the API work. Media organization and Docker
-> packaging are next. Telegram notifications are planned after v1.
+> and artwork), the API, and media organization into Jellyfin/Plex libraries
+> work. Docker packaging is next. Telegram notifications are planned after v1.
 
 ## First run
 
@@ -32,7 +32,9 @@ See [`direkt.example.toml`](direkt.example.toml) for every configuration option,
 network-security behavior, [`docs/api.md`](docs/api.md) for the HTTP API, and
 [`docs/providers/1fichier.md`](docs/providers/1fichier.md) for 1fichier, and
 [`docs/artwork.md`](docs/artwork.md) for the download confirmation step
-(type detection, TMDB and Steam artwork).
+(type detection, TMDB and Steam artwork), and
+[`docs/media-organization.md`](docs/media-organization.md) for moving
+movies and episodes into a Jellyfin/Plex library.
 
 `cargo test` needs no network access. One opt-in test downloads a real file
 over HTTPS: `cargo test -- --ignored real_https`.

@@ -38,6 +38,7 @@ pub struct NewDownload {
     pub filename: Option<String>,
     pub media_type: Option<MediaType>,
     pub title: Option<String>,
+    pub year: Option<u16>,
     pub artwork_id: Option<String>,
 }
 
@@ -50,6 +51,18 @@ pub struct TransitionDetails {
     /// When a `Retrying` job becomes eligible to run again.
     pub next_attempt_at: Option<DateTime<Utc>>,
     /// Human-readable event message; defaults to "state: from -> to".
+    pub message: Option<String>,
+}
+
+/// Optional data recorded atomically with a post-processing state change.
+#[derive(Debug, Clone, Default)]
+pub struct PostDetails {
+    /// Stored as `post_error`: why it failed, was skipped, or fell back.
+    /// `None` clears it.
+    pub error: Option<DownloadError>,
+    /// The file's new location, after it was moved.
+    pub file_path: Option<String>,
+    /// Event message; defaults to "post-processing <state>".
     pub message: Option<String>,
 }
 
@@ -136,8 +149,8 @@ impl Store {
         let row: DownloadRow = sqlx::query_as(
             "INSERT INTO downloads
                 (id, url, display_url, provider, download_password, filename, media_type,
-                 title, artwork_id, state, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)
+                 title, year, artwork_id, state, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)
              RETURNING *",
         )
         .bind(id.to_string())
@@ -148,6 +161,7 @@ impl Store {
         .bind(&new.filename)
         .bind(new.media_type.map(MediaType::as_str))
         .bind(&new.title)
+        .bind(new.year)
         .bind(&new.artwork_id)
         .bind(ts)
         .bind(ts)
@@ -287,6 +301,24 @@ impl Store {
         error: Option<DownloadError>,
         now: DateTime<Utc>,
     ) -> AppResult<Download> {
+        let details = PostDetails {
+            error,
+            ..Default::default()
+        };
+        self.transition_post_with(id, from, to, details, now).await
+    }
+
+    /// Like [`Store::transition_post`], with the organized file's new
+    /// location and the event message. Leaving `Processing` for a final
+    /// state forgets the recorded move target.
+    pub async fn transition_post_with(
+        &self,
+        id: Uuid,
+        from: PostState,
+        to: PostState,
+        details: PostDetails,
+        now: DateTime<Utc>,
+    ) -> AppResult<Download> {
         if !from.can_transition_to(to) {
             return Err(AppError::conflict(format!(
                 "cannot change post-processing from {} to {}",
@@ -295,14 +327,20 @@ impl Store {
             )));
         }
         let ts = now.timestamp_millis();
-        let (kind, message) = match &error {
+        let (kind, message) = match &details.error {
             Some(e) => (Some(e.kind.as_str()), Some(e.message.as_str())),
             None => (None, None),
         };
+        let forget_target = matches!(
+            to,
+            PostState::Completed | PostState::Failed | PostState::Skipped
+        );
         let mut tx = self.pool.begin().await?;
         let row: Option<DownloadRow> = sqlx::query_as(
             "UPDATE downloads SET
-                post_state = ?1, updated_at = ?2, post_error_kind = ?3, post_error_message = ?4
+                post_state = ?1, updated_at = ?2, post_error_kind = ?3, post_error_message = ?4,
+                file_path = COALESCE(?7, file_path),
+                post_target = CASE WHEN ?8 THEN NULL ELSE post_target END
              WHERE id = ?5 AND post_state = ?6 AND state = 'completed'
              RETURNING *",
         )
@@ -312,6 +350,8 @@ impl Store {
         .bind(message)
         .bind(id.to_string())
         .bind(from.as_str())
+        .bind(details.file_path.as_deref())
+        .bind(forget_target)
         .fetch_optional(&mut *tx)
         .await?;
         let Some(row) = row else {
@@ -323,9 +363,10 @@ impl Store {
                 }
             });
         };
-        let event_message = match &error {
-            Some(e) => format!("post-processing {}: {}", to.as_str(), e.message),
-            None => format!("post-processing {}", to.as_str()),
+        let event_message = match (&details.message, &details.error) {
+            (Some(m), _) => m.clone(),
+            (None, Some(e)) => format!("post-processing {}: {}", to.as_str(), e.message),
+            (None, None) => format!("post-processing {}", to.as_str()),
         };
         insert_event(
             &mut tx,
@@ -337,6 +378,38 @@ impl Store {
         .await?;
         tx.commit().await?;
         row.try_into()
+    }
+
+    /// The completed download that has waited longest for post-processing.
+    pub async fn next_post_pending(&self) -> AppResult<Option<Uuid>> {
+        let id: Option<String> = sqlx::query_scalar(
+            "SELECT id FROM downloads WHERE state = 'completed' AND post_state = 'pending'
+             ORDER BY completed_at, rowid LIMIT 1",
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+        id.map(|id| Uuid::parse_str(&id).map_err(|_| corrupt("invalid download id")))
+            .transpose()
+    }
+
+    /// Record where post-processing is about to move the file. Only applies
+    /// while it is `Processing`; returns whether a row was updated.
+    pub async fn set_post_target(
+        &self,
+        id: Uuid,
+        target: &str,
+        now: DateTime<Utc>,
+    ) -> AppResult<bool> {
+        let result = sqlx::query(
+            "UPDATE downloads SET post_target = ?1, updated_at = ?2
+             WHERE id = ?3 AND post_state = 'processing'",
+        )
+        .bind(target)
+        .bind(now.timestamp_millis())
+        .bind(id.to_string())
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
     }
 
     /// Record transfer progress without changing state. Only applies while the
@@ -620,6 +693,8 @@ struct DownloadRow {
     media_type: Option<String>,
     title: Option<String>,
     artwork_id: Option<String>,
+    year: Option<i64>,
+    post_target: Option<String>,
     created_at: i64,
     updated_at: i64,
     completed_at: Option<i64>,
@@ -654,6 +729,8 @@ impl TryFrom<DownloadRow> for Download {
                 .transpose()?,
             title: r.title,
             artwork_id: r.artwork_id,
+            year: r.year.and_then(|y| u16::try_from(y).ok()),
+            post_target: r.post_target,
             created_at: from_millis(r.created_at)?,
             updated_at: from_millis(r.updated_at)?,
             completed_at: r.completed_at.map(from_millis).transpose()?,

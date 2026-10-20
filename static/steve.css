@@ -865,6 +865,7 @@ td button { padding: 0.3rem 0.85rem; font-size: 0.82rem; }
 .tint-blue { background: linear-gradient(180deg, #5ac8fa, #007aff); }
 .tint-indigo { background: linear-gradient(180deg, #7d7aff, #5856d6); }
 .tint-green { background: linear-gradient(180deg, #5fd97a, #34c759); }
+.tint-teal { background: linear-gradient(180deg, #6ad4e0, #30b0c7); }
 .panel-title { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .panel-name { font-size: 1rem; font-weight: 500; color: var(--text); }
 .panel-desc { font-size: 0.8rem; color: var(--muted); }

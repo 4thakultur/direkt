@@ -168,6 +168,8 @@ struct Inner {
     settings: EngineSettings,
     limits: Limits,
     wake: Notify,
+    /// Signalled when a transfer completes, for media organization.
+    completed: Arc<Notify>,
     shutdown: CancellationToken,
     running: Mutex<HashMap<Uuid, RunningJob>>,
     throughput: Mutex<Throughput>,
@@ -225,6 +227,7 @@ impl Engine {
                 settings,
                 limits,
                 wake: Notify::new(),
+                completed: Arc::new(Notify::new()),
                 shutdown: CancellationToken::new(),
                 running: Mutex::new(HashMap::new()),
                 throughput: Mutex::new(Throughput::default()),
@@ -243,6 +246,17 @@ impl Engine {
     /// Signal that new work may be available.
     pub fn wake(&self) {
         self.inner.wake.notify_one();
+    }
+
+    /// Notified whenever a transfer completes, and by
+    /// [`Engine::wake_post_processing`]: what media organization waits on.
+    pub fn completions(&self) -> Arc<Notify> {
+        self.inner.completed.clone()
+    }
+
+    /// Signal that a download is waiting for media organization.
+    pub fn wake_post_processing(&self) {
+        self.inner.completed.notify_one();
     }
 
     /// Stop all transfers (they return to the queue with partial data kept)
@@ -522,13 +536,17 @@ async fn run_job(
         ),
         Err(err) => failure_transition(&inner.settings, &download, err, now),
     };
-    if let Err(e) = inner
+    match inner
         .store
         .transition(id, TransferState::Downloading, to, details, now)
         .await
     {
+        Ok(_) if to == TransferState::Completed => inner.completed.notify_one(),
+        Ok(_) => {}
         // On restart, recovery re-queues anything left in `downloading`.
-        tracing::error!(%id, error = %e, target = to.as_str(), "failed to record transfer result");
+        Err(e) => {
+            tracing::error!(%id, error = %e, target = to.as_str(), "failed to record transfer result");
+        }
     }
 }
 

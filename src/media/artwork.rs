@@ -387,6 +387,7 @@ pub(crate) mod tests {
             year: None,
             season: Some(2),
             episode: None,
+            last_episode: None,
         }
     }
 

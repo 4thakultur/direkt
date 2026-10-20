@@ -111,6 +111,7 @@ mod tests {
             year: None,
             season: None,
             episode: None,
+            last_episode: None,
         };
         assert_eq!(
             choose(&guess("Hades II"), &items),

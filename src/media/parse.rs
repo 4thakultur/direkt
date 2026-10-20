@@ -20,6 +20,8 @@ pub struct MediaGuess {
     pub year: Option<u16>,
     pub season: Option<u32>,
     pub episode: Option<u32>,
+    /// Last episode of a multi-episode file (`S01E01E02`, `S01E01-E03`).
+    pub last_episode: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -153,7 +155,7 @@ const SOFTWARE_WORDS: &[&str] = &[
 ];
 
 static SEASON_EPISODE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)^s(\d{1,2})(?:e(\d{1,3}))?(?:-?e\d{1,3})*$").expect("valid regex")
+    Regex::new(r"(?i)^s(\d{1,2})(?:e(\d{1,3}))?(?:-?e(\d{1,3}))*$").expect("valid regex")
 });
 static CROSS_EPISODE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^(\d{1,2})x(\d{2,3})$").expect("valid regex"));
@@ -286,17 +288,15 @@ fn release_guess(name: &Name) -> Option<MediaGuess> {
 
 fn tv_guess(tokens: &[&str]) -> Option<MediaGuess> {
     for (i, token) in tokens.iter().enumerate().skip(1) {
-        let (season, episode) = if let Some(c) = SEASON_EPISODE.captures(token) {
-            (
-                c[1].parse().ok(),
-                c.get(2).and_then(|m| m.as_str().parse().ok()),
-            )
+        let (season, episode, last) = if let Some(c) = SEASON_EPISODE.captures(token) {
+            let number = |i: usize| c.get(i).and_then(|m| m.as_str().parse::<u32>().ok());
+            (c[1].parse().ok(), number(2), number(3))
         } else if let Some(c) = CROSS_EPISODE.captures(token) {
-            (c[1].parse().ok(), c[2].parse().ok())
+            (c[1].parse().ok(), c[2].parse().ok(), None)
         } else if token.eq_ignore_ascii_case("season")
             && let Some(n) = tokens.get(i + 1).and_then(|t| t.parse().ok())
         {
-            (Some(n), None)
+            (Some(n), None, None)
         } else {
             continue;
         };
@@ -310,7 +310,9 @@ fn tv_guess(tokens: &[&str]) -> Option<MediaGuess> {
             year = Some(y);
             title = rest;
         }
-        return guess(MediaType::Tv, title, year, season, episode);
+        let last_episode = last.filter(|&l| episode.is_some_and(|e| l > e));
+        return guess(MediaType::Tv, title, year, season, episode)
+            .map(|g| MediaGuess { last_episode, ..g });
     }
     None
 }
@@ -432,6 +434,7 @@ fn guess(
         year,
         season,
         episode,
+        last_episode: None,
     })
 }
 
@@ -463,6 +466,7 @@ mod tests {
             year,
             season: Some(season),
             episode,
+            last_episode: None,
         })
     }
 
@@ -473,6 +477,7 @@ mod tests {
             year,
             season: None,
             episode: None,
+            last_episode: None,
         })
     }
 
@@ -483,6 +488,7 @@ mod tests {
             year: None,
             season: None,
             episode: None,
+            last_episode: None,
         })
     }
 
@@ -502,7 +508,13 @@ mod tests {
                 tv("Doctor Who", Some(2005), 1, Some(1)),
             ),
             ("Show_Name_2x05_HDTV.avi", tv("Show Name", None, 2, Some(5))),
-            ("Show.S01E01E02.mkv", tv("Show", None, 1, Some(1))),
+            (
+                "Show.S01E01E02.mkv",
+                tv("Show", None, 1, Some(1)).map(|g| MediaGuess {
+                    last_episode: Some(2),
+                    ..g
+                }),
+            ),
             (
                 "[Group] Some Show Season 2 [1080p].mkv",
                 tv("Some Show", None, 2, None),
@@ -512,6 +524,18 @@ mod tests {
             assert_eq!(parse_filename(name), expected, "{name}");
             assert_eq!(detect(name).media_type, MediaType::Tv, "{name}");
         }
+    }
+
+    #[test]
+    fn multi_episode_names() {
+        let last = |name: &str| parse_filename(name).and_then(|g| g.last_episode);
+        assert_eq!(last("Show.S01E01E02.mkv"), Some(2));
+        assert_eq!(last("Show.S01E01-E03.720p.mkv"), Some(3));
+        assert_eq!(last("Show.S01E05.mkv"), None);
+        assert_eq!(last("Show.S01E05E05.mkv"), None, "not a range");
+        assert_eq!(last("Show.S01E05E02.mkv"), None, "backwards");
+        let g = parse_filename("Show.S01E01E02.mkv").unwrap();
+        assert_eq!((g.season, g.episode), (Some(1), Some(1)));
     }
 
     #[test]

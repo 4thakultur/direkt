@@ -82,6 +82,7 @@ impl TestApp {
             crate::settings::EnvKeys {
                 onefichier: env_onefichier_key,
                 tmdb: None,
+                ..Default::default()
             },
             account.clone(),
             limits.clone(),
@@ -2005,4 +2006,122 @@ async fn download_starts_without_confirmation_when_turned_off() {
         .await;
     assert_eq!(r.status, StatusCode::BAD_REQUEST);
     assert!(r.body.contains("flash error"));
+}
+
+#[tokio::test]
+async fn library_folders_via_api_and_settings_page() {
+    let (app, cookie) = TestApp::with_admin().await;
+    let auth = cookie_header(&cookie);
+    let r = app.get("/api/v1/settings/library", &auth).await;
+    assert_eq!(r.status, StatusCode::OK);
+    assert_eq!(r.json()["movies"]["path"], Value::Null);
+    assert!(
+        app.get("/settings", &auth)
+            .await
+            .body
+            .contains("Media library")
+    );
+
+    let movies = app._dir.path().join("movies");
+    std::fs::create_dir(&movies).unwrap();
+    let movies = movies.to_string_lossy().into_owned();
+    let r = app
+        .patch_json(
+            "/api/v1/settings/library",
+            &cookie,
+            serde_json::json!({ "movies": movies }),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    assert_eq!(r.json()["movies"]["path"], movies.as_str());
+    assert_eq!(r.json()["movies"]["source"], "settings");
+
+    let r = app
+        .patch_json(
+            "/api/v1/settings/library",
+            &cookie,
+            serde_json::json!({ "tv": "relative/path" }),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST);
+    assert!(r.body.contains("absolute"), "{}", r.body);
+
+    let r = app
+        .post_form(
+            "/settings/library",
+            &auth,
+            "movies=%2Fdoes%2Fnot%2Fexist&tv=&unsorted=",
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST);
+    assert!(r.body.contains("does not exist"));
+    assert!(r.body.contains("id=\"library\" open"), "section stays open");
+
+    let r = app
+        .post_form("/settings/library", &auth, "movies=&tv=&unsorted=")
+        .await;
+    assert_eq!(r.status, StatusCode::OK);
+    assert!(r.body.contains("Downloads stay in the download folder"));
+    let r = app.get("/api/v1/settings/library", &auth).await;
+    assert_eq!(r.json()["movies"]["path"], Value::Null);
+}
+
+#[tokio::test]
+async fn skipped_downloads_can_be_organized_again() {
+    use crate::domain::PostState;
+    let (app, cookie) = TestApp::with_admin().await;
+    let auth = cookie_header(&cookie);
+    let id = app
+        .completed_download(&app.download_dir().join("movie.mkv"))
+        .await;
+
+    // Waiting already: nothing to do.
+    let r = app
+        .post_json(
+            &format!("/api/v1/downloads/{id}/organize"),
+            &auth,
+            Value::Null,
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::CONFLICT);
+
+    let uuid = uuid::Uuid::parse_str(&id).unwrap();
+    app.store
+        .transition_post(
+            uuid,
+            PostState::Pending,
+            PostState::Skipped,
+            None,
+            chrono::Utc::now(),
+        )
+        .await
+        .unwrap();
+    let r = app
+        .post_json(
+            &format!("/api/v1/downloads/{id}/organize"),
+            &auth,
+            Value::Null,
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    assert_eq!(r.json()["post_state"], "pending");
+    assert_eq!(r.json()["state"], "completed");
+
+    app.store
+        .transition_post(
+            uuid,
+            PostState::Pending,
+            PostState::Skipped,
+            None,
+            chrono::Utc::now(),
+        )
+        .await
+        .unwrap();
+    let detail = app.get(&format!("/ui/downloads/{id}/detail"), &auth).await;
+    assert!(detail.body.contains("Organize again"));
+    let r = app
+        .post_form(&format!("/ui/downloads/{id}/organize"), &auth, "")
+        .await;
+    assert_eq!(r.status, StatusCode::OK);
+    assert!(r.body.contains("Queued for organizing"));
 }

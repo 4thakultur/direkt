@@ -11,8 +11,8 @@ use crate::engine::{HISTORY_SECS, LiveSnapshot, ThroughputSnapshot};
 use crate::error::{AppError, ErrorKind};
 use crate::service::Preview;
 use crate::settings::{
-    MiscSettings, MiscUpdate, OneFichierSettings, SECRET_MASK, SpeedUnit, TmdbSettings,
-    parse_speed_limit,
+    FolderSetting, LibrarySettings, LibraryUpdate, MiscSettings, MiscUpdate, OneFichierSettings,
+    SECRET_MASK, SpeedUnit, TmdbSettings, parse_speed_limit,
 };
 use crate::store::ApiToken;
 use askama::Template;
@@ -58,6 +58,7 @@ pub fn protected_routes() -> Router<AppState> {
         .route("/settings/tmdb", post(save_tmdb))
         .route("/settings/tmdb/remove", post(remove_tmdb))
         .route("/settings/misc", post(save_misc))
+        .route("/settings/library", post(save_library))
         .route("/artwork/{id}", get(artwork_image))
         .route("/settings/onefichier", post(save_onefichier))
         .route("/settings/onefichier/remove", post(remove_onefichier))
@@ -228,11 +229,14 @@ fn state_label(state: TransferState) -> &'static str {
     }
 }
 
-fn post_label(state: PostState) -> Option<&'static str> {
+/// `noted`: post-processing left a note, which for a completed one means
+/// the file went to the fallback folder.
+fn post_label(state: PostState, noted: bool) -> Option<&'static str> {
     match state {
         PostState::None => None,
         PostState::Pending => Some("Organizing pending"),
         PostState::Processing => Some("Organizing"),
+        PostState::Completed if noted => Some("Needs sorting"),
         PostState::Completed => Some("Organized"),
         PostState::Failed => Some("Organizing failed"),
         PostState::Skipped => None,
@@ -267,6 +271,8 @@ struct DownloadView {
     can_delete: bool,
     /// Delete a completed download's file as well. Dashboard only.
     can_delete_file: bool,
+    /// Organize again, after organizing failed or was skipped.
+    can_organize: bool,
     /// Downloading without a known size: show an indeterminate bar.
     indeterminate: bool,
     /// Short label on the cover tile, e.g. the file extension.
@@ -306,7 +312,12 @@ impl DownloadView {
     fn new(d: Download, live: Option<LiveSnapshot>, unit: SpeedUnit) -> Self {
         use TransferState::*;
         let deletable_completed = d.state == Completed && d.post_state != PostState::Processing;
-        let can_delete_file = deletable_completed && d.file_path.is_some();
+        // An organized file is in the media library, which Direkt never
+        // deletes from.
+        let can_delete_file =
+            deletable_completed && d.file_path.is_some() && d.post_state != PostState::Completed;
+        let can_organize =
+            d.state == Completed && matches!(d.post_state, PostState::Failed | PostState::Skipped);
         let downloaded = live
             .map(|l| l.downloaded_bytes)
             .unwrap_or(u64::try_from(d.downloaded_bytes).unwrap_or(0));
@@ -358,7 +369,7 @@ impl DownloadView {
             provider: d.provider,
             state: d.state.as_str(),
             state_label: state_label(d.state),
-            post_label: post_label(d.post_state),
+            post_label: post_label(d.post_state, d.post_error.is_some()),
             percent,
             progress,
             speed,
@@ -375,6 +386,7 @@ impl DownloadView {
             can_cancel: matches!(d.state, Queued | Downloading | Retrying | Paused | Blocked),
             can_delete: d.state == Cancelled || deletable_completed,
             can_delete_file,
+            can_organize,
         }
     }
 }
@@ -1130,6 +1142,7 @@ async fn download_action(
             .await
             .map(|()| "Removed from the list"),
         "delete-file" => service.delete(id, true).await.map(|()| "File deleted"),
+        "organize" => service.organize(id).await.map(|_| "Queued for organizing"),
         _ => Err(AppError::not_found("unknown action")),
     };
     match result {
@@ -1257,6 +1270,7 @@ struct SettingsPage {
     theme: Theme,
     onefichier: OneFichierSettings,
     tmdb: TmdbSettings,
+    library: LibraryView,
     misc: MiscView,
     cdn: Option<CdnDisplay>,
     /// The account has CDN credits it uses for its own downloads.
@@ -1276,11 +1290,13 @@ const SECTION_TOKENS: &str = "tokens";
 const SECTION_PASSWORD: &str = "password";
 const SECTION_APPEARANCE: &str = "appearance";
 const SECTION_MISC: &str = "misc";
+const SECTION_LIBRARY: &str = "library";
 
 async fn settings_with(state: &AppState, theme: Theme, mut page: SettingsPage) -> SettingsPage {
     page.theme = theme;
     page.onefichier = state.settings.onefichier();
     page.tmdb = state.settings.tmdb();
+    page.library = LibraryView::from(state.settings.library());
     page.misc = MiscView::from(&state.settings.misc());
     page.cdn = page.onefichier.cdn.as_ref().map(CdnDisplay::from);
     page.has_credits = page
@@ -1638,6 +1654,120 @@ async fn save_misc(
         Err(e) => Err(e),
     };
     section_result(&state, theme, SECTION_MISC, result).await
+}
+
+/// Library folders prepared for the settings page.
+#[derive(Default)]
+struct LibraryView {
+    folders: Vec<FolderView>,
+    /// The pill: which libraries are set.
+    summary: &'static str,
+    /// Whether any folder is set by the environment.
+    any_locked: bool,
+    /// Whether any folder can be changed here.
+    any_editable: bool,
+}
+
+struct FolderView {
+    /// Form field name.
+    name: &'static str,
+    label: &'static str,
+    hint: &'static str,
+    placeholder: &'static str,
+    path: String,
+    editable: bool,
+}
+
+impl FolderView {
+    fn new(
+        name: &'static str,
+        label: &'static str,
+        hint: &'static str,
+        placeholder: &'static str,
+        f: FolderSetting,
+    ) -> Self {
+        Self {
+            name,
+            label,
+            hint,
+            placeholder,
+            path: f.path.unwrap_or_default(),
+            editable: f.editable,
+        }
+    }
+}
+
+impl From<LibrarySettings> for LibraryView {
+    fn from(l: LibrarySettings) -> Self {
+        let summary = match (l.movies.path.is_some(), l.tv.path.is_some()) {
+            (true, true) => "Movies and TV",
+            (true, false) => "Movies only",
+            (false, true) => "TV only",
+            (false, false) => "Off",
+        };
+        let all = [&l.movies, &l.tv, &l.unsorted];
+        let any_locked = all.iter().any(|f| !f.editable);
+        let any_editable = all.iter().any(|f| f.editable);
+        Self {
+            folders: vec![
+                FolderView::new(
+                    "movies",
+                    "Movies",
+                    "Title (year)/Title (year).mkv",
+                    "/media/movies",
+                    l.movies,
+                ),
+                FolderView::new(
+                    "tv",
+                    "TV series",
+                    "Show (year)/Season 01/Show (year) - S01E02.mkv",
+                    "/media/tv",
+                    l.tv,
+                ),
+                FolderView::new(
+                    "unsorted",
+                    "Fallback",
+                    "videos that can't be identified with confidence",
+                    "/media/unsorted",
+                    l.unsorted,
+                ),
+            ],
+            summary,
+            any_locked,
+            any_editable,
+        }
+    }
+}
+
+/// Fields of locked folders are disabled, so browsers leave them out.
+#[derive(Deserialize)]
+struct LibraryForm {
+    movies: Option<String>,
+    tv: Option<String>,
+    unsorted: Option<String>,
+}
+
+async fn save_library(
+    State(state): State<AppState>,
+    theme: Theme,
+    Form(form): Form<LibraryForm>,
+) -> Response {
+    let result = state
+        .settings
+        .update_library(LibraryUpdate {
+            movies: form.movies,
+            tv: form.tv,
+            unsorted: form.unsorted,
+        })
+        .await
+        .map(|l| {
+            if l.movies.path.is_some() || l.tv.path.is_some() {
+                "Library folders saved. Completed downloads are organized into them from now on."
+            } else {
+                "Library folders saved. Downloads stay in the download folder."
+            }
+        });
+    section_result(&state, theme, SECTION_LIBRARY, result).await
 }
 
 #[derive(Deserialize)]

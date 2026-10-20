@@ -3,7 +3,7 @@
 use direkt::auth::AuthService;
 use direkt::config::{Config, LogFormat};
 use direkt::engine::{Engine, EngineSettings, Limits};
-use direkt::media::ArtworkService;
+use direkt::media::{ArtworkService, Organizer};
 use direkt::net::NetworkPolicy;
 use direkt::providers::{OneFichierAccount, Providers};
 use direkt::service::DownloadService;
@@ -124,6 +124,8 @@ async fn serve(config: Config, config_path: &Path) -> anyhow::Result<()> {
             .map_err(|e| anyhow::anyhow!("{e}"))?,
         tmdb: direkt::config::tmdb_key_from_env(|name| std::env::var(name).ok())
             .map_err(|e| anyhow::anyhow!("{e}"))?,
+        library: direkt::config::library_from_env(|name| std::env::var(name).ok())
+            .map_err(|e| anyhow::anyhow!("{e}"))?,
     };
     let policy = NetworkPolicy::new(config.network.allowed_private_networks.clone());
     let onefichier_account = OneFichierAccount::open(store.clone(), policy.clone())
@@ -160,6 +162,13 @@ async fn serve(config: Config, config_path: &Path) -> anyhow::Result<()> {
         client.clone(),
         settings.tmdb_key(),
     );
+    let organizer = Organizer::new(
+        store.clone(),
+        settings.library_cell(),
+        artwork.clone(),
+        engine.completions(),
+    );
+    let organizing = organizer.start();
     let downloads = DownloadService::new(
         store.clone(),
         engine.clone(),
@@ -182,6 +191,7 @@ async fn serve(config: Config, config_path: &Path) -> anyhow::Result<()> {
     web::server::serve(listener, app, shutdown_signal()).await?;
 
     engine.shutdown(dispatcher).await;
+    organizer.shutdown(organizing).await;
     store.close().await;
     tracing::info!("shutdown complete");
     Ok(())

@@ -7,7 +7,9 @@ use crate::domain::{Download, DownloadError, DownloadEvent, MediaType, PostState
 use crate::engine::LiveSnapshot;
 use crate::error::{AppError, ErrorKind};
 use crate::service::Preview;
-use crate::settings::{MiscSettings, MiscUpdate, OneFichierSettings, TmdbSettings};
+use crate::settings::{
+    LibrarySettings, LibraryUpdate, MiscSettings, MiscUpdate, OneFichierSettings, TmdbSettings,
+};
 use crate::store::ApiToken;
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -34,6 +36,7 @@ pub fn routes() -> Router<AppState> {
         .route("/downloads/{id}/resume", post(resume_download))
         .route("/downloads/{id}/cancel", post(cancel_download))
         .route("/downloads/{id}/retry", post(retry_download))
+        .route("/downloads/{id}/organize", post(organize_download))
         .route("/previews", post(create_preview))
         .route("/previews/{id}", put(retype_preview))
         .route("/stats", get(get_stats))
@@ -54,6 +57,7 @@ pub fn routes() -> Router<AppState> {
             post(refresh_onefichier_cdn),
         )
         .route("/settings/misc", get(get_misc).patch(patch_misc))
+        .route("/settings/library", get(get_library).patch(patch_library))
         .route(
             "/settings/tmdb",
             get(get_tmdb).put(put_tmdb).delete(delete_tmdb),
@@ -85,14 +89,17 @@ pub struct DownloadDto {
     pub next_attempt_at: Option<DateTime<Utc>>,
     /// Last transfer error.
     pub error: Option<DownloadError>,
-    /// Last post-processing error. Never affects the transfer state.
+    /// Why post-processing failed, was skipped, or put the file in the
+    /// fallback folder. Never affects the transfer state.
     pub post_error: Option<DownloadError>,
-    /// Location of the completed file.
+    /// Location of the completed file: in the media library once organized.
     pub file_path: Option<String>,
     /// Chosen when the download was confirmed.
     pub media_type: Option<MediaType>,
     /// Title found by the metadata lookup.
     pub title: Option<String>,
+    /// Release year found by the metadata lookup.
+    pub year: Option<u16>,
     /// Cached artwork, served at `/artwork/{id}` (session login).
     pub artwork_id: Option<String>,
     pub created_at: DateTime<Utc>,
@@ -122,6 +129,7 @@ impl DownloadDto {
             file_path: d.file_path,
             media_type: d.media_type,
             title: d.title,
+            year: d.year,
             artwork_id: d.artwork_id,
             created_at: d.created_at,
             updated_at: d.updated_at,
@@ -551,6 +559,27 @@ async fn retry_download(
     )))
 }
 
+/// Organize a completed download again, after organizing failed or was
+/// skipped (for example before a library folder was set).
+#[utoipa::path(
+    post, path = "/api/v1/downloads/{id}/organize", tag = "downloads",
+    params(("id" = Uuid, Path, description = "Download ID")),
+    responses(
+        (status = 200, description = "Waiting to be organized", body = DownloadDto),
+        (status = 404, body = ErrorBody),
+        (status = 409, description = "Not completed, or already organized or waiting", body = ErrorBody),
+    )
+)]
+async fn organize_download(
+    State(state): State<AppState>,
+    ApiPath(id): ApiPath<Uuid>,
+) -> ApiResult<Json<DownloadDto>> {
+    Ok(Json(DownloadDto::new(
+        state.downloads.organize(id).await?,
+        None,
+    )))
+}
+
 /// List API tokens (secrets are never returned).
 #[utoipa::path(
     get, path = "/api/v1/tokens", tag = "tokens",
@@ -666,6 +695,35 @@ async fn patch_misc(
     ApiJson(body): ApiJson<MiscUpdate>,
 ) -> ApiResult<Json<MiscSettings>> {
     Ok(Json(state.settings.update_misc(body).await?))
+}
+
+/// Media library folders that completed movies and episodes are organized
+/// into.
+#[utoipa::path(
+    get, path = "/api/v1/settings/library", tag = "settings",
+    responses((status = 200, body = LibrarySettings))
+)]
+async fn get_library(State(state): State<AppState>) -> Json<LibrarySettings> {
+    Json(state.settings.library())
+}
+
+/// Change the media library folders. Fields left out keep their value; an
+/// empty string removes a folder. Each folder must be an existing directory
+/// Direkt can write to, given as an absolute path.
+#[utoipa::path(
+    patch, path = "/api/v1/settings/library", tag = "settings",
+    request_body = LibraryUpdate,
+    responses(
+        (status = 200, body = LibrarySettings),
+        (status = 400, description = "A folder is not usable", body = ErrorBody),
+        (status = 409, description = "The folder is set by an environment variable", body = ErrorBody),
+    )
+)]
+async fn patch_library(
+    State(state): State<AppState>,
+    ApiJson(body): ApiJson<LibraryUpdate>,
+) -> ApiResult<Json<LibrarySettings>> {
+    Ok(Json(state.settings.update_library(body).await?))
 }
 
 /// TMDB settings (artwork lookup). The key itself is never returned.
@@ -804,12 +862,12 @@ async fn sign_out_onefichier(State(state): State<AppState>) -> ApiResult<Json<On
     ),
     paths(
         create_download, create_preview, retype_preview, list_downloads, get_download, download_events,
-        pause_download, resume_download, cancel_download, retry_download,
+        pause_download, resume_download, cancel_download, retry_download, organize_download,
         delete_download, delete_cancelled_downloads, delete_completed_downloads, get_stats,
         list_tokens, create_token, revoke_token,
         get_onefichier, put_onefichier, delete_onefichier,
         sign_in_onefichier, sign_out_onefichier, refresh_onefichier_cdn,
-        get_tmdb, put_tmdb, delete_tmdb, get_misc, patch_misc,
+        get_tmdb, put_tmdb, delete_tmdb, get_misc, patch_misc, get_library, patch_library,
     ),
     components(schemas(ErrorBody, ErrorKind)),
     modifiers(&SecuritySchemes),
