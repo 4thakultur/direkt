@@ -3,7 +3,7 @@
 A self-hostable direct download manager for homelabs, written in Rust.
 
 > **Status:** early development. HTTP/HTTPS downloads, 1fichier premium
-> downloads, the web UI, and the API work. Media organization and Docker
+> downloads, the web UI with TMDB cover artwork, and the API work. Media organization and Docker
 > packaging are next. Telegram notifications are planned after v1.
 
 ## First run
@@ -29,7 +29,8 @@ See [`direkt.example.toml`](direkt.example.toml) for every configuration option,
 [`docs/state-machine.md`](docs/state-machine.md) for the download lifecycle, and
 [`docs/download-engine.md`](docs/download-engine.md) for resume, retry, and
 network-security behavior, [`docs/api.md`](docs/api.md) for the HTTP API, and
-[`docs/providers/1fichier.md`](docs/providers/1fichier.md) for 1fichier.
+[`docs/providers/1fichier.md`](docs/providers/1fichier.md) for 1fichier, and
+[`docs/artwork.md`](docs/artwork.md) for cover artwork from TMDB.
 
 `cargo test` needs no network access. One opt-in test downloads a real file
 over HTTPS: `cargo test -- --ignored real_https`.

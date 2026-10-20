@@ -9,7 +9,8 @@ use super::{AppState, clear_session_cookie, client_ip, read_cookie, session_cook
 use crate::domain::{Download, DownloadEvent, PostState, TransferState};
 use crate::engine::{HISTORY_SECS, LiveSnapshot, ThroughputSnapshot};
 use crate::error::{AppError, ErrorKind};
-use crate::settings::{OneFichierSettings, SECRET_MASK};
+use crate::media::ArtworkService;
+use crate::settings::{OneFichierSettings, SECRET_MASK, TmdbSettings};
 use crate::store::ApiToken;
 use askama::Template;
 use axum::Router;
@@ -45,6 +46,9 @@ pub fn protected_routes() -> Router<AppState> {
         .route("/settings/tokens", post(create_token))
         .route("/settings/tokens/{id}/revoke", post(revoke_token))
         .route("/settings/password", post(change_password))
+        .route("/settings/tmdb", post(save_tmdb))
+        .route("/settings/tmdb/remove", post(remove_tmdb))
+        .route("/artwork/{id}", get(artwork_image))
         .route("/settings/onefichier", post(save_onefichier))
         .route("/settings/onefichier/remove", post(remove_onefichier))
         .route("/settings/onefichier/sign-in", post(sign_in_onefichier))
@@ -180,6 +184,8 @@ struct DownloadView {
     badge: String,
     /// Cover tile color, `0..TILE_HUES`.
     hue: u8,
+    /// Cached artwork id, shown instead of the badge.
+    artwork: Option<String>,
     /// When it finished, for the completed list.
     finished: Option<String>,
 }
@@ -209,7 +215,7 @@ fn url_file_name(display_url: &str) -> Option<String> {
 }
 
 impl DownloadView {
-    fn new(d: Download, live: Option<LiveSnapshot>) -> Self {
+    fn new(d: Download, live: Option<LiveSnapshot>, artwork: &ArtworkService) -> Self {
         use TransferState::*;
         let downloaded = live
             .map(|l| l.downloaded_bytes)
@@ -244,12 +250,11 @@ impl DownloadView {
             (_, Some(e), _) => Some(e.message.clone()),
             _ => None,
         };
-        let name = d
-            .filename
-            .clone()
-            .or_else(|| url_file_name(&d.display_url))
-            .unwrap_or_else(|| d.display_url.clone());
+        let file_name = d.filename.clone().or_else(|| url_file_name(&d.display_url));
+        let artwork = file_name.as_deref().and_then(|n| artwork.lookup(n));
+        let name = file_name.unwrap_or_else(|| d.display_url.clone());
         Self {
+            artwork,
             id: d.id.to_string(),
             badge: tile_badge(&name),
             hue: (d.id.as_u128() % TILE_HUES) as u8,
@@ -298,6 +303,25 @@ impl From<DownloadEvent> for EventView {
 // ---------------------------------------------------------------------------
 // Static assets
 // ---------------------------------------------------------------------------
+
+/// A cached artwork image. Ids are content-addressed, so browsers may keep it.
+async fn artwork_image(State(state): State<AppState>, Path(id): Path<String>) -> Response {
+    match state.artwork.image(&id).await {
+        Ok(Some((bytes, content_type))) => (
+            [
+                (header::CONTENT_TYPE, content_type),
+                (header::CACHE_CONTROL, "private, max-age=604800"),
+            ],
+            bytes,
+        )
+            .into_response(),
+        Ok(None) => (StatusCode::NOT_FOUND, "Not found").into_response(),
+        Err(e) => {
+            tracing::warn!(error = %e, "reading cached artwork failed");
+            (StatusCode::INTERNAL_SERVER_ERROR, "Internal error").into_response()
+        }
+    }
+}
 
 async fn htmx_js() -> impl IntoResponse {
     (
@@ -586,7 +610,7 @@ async fn load_dashboard(state: &AppState) -> Dashboard {
 
     let view = |d: Download| {
         let live = service.live(d.id);
-        DownloadView::new(d, live)
+        DownloadView::new(d, live, &state.artwork)
     };
     let mut downloading = Vec::new();
     let mut up_next = Vec::new();
@@ -738,7 +762,7 @@ async fn load_detail(
     let events = state.downloads.events(id).await?;
     let live = state.downloads.live(id);
     Ok((
-        DownloadView::new(download, live),
+        DownloadView::new(download, live, &state.artwork),
         events.into_iter().rev().map(EventView::from).collect(),
     ))
 }
@@ -792,6 +816,7 @@ impl From<ApiToken> for TokenView {
 #[template(path = "settings.html")]
 struct SettingsPage {
     onefichier: OneFichierSettings,
+    tmdb: TmdbSettings,
     cdn: Option<CdnDisplay>,
     /// The account has CDN credits it uses for its own downloads.
     has_credits: bool,
@@ -805,11 +830,13 @@ struct SettingsPage {
 
 /// Collapsible sections of the settings page, by element id.
 const SECTION_ONEFICHIER: &str = "onefichier";
+const SECTION_TMDB: &str = "artwork";
 const SECTION_TOKENS: &str = "tokens";
 const SECTION_PASSWORD: &str = "password";
 
 async fn settings_with(state: &AppState, mut page: SettingsPage) -> SettingsPage {
     page.onefichier = state.settings.onefichier();
+    page.tmdb = state.settings.tmdb();
     page.cdn = page.onefichier.cdn.as_ref().map(CdnDisplay::from);
     page.has_credits = page
         .onefichier
@@ -973,15 +1000,55 @@ async fn remove_onefichier(State(state): State<AppState>) -> Response {
     settings_result(&state, result).await
 }
 
+#[derive(Deserialize)]
+struct TmdbForm {
+    api_key: String,
+}
+
+async fn save_tmdb(State(state): State<AppState>, Form(form): Form<TmdbForm>) -> Response {
+    let value = form.api_key.trim();
+    // The form is pre-filled with the mask; submitting it unchanged is a no-op.
+    let result = if value == SECRET_MASK && state.settings.tmdb().configured {
+        Ok("TMDB API key unchanged.")
+    } else if value.is_empty() {
+        Err(AppError::invalid("enter a TMDB API key"))
+    } else {
+        state
+            .settings
+            .set_tmdb_key(value)
+            .await
+            .map(|_| "TMDB API key saved. Artwork appears as downloads are shown.")
+    };
+    section_result(&state, SECTION_TMDB, result).await
+}
+
+async fn remove_tmdb(State(state): State<AppState>) -> Response {
+    let result = state
+        .settings
+        .clear_tmdb_key()
+        .await
+        .map(|_| "TMDB API key removed. Artwork already found stays cached.");
+    section_result(&state, SECTION_TMDB, result).await
+}
+
 /// Render the settings page after a 1fichier action, with that section open.
 async fn settings_result(state: &AppState, result: Result<&str, AppError>) -> Response {
+    section_result(state, SECTION_ONEFICHIER, result).await
+}
+
+/// Render the settings page after an action, with its section open.
+async fn section_result(
+    state: &AppState,
+    open: &'static str,
+    result: Result<&str, AppError>,
+) -> Response {
     match result {
         Ok(message) => render(
             &settings_with(
                 state,
                 SettingsPage {
                     message: Some(message.to_owned()),
-                    open: SECTION_ONEFICHIER,
+                    open,
                     ..Default::default()
                 },
             )
@@ -991,7 +1058,7 @@ async fn settings_result(state: &AppState, result: Result<&str, AppError>) -> Re
             let status = status_for(&e);
             let page = SettingsPage {
                 error: Some(e.message),
-                open: SECTION_ONEFICHIER,
+                open,
                 ..Default::default()
             };
             render_status(status, &settings_with(state, page).await)

@@ -6,7 +6,7 @@ use super::{ApiError, AppState, ErrorBody};
 use crate::domain::{Download, DownloadError, DownloadEvent, PostState, TransferState};
 use crate::engine::LiveSnapshot;
 use crate::error::{AppError, ErrorKind};
-use crate::settings::OneFichierSettings;
+use crate::settings::{OneFichierSettings, TmdbSettings};
 use crate::store::ApiToken;
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -47,6 +47,10 @@ pub fn routes() -> Router<AppState> {
         .route(
             "/settings/onefichier/cdn/refresh",
             post(refresh_onefichier_cdn),
+        )
+        .route(
+            "/settings/tmdb",
+            get(get_tmdb).put(put_tmdb).delete(delete_tmdb),
         )
 }
 
@@ -488,6 +492,53 @@ async fn delete_onefichier(State(state): State<AppState>) -> ApiResult<Json<OneF
     Ok(Json(state.settings.clear_onefichier_key().await?))
 }
 
+/// TMDB settings (artwork lookup). The key itself is never returned.
+#[utoipa::path(
+    get, path = "/api/v1/settings/tmdb", tag = "settings",
+    responses((status = 200, body = TmdbSettings))
+)]
+async fn get_tmdb(State(state): State<AppState>) -> Json<TmdbSettings> {
+    Json(state.settings.tmdb())
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SetTmdbKey {
+    /// TMDB API key (32 hex digits) or API read access token, from
+    /// themoviedb.org (Settings → API).
+    pub api_key: String,
+}
+
+/// Set the TMDB key. Artwork lookups use it immediately, and names that found
+/// nothing without it are looked up again.
+#[utoipa::path(
+    put, path = "/api/v1/settings/tmdb", tag = "settings",
+    request_body = SetTmdbKey,
+    responses(
+        (status = 200, body = TmdbSettings),
+        (status = 400, description = "Not a valid TMDB key", body = ErrorBody),
+        (status = 409, description = "Set by environment variable", body = ErrorBody),
+    )
+)]
+async fn put_tmdb(
+    State(state): State<AppState>,
+    ApiJson(body): ApiJson<SetTmdbKey>,
+) -> ApiResult<Json<TmdbSettings>> {
+    Ok(Json(state.settings.set_tmdb_key(&body.api_key).await?))
+}
+
+/// Remove the stored TMDB key. Cached artwork stays.
+#[utoipa::path(
+    delete, path = "/api/v1/settings/tmdb", tag = "settings",
+    responses(
+        (status = 200, body = TmdbSettings),
+        (status = 409, description = "Set by environment variable", body = ErrorBody),
+    )
+)]
+async fn delete_tmdb(State(state): State<AppState>) -> ApiResult<Json<TmdbSettings>> {
+    Ok(Json(state.settings.clear_tmdb_key().await?))
+}
+
 #[derive(Debug, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct OneFichierSignIn {
@@ -581,6 +632,7 @@ async fn sign_out_onefichier(State(state): State<AppState>) -> ApiResult<Json<On
         list_tokens, create_token, revoke_token,
         get_onefichier, put_onefichier, delete_onefichier,
         sign_in_onefichier, sign_out_onefichier, refresh_onefichier_cdn,
+        get_tmdb, put_tmdb, delete_tmdb,
     ),
     components(schemas(ErrorBody, ErrorKind)),
     modifiers(&SecuritySchemes),

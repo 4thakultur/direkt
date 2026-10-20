@@ -97,6 +97,46 @@
   </div>
 </details>
 
+<details class="panel" id="artwork"{% if open == "artwork" %} open{% endif %}>
+  <summary>
+    <span class="panel-title">
+      <span class="panel-name">Artwork</span>
+      <span class="panel-desc">Cover images from The Movie Database (TMDB)</span>
+    </span>
+    {% if tmdb.configured %}<span class="pill ok">TMDB key set</span>{% else %}<span class="pill">Off</span>{% endif %}
+    <svg class="icon chevron" aria-hidden="true"><use href="#i-chevron"/></svg>
+  </summary>
+  <div class="panel-body stack">
+    <p class="muted">
+      Direkt reads the title, year and season from each file name and looks up
+      matching artwork on TMDB. Only the parsed title and year are sent. Images
+      are cached in the data directory and served by Direkt, so your browser
+      never contacts TMDB. Files without a confident match keep their file-type tile.
+    </p>
+    <p class="muted small">
+      Create a free API key in your TMDB account under Settings → API, then
+      paste the API key or the API read access token here.
+    </p>
+    {% if !tmdb.editable %}
+    <p class="note">
+      The key is set by the <code>DIREKT_TMDB_API_KEY</code> environment
+      variable. Change or remove it there.
+    </p>
+    {% endif %}
+    <form method="post" action="/settings/tmdb" class="submit">
+      <input name="api_key" type="text" value="{% if let Some(mask) = tmdb.api_key %}{{ mask }}{% endif %}"
+             placeholder="Paste your TMDB API key" autocomplete="off" spellcheck="false"
+             aria-label="TMDB API key"{% if !tmdb.editable %} disabled{% endif %}>
+      {% if tmdb.editable %}<button type="submit" class="primary">Save</button>{% endif %}
+      {% if tmdb.editable && tmdb.configured %}<button type="submit" class="danger" form="tmdb-remove">Remove key</button>{% endif %}
+    </form>
+    {% if tmdb.editable && tmdb.configured %}
+    <form method="post" action="/settings/tmdb/remove" id="tmdb-remove" hidden></form>
+    {% endif %}
+    <p class="muted small">This product uses the TMDB API but is not endorsed or certified by TMDB.</p>
+  </div>
+</details>
+
 <details class="panel" id="tokens"{% if open == "tokens" %} open{% endif %}>
   <summary>
     <span class="panel-title">

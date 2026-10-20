@@ -1,5 +1,5 @@
 <li class="row state-{{ d.state }}">
-  <a class="art art-sm hue-{{ d.hue }}" href="/downloads/{{ d.id }}" tabindex="-1" aria-hidden="true"><span>{{ d.badge }}</span></a>
+  <a class="art art-sm hue-{{ d.hue }}{% if d.artwork.is_some() %} has-art{% endif %}" href="/downloads/{{ d.id }}" tabindex="-1" aria-hidden="true">{% if let Some(art) = d.artwork %}<img src="/artwork/{{ art }}" alt="" decoding="async">{% else %}<span>{{ d.badge }}</span>{% endif %}</a>
   <div class="row-body">
     <a class="row-name" href="/downloads/{{ d.id }}" title="{{ d.display_url }}">{{ d.name }}</a>
     <div class="row-meta">

@@ -10,6 +10,7 @@ pub use error::{ApiError, ErrorBody};
 
 use crate::auth::{AuthService, SESSION_TTL, Session};
 use crate::error::{AppError, ErrorKind};
+use crate::media::ArtworkService;
 use crate::service::DownloadService;
 use crate::settings::SettingsService;
 use crate::store::Store;
@@ -29,6 +30,7 @@ pub struct AppState {
     pub downloads: DownloadService,
     pub auth: AuthService,
     pub settings: SettingsService,
+    pub artwork: ArtworkService,
     pub store: Store,
     pub secure_cookies: bool,
 }

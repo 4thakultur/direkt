@@ -58,7 +58,10 @@ impl TestApp {
         let account = crate::providers::unconfigured_onefichier_account().await;
         let settings = crate::settings::SettingsService::load(
             store.clone(),
-            env_onefichier_key,
+            crate::settings::EnvKeys {
+                onefichier: env_onefichier_key,
+                tmdb: None,
+            },
             account.clone(),
         )
         .await
@@ -76,15 +79,22 @@ impl TestApp {
         let engine = Engine::new(
             store.clone(),
             providers.clone(),
-            client,
+            client.clone(),
             policy.clone(),
             engine_settings,
+        );
+        // No TMDB key: only images already in the cache directory are found.
+        let (artwork, _worker) = ArtworkService::start(
+            dir.path().join("artwork"),
+            crate::media::Tmdb::new(client.clone()),
+            settings.tmdb_key(),
         );
         let downloads = DownloadService::new(store.clone(), engine, providers, policy);
         let router = router(AppState {
             downloads,
             auth: auth.clone(),
             settings,
+            artwork,
             store,
             secure_cookies: false,
         });
@@ -1078,4 +1088,94 @@ async fn onefichier_cdn_section() {
             .body
             .contains("Refresh credits")
     );
+}
+
+const TMDB_KEY: &str = "0123456789abcdef0123456789abcdef";
+
+#[tokio::test]
+async fn tmdb_key_via_api_and_settings_page() {
+    let (app, cookie) = TestApp::with_admin().await;
+    let auth = cookie_header(&cookie);
+    let r = app.get("/api/v1/settings/tmdb", &auth).await;
+    assert_eq!(r.json()["configured"], false);
+
+    let r = app
+        .send(
+            HttpRequest::put("/api/v1/settings/tmdb")
+                .header("cookie", &cookie)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({"api_key": TMDB_KEY}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::OK);
+    assert_eq!(r.json()["api_key"], crate::settings::SECRET_MASK);
+    assert!(!r.body.contains(TMDB_KEY));
+
+    let page = app.get("/settings", &auth).await;
+    assert!(page.body.contains("TMDB key set"));
+    assert!(!page.body.contains(TMDB_KEY), "the key is never rendered");
+
+    let r = app.post_form("/settings/tmdb", &auth, "api_key=bad").await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST);
+    assert!(r.body.contains("does not look like a TMDB API key"));
+    assert!(r.body.contains("id=\"artwork\" open"), "section stays open");
+
+    let r = app.post_form("/settings/tmdb/remove", &auth, "").await;
+    assert_eq!(r.status, StatusCode::OK);
+    assert!(r.body.contains("TMDB API key removed"));
+    let r = app.get("/api/v1/settings/tmdb", &auth).await;
+    assert_eq!(r.json()["configured"], false);
+}
+
+#[tokio::test]
+async fn cached_artwork_replaces_the_file_type_tile() {
+    const JPEG: &[u8] = &[0xFF, 0xD8, 0xFF, 0xE0, 0, 0x10, b'J', b'F', b'I', b'F'];
+    let name = "Cyberpunk.Edgerunners.S02.MULTi.AD.1080p.NF.WEB.x264-BYOR.zip";
+    let (app, cookie) = TestApp::with_admin().await;
+    let auth = cookie_header(&cookie);
+    let id = crate::media::artwork_id_for_name(name).unwrap();
+    let cache = app._dir.path().join("artwork");
+    std::fs::create_dir_all(&cache).unwrap();
+    std::fs::write(cache.join(&id), JPEG).unwrap();
+
+    for url in [
+        format!("https://example.com/files/{name}"),
+        "https://example.com/files/backup.zip".into(),
+    ] {
+        let r = app
+            .post_json("/api/v1/downloads", &auth, serde_json::json!({"url": url}))
+            .await;
+        assert_eq!(r.status, StatusCode::CREATED);
+    }
+
+    // The first render queues the lookup; the worker finds the cached file.
+    let src = format!("<img src=\"/artwork/{id}\"");
+    let mut found = false;
+    for _ in 0..200 {
+        let page = app.get("/ui/dashboard", &auth).await;
+        if page.body.contains(&src) {
+            assert!(
+                page.body.contains("<span>ZIP</span>"),
+                "no match keeps the tile"
+            );
+            found = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(found, "artwork never appeared");
+
+    let r = app.get(&format!("/artwork/{id}"), &auth).await;
+    assert_eq!(r.status, StatusCode::OK);
+    assert_eq!(r.header("content-type"), "image/jpeg");
+    assert!(!r.body.is_empty());
+    let r = app.get(&format!("/artwork/{id}"), &[]).await;
+    assert_ne!(r.status, StatusCode::OK, "artwork requires a login");
+    for bad in ["0123456789abcdef0123456789abcdef", "..%2Fdirekt.db", "x"] {
+        let r = app.get(&format!("/artwork/{bad}"), &auth).await;
+        assert_eq!(r.status, StatusCode::NOT_FOUND, "{bad}");
+    }
 }

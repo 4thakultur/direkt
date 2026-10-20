@@ -46,14 +46,23 @@ Restart Direkt and complete setup again.
 ## Provider credentials
 
 Provider credentials (the 1fichier API key, or the 1fichier account email,
-password and session) are entered on the Settings page. The API key can
-instead come from an environment variable, which takes precedence. They are
+password and session) and the TMDB API key used for artwork are entered on the
+Settings page. The API keys can instead come from environment variables,
+which take precedence. They are
 stored in the database in plain text so that Direkt can sign
 in again unattended. Restrict access to `data_dir` and its backups. If the
 database leaks, the 1fichier password leaks too: use a password that isn't
 used anywhere else. Once saved, keys and passwords are never shown again (the
 UI displays `************************`), returned by the API, or written to the
 logs.
+
+## Artwork lookups
+
+With a TMDB key set, Direkt sends titles and years parsed from file names to
+TMDB, never download URLs. Images are fetched through the same
+network-policy-enforcing client as downloads, limited to 4 MiB, accepted only
+as JPEG or PNG, and served to the browser from Direkt's own cache. See
+[artwork.md](artwork.md).
 
 ## Files on disk
 

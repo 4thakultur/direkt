@@ -59,6 +59,9 @@ Every error uses the same body:
 | POST | `/api/v1/settings/onefichier/account` | Sign in to 1fichier: `{"email": "…", "password": "…", "code": "123456"}` (`code` only for two-factor accounts). Returns `two_factor_required: true` when a code is needed; repeat the request with `code` within 10 minutes. |
 | DELETE | `/api/v1/settings/onefichier/account` | Sign out and delete the stored email, password and session |
 | POST | `/api/v1/settings/onefichier/cdn/refresh` | Read the CDN credit balance again (shown as `cdn` in `GET /api/v1/settings/onefichier`). Returns `429` within 5 minutes of the last check, and `409` if neither signed in nor a key is set. |
+| GET | `/api/v1/settings/tmdb` | Whether a TMDB key (for [artwork](artwork.md)) is configured, and its source. Masked like the 1fichier key. |
+| PUT | `/api/v1/settings/tmdb` | Set the key: `{"api_key": "…"}` (API key or read access token). Returns `409` if it comes from `DIREKT_TMDB_API_KEY`. |
+| DELETE | `/api/v1/settings/tmdb` | Remove the stored key. Cached artwork stays. |
 
 Download passwords are write-only: no endpoint ever returns them.
 

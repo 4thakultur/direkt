@@ -290,7 +290,7 @@ button.htmx-request { opacity: 0.55; pointer-events: none; }
 .net-stat.current dd { color: #fff; font-size: 1.2rem; }
 
 /* ---------------------------------------------------------------------------
-   Cover tiles (stand-ins for artwork)
+   Cover tiles: cached artwork, or the file type as a stand-in
    ------------------------------------------------------------------------- */
 
 .art {
@@ -315,6 +315,11 @@ button.htmx-request { opacity: 0.55; pointer-events: none; }
   pointer-events: none;
 }
 .art span { position: relative; z-index: 1; text-shadow: 0 2px 12px rgba(0, 0, 0, 0.45); }
+.art img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.art.has-art { background: var(--surface-3); }
+.art.has-art::after {
+  background: linear-gradient(160deg, rgba(255, 255, 255, 0.08) 0%, rgba(255, 255, 255, 0) 40%);
+}
 a.art:hover { color: #fff; }
 .art-lg { width: 280px; aspect-ratio: 460 / 215; font-size: 2rem; }
 .art-sm { width: 96px; aspect-ratio: 460 / 215; font-size: 0.75rem; letter-spacing: 0.06em; }

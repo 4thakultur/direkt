@@ -3,10 +3,11 @@
 use direkt::auth::AuthService;
 use direkt::config::{Config, LogFormat};
 use direkt::engine::{Engine, EngineSettings};
+use direkt::media::{ArtworkService, Tmdb};
 use direkt::net::NetworkPolicy;
 use direkt::providers::{OneFichierAccount, Providers};
 use direkt::service::DownloadService;
-use direkt::settings::SettingsService;
+use direkt::settings::{EnvKeys, SettingsService};
 use direkt::store::Store;
 use direkt::web::{self, AppState};
 use std::path::Path;
@@ -118,20 +119,19 @@ async fn serve(config: Config, config_path: &Path) -> anyhow::Result<()> {
         );
     }
 
-    let env_onefichier_key =
-        direkt::config::onefichier_key_from_env(|name| std::env::var(name).ok())
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let env_keys = EnvKeys {
+        onefichier: direkt::config::onefichier_key_from_env(|name| std::env::var(name).ok())
+            .map_err(|e| anyhow::anyhow!("{e}"))?,
+        tmdb: direkt::config::tmdb_key_from_env(|name| std::env::var(name).ok())
+            .map_err(|e| anyhow::anyhow!("{e}"))?,
+    };
     let policy = NetworkPolicy::new(config.network.allowed_private_networks.clone());
     let onefichier_account = OneFichierAccount::open(store.clone(), policy.clone())
         .await
         .map_err(|e| anyhow::anyhow!("loading 1fichier account: {e}"))?;
-    let settings = SettingsService::load(
-        store.clone(),
-        env_onefichier_key,
-        onefichier_account.clone(),
-    )
-    .await
-    .map_err(|e| anyhow::anyhow!("loading settings: {e}"))?;
+    let settings = SettingsService::load(store.clone(), env_keys, onefichier_account.clone())
+        .await
+        .map_err(|e| anyhow::anyhow!("loading settings: {e}"))?;
 
     let client = direkt::http_client::build_client(policy.clone())?;
     let providers = Providers::standard(
@@ -142,17 +142,23 @@ async fn serve(config: Config, config_path: &Path) -> anyhow::Result<()> {
     let engine = Engine::new(
         store.clone(),
         providers.clone(),
-        client,
+        client.clone(),
         policy.clone(),
         EngineSettings::from_config(&config),
     );
     let dispatcher = engine.start();
+    let (artwork, artwork_worker) = ArtworkService::start(
+        config.storage.data_dir.join("artwork"),
+        Tmdb::new(client.clone()),
+        settings.tmdb_key(),
+    );
     let downloads = DownloadService::new(store.clone(), engine.clone(), providers, policy);
 
     let app = web::router(AppState {
         downloads,
         auth,
         settings,
+        artwork,
         store: store.clone(),
         secure_cookies: config.server.secure_cookies,
     });
@@ -162,6 +168,8 @@ async fn serve(config: Config, config_path: &Path) -> anyhow::Result<()> {
     web::server::serve(listener, app, shutdown_signal()).await?;
 
     engine.shutdown(dispatcher).await;
+    // Artwork writes are atomic renames; stopping mid-lookup loses nothing.
+    artwork_worker.abort();
     store.close().await;
     tracing::info!("shutdown complete");
     Ok(())

@@ -9,6 +9,7 @@ pub mod engine;
 pub mod error;
 pub mod fsutil;
 pub mod http_client;
+pub mod media;
 pub mod net;
 pub mod providers;
 pub mod service;

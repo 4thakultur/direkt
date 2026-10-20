@@ -44,6 +44,9 @@ allowed_private_networks = []
 # the DIREKT_ONEFICHIER_API_KEY environment variable (which then takes
 # precedence and locks the setting). It is deliberately not a file option.
 
+# Artwork: the TMDB API key works the same way, on the Settings page or with
+# DIREKT_TMDB_API_KEY. Images are cached in <data_dir>/artwork.
+
 [log]
 # Log filter; the RUST_LOG environment variable overrides it.
 level = "info"

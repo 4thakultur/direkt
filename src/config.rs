@@ -91,6 +91,23 @@ pub fn validate_onefichier_key(key: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Environment variable with the TMDB API key or read access token, used for
+/// artwork. Overrides and locks the key stored through the settings page.
+pub const TMDB_API_KEY_ENV: &str = "DIREKT_TMDB_API_KEY";
+
+/// Read the TMDB key from the environment (blank counts as unset).
+pub fn tmdb_key_from_env(
+    var: impl Fn(&str) -> Option<String>,
+) -> Result<Option<Secret>, ConfigError> {
+    let Some(key) = var(TMDB_API_KEY_ENV).filter(|k| !k.trim().is_empty()) else {
+        return Ok(None);
+    };
+    let key = key.trim();
+    crate::media::tmdb::validate_key(key)
+        .map_err(|e| ConfigError::Invalid(format!("{TMDB_API_KEY_ENV}: {e}")))?;
+    Ok(Some(Secret::new(key)))
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ServerConfig {
@@ -367,6 +384,19 @@ mod tests {
             );
         }
         validate_onefichier_key("AbCdEfGhIjKlMnOpQrStUvWxYz012345").unwrap();
+    }
+
+    #[test]
+    fn reads_tmdb_key_from_env() {
+        let key = "0123456789abcdef0123456789abcdef";
+        let found =
+            tmdb_key_from_env(|name| (name == TMDB_API_KEY_ENV).then(|| format!(" {key}\n")))
+                .unwrap()
+                .unwrap();
+        assert_eq!(found.expose(), key);
+        assert!(tmdb_key_from_env(|_| None).unwrap().is_none());
+        let err = tmdb_key_from_env(|_| Some("not-a-key".into())).unwrap_err();
+        assert!(err.to_string().contains(TMDB_API_KEY_ENV), "{err}");
     }
 
     #[test]

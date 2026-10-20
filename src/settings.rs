@@ -1,13 +1,15 @@
 //! Runtime settings edited through the web UI and API.
 //!
-//! Currently this is the 1fichier API key. Its source is either the
-//! `DIREKT_ONEFICHIER_API_KEY` environment variable, which wins and makes the
-//! setting read-only, or the value saved through the settings page. Changes
-//! apply immediately: the provider reads the key from a shared [`SecretCell`]
-//! on every attempt. The key is never returned; callers only ever see a mask.
+//! Currently these are the 1fichier API key and the TMDB API key (artwork).
+//! Each comes either from an environment variable (`DIREKT_ONEFICHIER_API_KEY`,
+//! `DIREKT_TMDB_API_KEY`), which wins and makes the setting read-only, or from
+//! the value saved through the settings page. Changes apply immediately: the
+//! component using a key reads it from a shared [`SecretCell`] on every
+//! attempt. Keys are never returned; callers only ever see a mask.
 
 use crate::config::{Secret, validate_onefichier_key};
 use crate::error::{AppError, AppResult};
+use crate::media::tmdb;
 use crate::providers::{AccountView, CdnSource, CdnView, OneFichierAccount, SignInOutcome};
 use crate::store::Store;
 use chrono::Utc;
@@ -15,25 +17,43 @@ use serde::Serialize;
 use std::sync::{Arc, RwLock};
 
 const ONEFICHIER_KEY: &str = "onefichier.api_key";
+const TMDB_KEY: &str = "tmdb.api_key";
 
 /// What is shown instead of a configured secret.
 pub const SECRET_MASK: &str = "************************";
 
 /// A secret shared between the settings service and the component using it.
 #[derive(Clone, Default)]
-pub struct SecretCell(Arc<RwLock<Option<Secret>>>);
+pub struct SecretCell(Arc<RwLock<Versioned>>);
+
+#[derive(Default)]
+struct Versioned {
+    value: Option<Secret>,
+    /// Bumped on every change, so users of the secret can tell it changed.
+    version: u64,
+}
 
 impl SecretCell {
     pub fn new(value: Option<Secret>) -> Self {
-        Self(Arc::new(RwLock::new(value)))
+        Self(Arc::new(RwLock::new(Versioned { value, version: 0 })))
     }
 
     pub fn get(&self) -> Option<Secret> {
-        self.0.read().unwrap_or_else(|e| e.into_inner()).clone()
+        self.0
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .value
+            .clone()
     }
 
-    fn set(&self, value: Option<Secret>) {
-        *self.0.write().unwrap_or_else(|e| e.into_inner()) = value;
+    pub fn version(&self) -> u64 {
+        self.0.read().unwrap_or_else(|e| e.into_inner()).version
+    }
+
+    pub(crate) fn set(&self, value: Option<Secret>) {
+        let mut inner = self.0.write().unwrap_or_else(|e| e.into_inner());
+        inner.value = value;
+        inner.version += 1;
     }
 }
 
@@ -43,7 +63,7 @@ impl std::fmt::Debug for SecretCell {
     }
 }
 
-/// Where the active 1fichier API key comes from.
+/// Where an API key comes from.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum KeySource {
@@ -52,8 +72,30 @@ pub enum KeySource {
     None,
     /// Saved through the settings page or API.
     Settings,
-    /// The `DIREKT_ONEFICHIER_API_KEY` environment variable (read-only here).
+    /// An environment variable (read-only here).
     Environment,
+}
+
+impl KeySource {
+    fn of(configured: bool, env_locked: bool) -> Self {
+        match (configured, env_locked) {
+            (_, true) => Self::Environment,
+            (true, false) => Self::Settings,
+            (false, false) => Self::None,
+        }
+    }
+}
+
+/// The TMDB key used for artwork, as shown to users: never the key itself.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+pub struct TmdbSettings {
+    /// Whether a key is configured.
+    pub configured: bool,
+    /// `SECRET_MASK` when configured, otherwise absent.
+    pub api_key: Option<String>,
+    pub source: KeySource,
+    /// False when the key comes from the environment.
+    pub editable: bool,
 }
 
 /// The 1fichier API key as shown to users: never the key itself.
@@ -78,27 +120,84 @@ pub struct SettingsService {
     onefichier_key: SecretCell,
     env_locked: bool,
     onefichier_account: Arc<OneFichierAccount>,
+    tmdb_key: SecretCell,
+    tmdb_env_locked: bool,
+}
+
+/// API keys from the environment, which take precedence over stored ones.
+#[derive(Debug, Default)]
+pub struct EnvKeys {
+    pub onefichier: Option<Secret>,
+    pub tmdb: Option<Secret>,
 }
 
 impl SettingsService {
-    /// Load settings. `env_key` is the key from the environment, if any; it
-    /// takes precedence over the stored one.
     pub async fn load(
         store: Store,
-        env_key: Option<Secret>,
+        env: EnvKeys,
         onefichier_account: Arc<OneFichierAccount>,
     ) -> AppResult<Self> {
-        let env_locked = env_key.is_some();
-        let key = match env_key {
+        let env_locked = env.onefichier.is_some();
+        let tmdb_env_locked = env.tmdb.is_some();
+        let key = match env.onefichier {
             Some(key) => Some(key),
             None => store.get_setting(ONEFICHIER_KEY).await?.map(Secret::new),
+        };
+        let tmdb_key = match env.tmdb {
+            Some(key) => Some(key),
+            None => store.get_setting(TMDB_KEY).await?.map(Secret::new),
         };
         Ok(Self {
             store,
             onefichier_key: SecretCell::new(key),
             env_locked,
             onefichier_account,
+            tmdb_key: SecretCell::new(tmdb_key),
+            tmdb_env_locked,
         })
+    }
+
+    /// The cell artwork lookups read the TMDB key from.
+    pub fn tmdb_key(&self) -> SecretCell {
+        self.tmdb_key.clone()
+    }
+
+    pub fn tmdb(&self) -> TmdbSettings {
+        let configured = self.tmdb_key.get().is_some();
+        TmdbSettings {
+            configured,
+            api_key: configured.then(|| SECRET_MASK.to_owned()),
+            source: KeySource::of(configured, self.tmdb_env_locked),
+            editable: !self.tmdb_env_locked,
+        }
+    }
+
+    pub async fn set_tmdb_key(&self, key: &str) -> AppResult<TmdbSettings> {
+        self.ensure_tmdb_editable()?;
+        let key = key.trim();
+        tmdb::validate_key(key).map_err(AppError::invalid)?;
+        self.store.set_setting(TMDB_KEY, key, Utc::now()).await?;
+        self.tmdb_key.set(Some(Secret::new(key)));
+        tracing::info!("TMDB API key updated");
+        Ok(self.tmdb())
+    }
+
+    pub async fn clear_tmdb_key(&self) -> AppResult<TmdbSettings> {
+        self.ensure_tmdb_editable()?;
+        self.store.delete_setting(TMDB_KEY).await?;
+        self.tmdb_key.set(None);
+        tracing::info!("TMDB API key removed");
+        Ok(self.tmdb())
+    }
+
+    fn ensure_tmdb_editable(&self) -> AppResult<()> {
+        if self.tmdb_env_locked {
+            return Err(AppError::conflict(format!(
+                "the TMDB API key is set by the {} environment variable; change it there",
+                crate::config::TMDB_API_KEY_ENV
+            )));
+        }
+        Ok(())
     }
 
     /// The cell the 1fichier provider reads its key from.
@@ -113,11 +212,7 @@ impl SettingsService {
             cdn: self.onefichier_account.cdn_view(),
             configured,
             api_key: configured.then(|| SECRET_MASK.to_owned()),
-            source: match (configured, self.env_locked) {
-                (_, true) => KeySource::Environment,
-                (true, false) => KeySource::Settings,
-                (false, false) => KeySource::None,
-            },
+            source: KeySource::of(configured, self.env_locked),
             editable: !self.env_locked,
         }
     }
@@ -202,7 +297,10 @@ mod tests {
     async fn load(store: &Store, env: Option<Secret>) -> SettingsService {
         SettingsService::load(
             store.clone(),
-            env,
+            EnvKeys {
+                onefichier: env,
+                tmdb: None,
+            },
             crate::providers::unconfigured_onefichier_account().await,
         )
         .await
@@ -262,5 +360,48 @@ mod tests {
         let err = settings.set_onefichier_key(KEY).await.unwrap_err();
         assert_eq!(err.kind, ErrorKind::Conflict);
         assert!(settings.clear_onefichier_key().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn tmdb_key_is_stored_masked_and_applied_live() {
+        const TMDB: &str = "0123456789abcdef0123456789abcdef";
+        let store = Store::open_in_memory().await.unwrap();
+        let settings = load(&store, None).await;
+        let cell = settings.tmdb_key();
+        assert!(!settings.tmdb().configured);
+        let version = cell.version();
+
+        let shown = settings.set_tmdb_key(&format!(" {TMDB} ")).await.unwrap();
+        assert_eq!(shown.api_key.as_deref(), Some(SECRET_MASK));
+        assert_eq!(shown.source, KeySource::Settings);
+        assert_eq!(cell.get().unwrap().expose(), TMDB);
+        assert!(cell.version() > version, "users can tell the key changed");
+        assert!(!format!("{shown:?}").contains(TMDB));
+        assert_eq!(
+            load(&store, None).await.tmdb_key().get().unwrap().expose(),
+            TMDB
+        );
+
+        let err = settings.set_tmdb_key("nope").await.unwrap_err();
+        assert_eq!(err.kind, ErrorKind::InvalidRequest);
+        settings.clear_tmdb_key().await.unwrap();
+        assert!(cell.get().is_none());
+
+        let locked = SettingsService::load(
+            store.clone(),
+            EnvKeys {
+                onefichier: None,
+                tmdb: Some(Secret::new(TMDB)),
+            },
+            crate::providers::unconfigured_onefichier_account().await,
+        )
+        .await
+        .unwrap();
+        assert_eq!(locked.tmdb().source, KeySource::Environment);
+        assert!(!locked.tmdb().editable);
+        assert_eq!(
+            locked.set_tmdb_key(TMDB).await.unwrap_err().kind,
+            ErrorKind::Conflict
+        );
     }
 }
