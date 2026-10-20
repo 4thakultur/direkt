@@ -13,13 +13,15 @@ use direkt::web::{self, AppState};
 use std::path::Path;
 use tracing_subscriber::EnvFilter;
 
-const USAGE: &str = "usage: direkt [serve | reset-admin | reset-2fa]
+const USAGE: &str = "usage: direkt [serve | reset-admin | reset-2fa | healthcheck]
 
   serve        run the server (default)
   reset-admin  delete the administrator account, all sessions, and all API
                tokens; the next start offers first-run setup again
   reset-2fa    turn off two-factor authentication, for a lost authenticator
                app; the account, sessions and API tokens stay
+  healthcheck  exit 0 if the server running with this configuration answers
+               its health endpoint, 1 otherwise (for container health checks)
 
 Configuration is read from $DIREKT_CONFIG (default ./direkt.toml).";
 
@@ -27,6 +29,7 @@ enum Command {
     Serve,
     ResetAdmin,
     ResetTwoFactor,
+    HealthCheck,
 }
 
 #[tokio::main]
@@ -41,6 +44,7 @@ async fn main() -> anyhow::Result<()> {
         [] | ["serve"] => Command::Serve,
         ["reset-admin"] => Command::ResetAdmin,
         ["reset-2fa"] => Command::ResetTwoFactor,
+        ["healthcheck"] => Command::HealthCheck,
         ["-h" | "--help" | "help"] => {
             println!("{USAGE}");
             return Ok(());
@@ -65,6 +69,9 @@ async fn main() -> anyhow::Result<()> {
         Command::Serve => serve(config, &config_path).await,
         Command::ResetAdmin => reset_admin(&config).await,
         Command::ResetTwoFactor => reset_two_factor(&config).await,
+        Command::HealthCheck => web::server::probe_health(config.server.listen)
+            .await
+            .map_err(|e| anyhow::anyhow!("health check failed: {e}")),
     }
 }
 

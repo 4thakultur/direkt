@@ -1,0 +1,10 @@
+# Only the sources the Dockerfile copies matter; keep everything else, and
+# especially local data and secrets, out of the build context.
+*
+!Cargo.toml
+!Cargo.lock
+!src/
+!migrations/
+!templates/
+!static/
+!direkt.example.toml

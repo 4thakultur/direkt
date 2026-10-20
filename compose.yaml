@@ -1,0 +1,46 @@
+# Direkt with Docker Compose. See docs/docker.md.
+#
+#   cp .env.example .env        # then edit it
+#   mkdir -p data downloads media/movies media/tv media/unsorted
+#   docker compose up -d --build
+#   docker compose exec direkt cat /data/setup-token
+
+services:
+  direkt:
+    build: .
+    image: direkt:local
+    container_name: direkt
+    restart: unless-stopped
+    # Files Direkt creates belong to this user and group on the host.
+    user: "${PUID:-1000}:${PGID:-1000}"
+    ports:
+      - "${DIREKT_PORT:-9877}:9877"
+    environment:
+      # Media library folders, inside the container. Each must exist.
+      # Remove all three to leave completed downloads in /downloads.
+      DIREKT_MOVIES_DIR: /media/movies
+      DIREKT_TV_DIR: /media/tv
+      DIREKT_UNSORTED_DIR: /media/unsorted
+      # Optional secrets, read from .env. Blank means "set it in the web UI".
+      DIREKT_ONEFICHIER_API_KEY: ${DIREKT_ONEFICHIER_API_KEY:-}
+      DIREKT_TMDB_API_KEY: ${DIREKT_TMDB_API_KEY:-}
+      # RUST_LOG: debug
+    volumes:
+      # Database, setup token, artwork cache. Back this up.
+      - ${DIREKT_DATA_DIR:-./data}:/data
+      # Completed and partial downloads.
+      - ${DIREKT_DOWNLOADS_DIR:-./downloads}:/downloads
+      # Media library (the parent of the movies, tv and unsorted folders).
+      - ${DIREKT_MEDIA_DIR:-./media}:/media
+      # Optional: your own configuration file (see direkt.example.toml).
+      # - ./direkt.toml:/etc/direkt/direkt.toml:ro
+    # Hardening: Direkt writes only to the mounted directories.
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    # Time for running transfers to save progress and return to the queue.
+    stop_grace_period: 45s

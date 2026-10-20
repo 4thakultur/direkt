@@ -131,6 +131,40 @@ pub(crate) async fn serve_with_limits(
     Ok(())
 }
 
+/// Ask a running Direkt listening on `listen` whether it is healthy, the way
+/// the container health check does (the runtime image has no curl). An
+/// unspecified listen address (`0.0.0.0`, `::`) is probed on loopback.
+pub async fn probe_health(listen: std::net::SocketAddr) -> Result<(), String> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let mut addr = listen;
+    if addr.ip().is_unspecified() {
+        addr.set_ip(match addr {
+            std::net::SocketAddr::V4(_) => std::net::Ipv4Addr::LOCALHOST.into(),
+            std::net::SocketAddr::V6(_) => std::net::Ipv6Addr::LOCALHOST.into(),
+        });
+    }
+    let probe = async {
+        let mut stream = tokio::net::TcpStream::connect(addr).await?;
+        stream
+            .write_all(b"GET /healthz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .await?;
+        let mut head = Vec::new();
+        stream.take(4096).read_to_end(&mut head).await?;
+        Ok::<_, std::io::Error>(head)
+    };
+    let response = tokio::time::timeout(Duration::from_secs(5), probe)
+        .await
+        .map_err(|_| format!("{addr}: no answer within 5 s"))?
+        .map_err(|e| format!("{addr}: {e}"))?;
+    let status_line = response.split(|&b| b == b'\n').next().unwrap_or_default();
+    let status_line = String::from_utf8_lossy(status_line);
+    match status_line.split_whitespace().nth(1) {
+        Some("200") => Ok(()),
+        _ => Err(format!("{addr}: unhealthy: {}", status_line.trim())),
+    }
+}
+
 /// Open connections per client, keyed like the login limiter (IPv6 by /64).
 #[derive(Default)]
 struct PerClient {
@@ -387,6 +421,35 @@ mod tests {
             result.is_err() || result.as_ref().unwrap().is_empty(),
             "{result:?}"
         );
+    }
+
+    async fn health_server(status: axum::http::StatusCode) -> SocketAddr {
+        let router = Router::new().route("/healthz", get(move || async move { status }));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(serve(listener, router, std::future::pending()));
+        addr
+    }
+
+    #[tokio::test]
+    async fn health_probe_reports_status() {
+        let ok = health_server(axum::http::StatusCode::OK).await;
+        assert_eq!(probe_health(ok).await, Ok(()));
+        // Probed on loopback when listening on all interfaces.
+        let any = SocketAddr::from(([0, 0, 0, 0], ok.port()));
+        assert_eq!(probe_health(any).await, Ok(()));
+
+        let down = health_server(axum::http::StatusCode::SERVICE_UNAVAILABLE).await;
+        let err = probe_health(down).await.unwrap_err();
+        assert!(err.contains("503"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn health_probe_fails_when_nothing_listens() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        assert!(probe_health(addr).await.is_err());
     }
 
     #[tokio::test]

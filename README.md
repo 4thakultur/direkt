@@ -5,14 +5,26 @@ A self-hostable direct download manager for homelabs, written in Rust.
 > **Status:** early development. HTTP/HTTPS downloads, 1fichier premium
 > downloads, the web UI (with a confirmation step showing type, title, size
 > and artwork), the API, and media organization into Jellyfin/Plex libraries
-> work. Docker packaging is next. Telegram notifications are planned after v1.
+> work, packaged for Docker Compose. Telegram notifications are planned after
+> v1.
 
-## First run
+## Quick start (Docker Compose)
 
-1. Start Direkt and open `http://<host>:9877`.
-2. Enter the one-time setup token from `<data_dir>/setup-token` (the log
-   shows the path) and create the administrator account.
+```sh
+cp .env.example .env               # set PUID/PGID, folders, optional keys
+mkdir -p data downloads media/movies media/tv media/unsorted
+docker compose up -d --build
+docker compose exec direkt cat /data/setup-token
+```
+
+Then:
+
+1. Open `http://<host>:9877`.
+2. Enter the one-time setup token and create the administrator account.
 3. Paste a URL and download.
+
+[`docs/docker.md`](docs/docker.md) covers volumes, permissions, upgrades,
+backups and troubleshooting.
 
 To require a code from an authenticator app (Google Authenticator,
 Microsoft Authenticator, …) at sign-in, turn on two-factor authentication
@@ -26,6 +38,7 @@ authenticator app and its recovery codes? Run `direkt reset-2fa`. See
 
 ```sh
 cargo run                         # reads ./direkt.toml if present, else defaults
+                                  # (state in ./data, files in ./downloads)
 DIREKT_CONFIG=/path/to/direkt.toml cargo run
 cargo test
 cargo clippy --all-targets
@@ -55,3 +68,11 @@ over HTTPS: `cargo test -- --ignored real_https`.
 | Outbound HTTP| reqwest with SSRF-checked DNS resolution and redirects    |
 | Config       | One TOML file; secrets may come from `DIREKT_*` env vars  |
 | Auth         | Admin login (session cookie) + revocable API tokens       |
+| Deployment   | Docker Compose; Debian slim runtime image, non-root       |
+
+## License
+
+Direkt is free software, licensed under the
+[GNU Affero General Public License v3.0](LICENSE) (`AGPL-3.0-only`). If you
+run a modified version as a network service, you must offer its users the
+corresponding source code.
