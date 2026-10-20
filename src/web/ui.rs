@@ -9,6 +9,7 @@ use super::{AppState, clear_session_cookie, client_ip, read_cookie, session_cook
 use crate::domain::{Download, DownloadEvent, PostState, TransferState};
 use crate::engine::LiveSnapshot;
 use crate::error::{AppError, ErrorKind};
+use crate::settings::{OneFichierSettings, SECRET_MASK};
 use crate::store::ApiToken;
 use askama::Template;
 use axum::Router;
@@ -40,6 +41,8 @@ pub fn protected_routes() -> Router<AppState> {
         .route("/settings/tokens", post(create_token))
         .route("/settings/tokens/{id}/revoke", post(revoke_token))
         .route("/settings/password", post(change_password))
+        .route("/settings/onefichier", post(save_onefichier))
+        .route("/settings/onefichier/remove", post(remove_onefichier))
         .route("/logout", post(logout))
         .route("/ui/rows", get(rows_fragment))
         .route("/ui/downloads", post(submit_download))
@@ -651,6 +654,7 @@ impl From<ApiToken> for TokenView {
 #[derive(Template, Default)]
 #[template(path = "settings.html")]
 struct SettingsPage {
+    onefichier: OneFichierSettings,
     tokens: Vec<TokenView>,
     new_token: Option<String>,
     message: Option<String>,
@@ -658,6 +662,7 @@ struct SettingsPage {
 }
 
 async fn settings_with(state: &AppState, mut page: SettingsPage) -> SettingsPage {
+    page.onefichier = state.settings.onefichier();
     match state.auth.list_api_tokens().await {
         Ok(tokens) => page.tokens = tokens.into_iter().map(TokenView::from).collect(),
         Err(e) => page.error = page.error.or(Some(e.message)),
@@ -704,6 +709,63 @@ async fn revoke_token(State(state): State<AppState>, Path(id): Path<Uuid>) -> Re
         },
     };
     render(&settings_with(&state, page).await)
+}
+
+#[derive(Deserialize)]
+struct OneFichierForm {
+    api_key: String,
+}
+
+async fn save_onefichier(
+    State(state): State<AppState>,
+    Form(form): Form<OneFichierForm>,
+) -> Response {
+    let value = form.api_key.trim();
+    let configured = state.settings.onefichier().configured;
+    // The form is pre-filled with the mask; submitting it unchanged is a no-op.
+    let result =
+        if value == SECRET_MASK && configured {
+            Ok("1fichier API key unchanged.")
+        } else if value.is_empty() {
+            Err(AppError::invalid("enter a 1fichier API key"))
+        } else {
+            state.settings.set_onefichier_key(value).await.map(
+                |_| "1fichier API key saved. Retry any 1fichier downloads that need attention.",
+            )
+        };
+    settings_result(&state, result).await
+}
+
+async fn remove_onefichier(State(state): State<AppState>) -> Response {
+    let result = state
+        .settings
+        .clear_onefichier_key()
+        .await
+        .map(|_| "1fichier API key removed.");
+    settings_result(&state, result).await
+}
+
+async fn settings_result(state: &AppState, result: Result<&str, AppError>) -> Response {
+    match result {
+        Ok(message) => render(
+            &settings_with(
+                state,
+                SettingsPage {
+                    message: Some(message.to_owned()),
+                    ..Default::default()
+                },
+            )
+            .await,
+        ),
+        Err(e) => {
+            let status = status_for(&e);
+            let page = SettingsPage {
+                error: Some(e.message),
+                ..Default::default()
+            };
+            render_status(status, &settings_with(state, page).await)
+        }
+    }
 }
 
 #[derive(Deserialize)]

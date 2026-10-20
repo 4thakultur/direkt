@@ -6,6 +6,7 @@ use super::{ApiError, AppState, ErrorBody};
 use crate::domain::{Download, DownloadError, DownloadEvent, PostState, TransferState};
 use crate::engine::LiveSnapshot;
 use crate::error::{AppError, ErrorKind};
+use crate::settings::OneFichierSettings;
 use crate::store::ApiToken;
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -32,6 +33,12 @@ pub fn routes() -> Router<AppState> {
         .route("/downloads/{id}/retry", post(retry_download))
         .route("/tokens", get(list_tokens).post(create_token))
         .route("/tokens/{id}", delete(revoke_token))
+        .route(
+            "/settings/onefichier",
+            get(get_onefichier)
+                .put(put_onefichier)
+                .delete(delete_onefichier),
+        )
 }
 
 type ApiResult<T> = Result<T, ApiError>;
@@ -390,6 +397,53 @@ async fn revoke_token(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// 1fichier settings. The API key itself is never returned, only a mask.
+#[utoipa::path(
+    get, path = "/api/v1/settings/onefichier", tag = "settings",
+    responses((status = 200, body = OneFichierSettings))
+)]
+async fn get_onefichier(State(state): State<AppState>) -> Json<OneFichierSettings> {
+    Json(state.settings.onefichier())
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SetOneFichierKey {
+    /// Premium API key from 1fichier.com (My account → Settings).
+    pub api_key: String,
+}
+
+/// Set the 1fichier API key. It applies to the next download attempt.
+#[utoipa::path(
+    put, path = "/api/v1/settings/onefichier", tag = "settings",
+    request_body = SetOneFichierKey,
+    responses(
+        (status = 200, body = OneFichierSettings),
+        (status = 400, description = "Not a valid API key", body = ErrorBody),
+        (status = 409, description = "Set by environment variable", body = ErrorBody),
+    )
+)]
+async fn put_onefichier(
+    State(state): State<AppState>,
+    ApiJson(body): ApiJson<SetOneFichierKey>,
+) -> ApiResult<Json<OneFichierSettings>> {
+    Ok(Json(
+        state.settings.set_onefichier_key(&body.api_key).await?,
+    ))
+}
+
+/// Remove the stored 1fichier API key.
+#[utoipa::path(
+    delete, path = "/api/v1/settings/onefichier", tag = "settings",
+    responses(
+        (status = 200, body = OneFichierSettings),
+        (status = 409, description = "Set by environment variable", body = ErrorBody),
+    )
+)]
+async fn delete_onefichier(State(state): State<AppState>) -> ApiResult<Json<OneFichierSettings>> {
+    Ok(Json(state.settings.clear_onefichier_key().await?))
+}
+
 // ---------------------------------------------------------------------------
 // OpenAPI
 // ---------------------------------------------------------------------------
@@ -406,6 +460,7 @@ async fn revoke_token(
         create_download, list_downloads, get_download, download_events,
         pause_download, resume_download, cancel_download, retry_download,
         list_tokens, create_token, revoke_token,
+        get_onefichier, put_onefichier, delete_onefichier,
     ),
     components(schemas(ErrorBody, ErrorKind)),
     modifiers(&SecuritySchemes),
@@ -413,6 +468,7 @@ async fn revoke_token(
     tags(
         (name = "downloads", description = "Download queue"),
         (name = "tokens", description = "API token management"),
+        (name = "settings", description = "Runtime settings"),
     )
 )]
 pub struct ApiDoc;

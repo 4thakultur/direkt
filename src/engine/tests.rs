@@ -369,7 +369,10 @@ fn standard_test_providers(
     });
     Providers::new(vec![
         Arc::new(crate::providers::OneFichierProvider::with_endpoint(
-            client, key, api_base, interval,
+            client,
+            crate::settings::SecretCell::new(key),
+            api_base,
+            interval,
         )),
         Arc::new(crate::providers::HttpProvider),
     ])

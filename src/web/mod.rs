@@ -10,6 +10,7 @@ pub use error::{ApiError, ErrorBody};
 use crate::auth::{AuthService, SESSION_TTL, Session};
 use crate::error::{AppError, ErrorKind};
 use crate::service::DownloadService;
+use crate::settings::SettingsService;
 use crate::store::Store;
 use axum::extract::{ConnectInfo, Request, State};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, header};
@@ -26,6 +27,7 @@ pub const SESSION_COOKIE: &str = "direkt_session";
 pub struct AppState {
     pub downloads: DownloadService,
     pub auth: AuthService,
+    pub settings: SettingsService,
     pub store: Store,
     pub secure_cookies: bool,
 }

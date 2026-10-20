@@ -4,6 +4,7 @@ use direkt::engine::{Engine, EngineSettings};
 use direkt::net::NetworkPolicy;
 use direkt::providers::Providers;
 use direkt::service::DownloadService;
+use direkt::settings::SettingsService;
 use direkt::store::Store;
 use direkt::web::{self, AppState};
 use std::net::SocketAddr;
@@ -110,9 +111,16 @@ async fn serve(config: Config, config_path: &Path) -> anyhow::Result<()> {
         );
     }
 
+    let env_onefichier_key =
+        direkt::config::onefichier_key_from_env(|name| std::env::var(name).ok())
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let settings = SettingsService::load(store.clone(), env_onefichier_key)
+        .await
+        .map_err(|e| anyhow::anyhow!("loading settings: {e}"))?;
+
     let policy = NetworkPolicy::new(config.network.allowed_private_networks.clone());
     let client = direkt::http_client::build_client(policy.clone())?;
-    let providers = Providers::standard(&config, client.clone());
+    let providers = Providers::standard(client.clone(), settings.onefichier_key());
     let engine = Engine::new(
         store.clone(),
         providers.clone(),
@@ -126,6 +134,7 @@ async fn serve(config: Config, config_path: &Path) -> anyhow::Result<()> {
     let app = web::router(AppState {
         downloads,
         auth,
+        settings,
         store: store.clone(),
         secure_cookies: config.server.secure_cookies,
     });

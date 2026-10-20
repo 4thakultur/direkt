@@ -9,20 +9,22 @@ mode.
 1. Log in on 1fichier.com and copy your API key from
    *My account → Settings → API key*. 1fichier gives API keys only to
    customers (Premium, Premium Light, Premium GOLD, Access, CDN).
-2. Give the key to Direkt. The environment variable takes precedence:
-   ```sh
-   DIREKT_ONEFICHIER_API_KEY=your-key
-   ```
-   or in `direkt.toml`:
-   ```toml
-   [providers.onefichier]
-   api_key = "your-key"
-   ```
-3. Restart Direkt.
+2. In Direkt, open **Settings → 1fichier**, paste the key, and click
+   **Save**. It takes effect on the next download attempt, with no restart
+   needed. Once saved, the field shows only `************************`. To
+   replace the key, clear the field and paste the new one. **Remove key**
+   deletes it.
 
-The key is never logged or returned by the API. Without a key, 1fichier links
-are still accepted, but they stop in *needs attention* until a key is
-configured and you retry them.
+   Alternatively, set the `DIREKT_ONEFICHIER_API_KEY` environment variable,
+   for example from a Docker secret or an `.env` file. If it's set, it takes
+   precedence, and the Settings field is shown locked.
+
+The key is never logged, rendered in a page, or returned by the API, which
+only reports whether a key is configured and where it comes from. A key saved
+through Settings is stored in the database (`<data_dir>/direkt.db`), so
+protect backups of that directory. Without a key, 1fichier links are still
+accepted, but they stop in *needs attention* until a key is configured and you
+retry them.
 
 ## Supported links
 

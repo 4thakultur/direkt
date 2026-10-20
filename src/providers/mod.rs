@@ -11,8 +11,8 @@ mod onefichier;
 pub use http::HttpProvider;
 pub use onefichier::OneFichierProvider;
 
-use crate::config::Config;
 use crate::error::{AppError, TransferError};
+use crate::settings::SecretCell;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -90,14 +90,11 @@ impl Providers {
         Self { list }
     }
 
-    /// All built-in providers, configured from `config`. `client` must be the
-    /// policy-enforcing client from [`crate::http_client::build_client`].
-    pub fn standard(config: &Config, client: reqwest::Client) -> Self {
+    /// All built-in providers. `client` must be the policy-enforcing client
+    /// from [`crate::http_client::build_client`].
+    pub fn standard(client: reqwest::Client, onefichier_key: SecretCell) -> Self {
         Self::new(vec![
-            Arc::new(OneFichierProvider::new(
-                client,
-                config.providers.onefichier.api_key.clone(),
-            )),
+            Arc::new(OneFichierProvider::new(client, onefichier_key)),
             Arc::new(HttpProvider),
         ])
     }
@@ -117,7 +114,7 @@ mod tests {
 
     fn providers() -> Providers {
         let client = crate::http_client::build_client(Default::default()).unwrap();
-        Providers::standard(&Config::default(), client)
+        Providers::standard(client, SecretCell::default())
     }
 
     #[test]

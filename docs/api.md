@@ -52,6 +52,9 @@ Every error uses the same body:
 | GET | `/api/v1/tokens` | List API tokens (no secrets) |
 | POST | `/api/v1/tokens` | Create `{"name": "…"}`. The secret is in this response only. |
 | DELETE | `/api/v1/tokens/{id}` | Revoke a token |
+| GET | `/api/v1/settings/onefichier` | Whether a 1fichier API key is configured, and its source. The key is shown only as `************************`. |
+| PUT | `/api/v1/settings/onefichier` | Set the key: `{"api_key": "…"}`. Returns `409` if it comes from `DIREKT_ONEFICHIER_API_KEY`. |
+| DELETE | `/api/v1/settings/onefichier` | Remove the stored key |
 
 Download passwords are write-only: no endpoint ever returns them.
 

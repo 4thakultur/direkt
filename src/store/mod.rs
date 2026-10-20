@@ -15,6 +15,7 @@ use std::time::Duration;
 use uuid::Uuid;
 
 mod auth;
+mod settings;
 
 pub use auth::{AdminAccount, ApiToken};
 

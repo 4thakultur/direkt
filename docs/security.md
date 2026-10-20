@@ -37,6 +37,15 @@ Restart Direkt and complete setup again.
   15 minutes. Behind a reverse proxy every client shares the proxy's address,
   so the lockout then applies to everyone.
 
+## Provider credentials
+
+Provider API keys (currently 1fichier) are entered on the Settings page, or
+supplied as environment variables, which take precedence. They are stored in
+the database in plain text, like a configuration file would hold them, so
+restrict access to `data_dir` and to its backups. Once saved, a key is never
+shown again (the UI displays `************************`), returned by the API,
+or written to the logs.
+
 ## Browser hardening
 
 Every response carries a strict Content-Security-Policy (no inline scripts,

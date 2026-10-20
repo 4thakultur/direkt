@@ -46,13 +46,20 @@ impl Reply {
 
 impl TestApp {
     async fn new() -> Self {
+        Self::build(None).await
+    }
+
+    async fn build(env_onefichier_key: Option<crate::config::Secret>) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open_in_memory().await.unwrap();
         let auth = AuthService::new(store.clone(), dir.path()).await.unwrap();
         let policy = NetworkPolicy::default();
         let client = crate::http_client::build_client(policy.clone()).unwrap();
-        let providers = Providers::standard(&crate::config::Config::default(), client.clone());
-        let settings = EngineSettings {
+        let settings = crate::settings::SettingsService::load(store.clone(), env_onefichier_key)
+            .await
+            .unwrap();
+        let providers = Providers::standard(client.clone(), settings.onefichier_key());
+        let engine_settings = EngineSettings {
             download_dir: dir.path().join("dl"),
             incomplete_dir: dir.path().join("inc"),
             max_concurrent: 1,
@@ -66,12 +73,13 @@ impl TestApp {
             providers.clone(),
             client,
             policy.clone(),
-            settings,
+            engine_settings,
         );
         let downloads = DownloadService::new(store.clone(), engine, providers, policy);
         let router = router(AppState {
             downloads,
             auth: auth.clone(),
+            settings,
             store,
             secure_cookies: false,
         });
@@ -84,7 +92,11 @@ impl TestApp {
 
     /// Complete setup and return a session cookie header value.
     async fn with_admin() -> (Self, String) {
-        let app = Self::new().await;
+        Self::with_admin_and_env_key(None).await
+    }
+
+    async fn with_admin_and_env_key(key: Option<crate::config::Secret>) -> (Self, String) {
+        let app = Self::build(key).await;
         let token = app.auth.read_setup_token();
         let session = app
             .auth
@@ -201,6 +213,7 @@ async fn openapi_document_is_valid() {
     assert!(doc["components"]["securitySchemes"]["bearer"].is_object());
     assert!(doc["components"]["schemas"]["DownloadDto"].is_object());
     assert!(doc["components"]["schemas"]["RetryDownload"].is_object());
+    assert!(doc["paths"].get("/api/v1/settings/onefichier").is_some());
     assert!(doc["components"]["schemas"]["CreateDownload"]["properties"]["password"].is_object());
 }
 
@@ -812,4 +825,136 @@ async fn download_passwords_are_write_only() {
         )
         .await;
     assert_eq!(r.status, StatusCode::BAD_REQUEST);
+}
+
+const ONEFICHIER_KEY: &str = "AbCdEfGhIjKlMnOpQrStUvWxYz012345";
+
+#[tokio::test]
+async fn onefichier_key_via_api_is_masked() {
+    let (app, cookie) = TestApp::with_admin().await;
+    let auth = cookie_header(&cookie);
+    let r = app.get("/api/v1/settings/onefichier", &auth).await;
+    assert_eq!(r.json()["configured"], false);
+    assert_eq!(r.json()["source"], "none");
+
+    let put = |body: Value| {
+        let cookie = cookie.clone();
+        let app = &app;
+        async move {
+            app.send(
+                HttpRequest::put("/api/v1/settings/onefichier")
+                    .header("cookie", cookie)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+        }
+    };
+    let r = put(serde_json::json!({"api_key": "bad key"})).await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST);
+    assert_eq!(r.error_kind(), "invalid_request");
+
+    let r = put(serde_json::json!({"api_key": ONEFICHIER_KEY})).await;
+    assert_eq!(r.status, StatusCode::OK);
+    assert_eq!(r.json()["configured"], true);
+    assert_eq!(r.json()["source"], "settings");
+    assert_eq!(r.json()["api_key"], crate::settings::SECRET_MASK);
+    assert!(!r.body.contains(ONEFICHIER_KEY));
+    let r = app.get("/api/v1/settings/onefichier", &auth).await;
+    assert!(!r.body.contains(ONEFICHIER_KEY));
+    assert_eq!(r.json()["api_key"], crate::settings::SECRET_MASK);
+
+    let r = app
+        .send(
+            HttpRequest::delete("/api/v1/settings/onefichier")
+                .header("cookie", &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::OK);
+    assert_eq!(r.json()["configured"], false);
+    assert!(r.json()["api_key"].is_null());
+}
+
+#[tokio::test]
+async fn onefichier_key_via_settings_page() {
+    let (app, cookie) = TestApp::with_admin().await;
+    let auth = cookie_header(&cookie);
+    let page = app.get("/settings", &auth).await;
+    assert!(page.body.contains("Paste your 1fichier API key"));
+    assert!(!page.body.contains("Remove key"));
+
+    let r = app
+        .post_form(
+            "/settings/onefichier",
+            &auth,
+            &format!("api_key={ONEFICHIER_KEY}"),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::OK);
+    assert!(r.body.contains("1fichier API key saved"));
+    assert!(
+        !r.body.contains(ONEFICHIER_KEY),
+        "the key is never rendered"
+    );
+    let mask = crate::settings::SECRET_MASK;
+    assert!(
+        r.body.contains(&format!("value=\"{mask}\"")),
+        "field shows the mask"
+    );
+    assert!(r.body.contains("Remove key"));
+
+    // Submitting the pre-filled mask keeps the key.
+    let r = app
+        .post_form(
+            "/settings/onefichier",
+            &auth,
+            &format!("api_key={}", mask.replace('*', "%2A")),
+        )
+        .await;
+    assert!(r.body.contains("unchanged"), "{}", r.body);
+    assert_eq!(
+        app.get("/api/v1/settings/onefichier", &auth).await.json()["configured"],
+        true
+    );
+
+    // Typing next to the mask is rejected rather than saved.
+    let r = app
+        .post_form("/settings/onefichier", &auth, "api_key=%2A%2A%2Aabc")
+        .await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST);
+    assert!(r.body.contains("does not look like a 1fichier API key"));
+
+    let r = app
+        .post_form("/settings/onefichier/remove", &auth, "")
+        .await;
+    assert!(r.body.contains("1fichier API key removed"));
+    assert_eq!(
+        app.get("/api/v1/settings/onefichier", &auth).await.json()["configured"],
+        false
+    );
+}
+
+#[tokio::test]
+async fn environment_key_locks_the_setting() {
+    let (app, cookie) =
+        TestApp::with_admin_and_env_key(Some(crate::config::Secret::new(ONEFICHIER_KEY))).await;
+    let auth = cookie_header(&cookie);
+    let r = app.get("/api/v1/settings/onefichier", &auth).await;
+    assert_eq!(r.json()["source"], "environment");
+    assert_eq!(r.json()["editable"], false);
+    let page = app.get("/settings", &auth).await;
+    assert!(page.body.contains("DIREKT_ONEFICHIER_API_KEY"));
+    assert!(page.body.contains(" disabled"));
+    assert!(!page.body.contains(ONEFICHIER_KEY));
+    let r = app
+        .post_form(
+            "/settings/onefichier",
+            &auth,
+            "api_key=ZyXwVuTsRqPoNmLkJiHgFeDcBa987654",
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::CONFLICT);
 }

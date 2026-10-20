@@ -5,6 +5,31 @@
 {% if let Some(error) = error %}<p class="flash error">{{ error }}</p>{% endif %}
 
 <section class="card stack">
+  <h2>1fichier</h2>
+  <p class="muted">
+    Premium API key for downloading 1fichier links. Find it on 1fichier.com
+    under <em>My account → Settings → API key</em>.
+  </p>
+  {% if !onefichier.editable %}
+  <p class="note">
+    The key is set by the <code>DIREKT_ONEFICHIER_API_KEY</code> environment
+    variable. Change or remove it there.
+  </p>
+  {% endif %}
+  <form method="post" action="/settings/onefichier" class="submit">
+    <input name="api_key" type="text" value="{% if let Some(mask) = onefichier.api_key %}{{ mask }}{% endif %}"
+           placeholder="Paste your 1fichier API key" autocomplete="off" spellcheck="false"
+           aria-label="1fichier API key"{% if !onefichier.editable %} disabled{% endif %}>
+    {% if onefichier.editable %}<button type="submit" class="primary">Save</button>{% endif %}
+  </form>
+  {% if onefichier.editable && onefichier.configured %}
+  <form method="post" action="/settings/onefichier/remove" class="inline">
+    <button type="submit" class="danger">Remove key</button>
+  </form>
+  {% endif %}
+</section>
+
+<section class="card stack">
   <h2>API tokens</h2>
   <p class="muted">
     Tokens let scripts and integrations use the <a href="/api/openapi.json">API</a>.

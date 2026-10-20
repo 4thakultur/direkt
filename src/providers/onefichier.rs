@@ -26,6 +26,7 @@ use super::{BoxFuture, Provider, ResolveRequest, ResolvedResource};
 use crate::config::Secret;
 use crate::error::{AppError, ErrorKind, TransferError};
 use crate::http_client::classify_reqwest_error;
+use crate::settings::SecretCell;
 use reqwest::StatusCode;
 use serde::Deserialize;
 use std::time::{Duration, Instant};
@@ -61,7 +62,8 @@ const UNKNOWN_ERROR_WAIT: Duration = Duration::from_secs(5 * 60);
 
 pub struct OneFichierProvider {
     client: reqwest::Client,
-    api_key: Option<Secret>,
+    /// Read on every attempt, so a key changed in the settings applies at once.
+    api_key: SecretCell,
     api_base: Url,
     min_interval: Duration,
     /// Time of the last API call. Held across the call itself so requests
@@ -70,7 +72,7 @@ pub struct OneFichierProvider {
 }
 
 impl OneFichierProvider {
-    pub fn new(client: reqwest::Client, api_key: Option<Secret>) -> Self {
+    pub fn new(client: reqwest::Client, api_key: SecretCell) -> Self {
         Self::with_endpoint(
             client,
             api_key,
@@ -82,7 +84,7 @@ impl OneFichierProvider {
     /// Use a different API endpoint and call spacing (tests).
     pub(crate) fn with_endpoint(
         client: reqwest::Client,
-        api_key: Option<Secret>,
+        api_key: SecretCell,
         api_base: Url,
         min_interval: Duration,
     ) -> Self {
@@ -197,7 +199,7 @@ fn classify_api_error(status: StatusCode, message: Option<&str>) -> TransferErro
     if has("not authenticated") || has("no such user") {
         return TransferError::block(
             ErrorKind::AuthenticationFailed,
-            format!("1fichier rejected the API key; check providers.onefichier.api_key ({detail})"),
+            format!("1fichier rejected the API key; check it under Settings ({detail})"),
         );
     }
     if has("owner locked") {
@@ -328,11 +330,11 @@ impl Provider for OneFichierProvider {
         request: ResolveRequest<'a>,
     ) -> BoxFuture<'a, Result<ResolvedResource, TransferError>> {
         Box::pin(async move {
-            let Some(api_key) = &self.api_key else {
+            let Some(api_key) = self.api_key.get() else {
                 return Err(TransferError::block(
                     ErrorKind::AuthenticationFailed,
-                    "1fichier downloads need a premium API key: set providers.onefichier.api_key \
-                     or DIREKT_ONEFICHIER_API_KEY, restart, then retry",
+                    "1fichier downloads need a premium API key: add it under Settings \
+                     (or set DIREKT_ONEFICHIER_API_KEY), then retry",
                 ));
             };
             if request
@@ -345,7 +347,7 @@ impl Provider for OneFichierProvider {
                 ));
             }
             let link = self
-                .get_token(api_key, request.url, request.password)
+                .get_token(&api_key, request.url, request.password)
                 .await?;
             Ok(ResolvedResource {
                 url: link,
@@ -365,7 +367,7 @@ mod tests {
 
     fn provider() -> OneFichierProvider {
         let client = crate::http_client::build_client(Default::default()).unwrap();
-        OneFichierProvider::new(client, None)
+        OneFichierProvider::new(client, SecretCell::default())
     }
 
     #[test]
@@ -513,6 +515,6 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.disposition, Disposition::Block);
-        assert!(err.message.contains("DIREKT_ONEFICHIER_API_KEY"));
+        assert!(err.message.contains("Settings"));
     }
 }
