@@ -35,6 +35,7 @@ use tokio::sync::{Notify, Semaphore, watch};
 use tokio::task::{JoinHandle, JoinSet};
 use tokio_util::sync::CancellationToken;
 use transfer::{Attempt, AttemptOutcome, remove_if_exists};
+pub(crate) use transfer::{content_disposition_filename, filename_from_url, parse_content_range};
 use url::Url;
 use uuid::Uuid;
 

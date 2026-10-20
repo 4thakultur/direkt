@@ -6,10 +6,10 @@
 //! them.
 
 use super::{AppState, clear_session_cookie, client_ip, read_cookie, session_cookie};
-use crate::domain::{Download, DownloadEvent, PostState, TransferState};
+use crate::domain::{Download, DownloadEvent, MediaType, PostState, TransferState};
 use crate::engine::{HISTORY_SECS, LiveSnapshot, ThroughputSnapshot};
 use crate::error::{AppError, ErrorKind};
-use crate::media::ArtworkService;
+use crate::service::Preview;
 use crate::settings::{OneFichierSettings, SECRET_MASK, TmdbSettings};
 use crate::store::ApiToken;
 use askama::Template;
@@ -59,7 +59,10 @@ pub fn protected_routes() -> Router<AppState> {
         )
         .route("/logout", post(logout))
         .route("/ui/dashboard", get(dashboard_fragment))
-        .route("/ui/downloads", post(submit_download))
+        .route("/ui/submit", get(submit_fragment))
+        .route("/ui/downloads/preview", post(preview_download))
+        .route("/ui/previews/{id}/type", post(retype_preview))
+        .route("/ui/downloads", post(confirm_download))
         .route("/ui/downloads/{id}/detail", get(detail_fragment))
         .route("/ui/downloads/{id}/{action}", post(download_action))
 }
@@ -186,6 +189,10 @@ struct DownloadView {
     hue: u8,
     /// Cached artwork id, shown instead of the badge.
     artwork: Option<String>,
+    /// The type chosen at confirmation, e.g. "TV series".
+    media_label: Option<&'static str>,
+    /// Title found by the metadata lookup.
+    title: Option<String>,
     /// When it finished, for the completed list.
     finished: Option<String>,
 }
@@ -215,7 +222,7 @@ fn url_file_name(display_url: &str) -> Option<String> {
 }
 
 impl DownloadView {
-    fn new(d: Download, live: Option<LiveSnapshot>, artwork: &ArtworkService) -> Self {
+    fn new(d: Download, live: Option<LiveSnapshot>) -> Self {
         use TransferState::*;
         let downloaded = live
             .map(|l| l.downloaded_bytes)
@@ -250,11 +257,15 @@ impl DownloadView {
             (_, Some(e), _) => Some(e.message.clone()),
             _ => None,
         };
-        let file_name = d.filename.clone().or_else(|| url_file_name(&d.display_url));
-        let artwork = file_name.as_deref().and_then(|n| artwork.lookup(n));
-        let name = file_name.unwrap_or_else(|| d.display_url.clone());
+        let name = d
+            .filename
+            .clone()
+            .or_else(|| url_file_name(&d.display_url))
+            .unwrap_or_else(|| d.display_url.clone());
         Self {
-            artwork,
+            artwork: d.artwork_id,
+            media_label: d.media_type.map(MediaType::label),
+            title: d.title,
             id: d.id.to_string(),
             badge: tile_badge(&name),
             hue: (d.id.as_u128() % TILE_HUES) as u8,
@@ -577,8 +588,76 @@ struct Dashboard {
 #[template(path = "_submit.html")]
 struct SubmitForm {
     value: String,
+    preview: Option<PreviewView>,
     message: Option<String>,
     error: Option<String>,
+}
+
+/// The confirmation menu shown after clicking Download.
+struct PreviewView {
+    id: String,
+    /// The looked-up title, or the file name.
+    heading: String,
+    /// The file name, when the heading is a looked-up title.
+    filename: Option<String>,
+    year: Option<u16>,
+    provider: &'static str,
+    size: String,
+    artwork: Option<String>,
+    badge: String,
+    hue: u8,
+    types: Vec<TypeOption>,
+    notes: Vec<String>,
+}
+
+struct TypeOption {
+    value: &'static str,
+    label: &'static str,
+    selected: bool,
+    detected: bool,
+}
+
+fn provider_label(id: &str) -> &'static str {
+    match id {
+        "1fichier" => "1fichier",
+        _ => "Direct link",
+    }
+}
+
+impl From<Preview> for PreviewView {
+    fn from(p: Preview) -> Self {
+        let name = p.filename.clone().unwrap_or_else(|| p.display_url.clone());
+        let (heading, filename) = match p.title {
+            Some(title) => (title, Some(name.clone())),
+            None => (name.clone(), None),
+        };
+        let size = match (p.size_bytes, p.size_approximate) {
+            (Some(n), true) => format!("\u{2248} {}", human_bytes(n)),
+            (Some(n), false) => human_bytes(n),
+            (None, _) => "Unknown".into(),
+        };
+        Self {
+            badge: tile_badge(&name),
+            hue: (p.id.as_u128() % TILE_HUES) as u8,
+            id: p.id.to_string(),
+            heading,
+            filename,
+            year: p.year,
+            provider: provider_label(&p.provider),
+            size,
+            artwork: p.artwork_id,
+            types: MediaType::ALL
+                .into_iter()
+                .map(|t| TypeOption {
+                    value: t.as_str(),
+                    label: t.label(),
+                    selected: t == p.media_type,
+                    detected: t == p.detected_type,
+                })
+                .collect(),
+            notes: p.notes,
+        }
+    }
 }
 
 async fn load_dashboard(state: &AppState) -> Dashboard {
@@ -610,7 +689,7 @@ async fn load_dashboard(state: &AppState) -> Dashboard {
 
     let view = |d: Download| {
         let live = service.live(d.id);
-        DownloadView::new(d, live, &state.artwork)
+        DownloadView::new(d, live)
     };
     let mut downloading = Vec::new();
     let mut up_next = Vec::new();
@@ -684,26 +763,87 @@ fn with_refresh(mut response: Response) -> Response {
     response
 }
 
-async fn submit_download(State(state): State<AppState>, Form(body): Form<SubmitBody>) -> Response {
-    match state
-        .downloads
-        .submit(&body.url, body.password.as_deref())
-        .await
-    {
-        Ok(d) => with_refresh(render(&SubmitForm {
-            value: String::new(),
-            message: Some(format!("Queued {}", d.display_url)),
-            error: None,
-        })),
-        Err(e) => render_status(
-            status_for(&e),
-            &SubmitForm {
-                value: body.url,
-                message: None,
-                error: Some(e.message),
-            },
-        ),
+/// An empty submit form (Cancel on the confirmation menu).
+async fn submit_fragment() -> Response {
+    render(&SubmitForm::default())
+}
+
+/// Download clicked: look the link up and show the confirmation menu.
+async fn preview_download(State(state): State<AppState>, Form(body): Form<SubmitBody>) -> Response {
+    let password = body.password.as_deref().filter(|p| !p.is_empty());
+    match state.downloads.preview(&body.url, password).await {
+        Ok(preview) => render(&SubmitForm {
+            value: body.url,
+            preview: Some(preview.into()),
+            ..Default::default()
+        }),
+        Err(e) => submit_error(e, body.url),
     }
+}
+
+#[derive(Deserialize)]
+struct ConfirmBody {
+    preview_id: Uuid,
+    media_type: String,
+    /// The link field, kept on screen if the confirmation fails.
+    #[serde(default)]
+    url: String,
+}
+
+fn parse_media_type(value: &str) -> Result<MediaType, AppError> {
+    MediaType::parse(value).ok_or_else(|| AppError::invalid("unknown type"))
+}
+
+/// The type was changed on the confirmation menu: look it up again.
+async fn retype_preview(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Form(body): Form<ConfirmBody>,
+) -> Response {
+    let result = match parse_media_type(&body.media_type) {
+        Ok(t) => state.downloads.retype(id, t).await,
+        Err(e) => Err(e),
+    };
+    match result {
+        Ok(preview) => render(&SubmitForm {
+            value: body.url,
+            preview: Some(preview.into()),
+            ..Default::default()
+        }),
+        Err(e) => submit_error(e, body.url),
+    }
+}
+
+/// Start download clicked on the confirmation menu.
+async fn confirm_download(
+    State(state): State<AppState>,
+    Form(body): Form<ConfirmBody>,
+) -> Response {
+    let result = match parse_media_type(&body.media_type) {
+        Ok(t) => state.downloads.confirm(body.preview_id, Some(t)).await,
+        Err(e) => Err(e),
+    };
+    match result {
+        Ok(d) => with_refresh(render(&SubmitForm {
+            message: Some(format!(
+                "Queued {}",
+                d.filename.as_deref().unwrap_or(&d.display_url)
+            )),
+            ..Default::default()
+        })),
+        Err(e) => submit_error(e, body.url),
+    }
+}
+
+fn submit_error(e: AppError, url: String) -> Response {
+    render_status(
+        status_for(&e),
+        &SubmitForm {
+            value: url,
+            error: Some(e.message),
+            ..Default::default()
+        },
+    )
 }
 
 #[derive(Template)]
@@ -762,7 +902,7 @@ async fn load_detail(
     let events = state.downloads.events(id).await?;
     let live = state.downloads.live(id);
     Ok((
-        DownloadView::new(download, live, &state.artwork),
+        DownloadView::new(download, live),
         events.into_iter().rev().map(EventView::from).collect(),
     ))
 }

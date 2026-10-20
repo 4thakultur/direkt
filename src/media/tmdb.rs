@@ -1,35 +1,21 @@
-//! The Movie Database (TMDB) client: title search and artwork download.
+//! The Movie Database (TMDB): movie and TV series search.
 //!
-//! Requests go through the policy-enforcing HTTP client. Errors never carry
-//! request URLs, which may contain the API key.
+//! The API key travels as a query parameter (v3 key) or bearer token (v4
+//! read access token); errors never carry request URLs.
 
-use super::parse::{MediaGuess, MediaKind, normalize_title};
+use super::fetch::{Found, LookupError, get_json};
+use super::parse::{MediaGuess, normalize_title};
 use crate::config::Secret;
-use reqwest::{Client, StatusCode};
+use crate::domain::MediaType;
+use reqwest::Client;
 use serde::Deserialize;
-use std::time::Duration;
 use url::Url;
 
 pub const API_BASE: &str = "https://api.themoviedb.org/3/";
 pub const IMAGE_BASE: &str = "https://image.tmdb.org/t/p/w780/";
 
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
-/// Largest artwork accepted; a w780 backdrop is usually under 200 KiB.
-pub const MAX_IMAGE_BYTES: usize = 4 * 1024 * 1024;
-/// Largest search response accepted (a page of 20 results is a few KiB).
-const MAX_SEARCH_BYTES: usize = 1024 * 1024;
 /// Search results examined for an exact title match.
 const MAX_CANDIDATES: usize = 10;
-
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
-pub enum TmdbError {
-    #[error("TMDB rejected the API key")]
-    Unauthorized,
-    #[error("TMDB is rate limiting requests")]
-    RateLimited,
-    #[error("TMDB request failed: {0}")]
-    Failed(String),
-}
 
 #[derive(Clone)]
 pub struct Tmdb {
@@ -112,17 +98,6 @@ fn choose<'a>(guess: &MediaGuess, results: &'a [SearchResult]) -> Option<&'a Sea
         .find(|r| r.image_path().is_some())
 }
 
-/// Sniff the image type from its first bytes.
-pub fn image_type(bytes: &[u8]) -> Option<&'static str> {
-    if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
-        Some("image/jpeg")
-    } else if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
-        Some("image/png")
-    } else {
-        None
-    }
-}
-
 impl Tmdb {
     pub fn new(client: Client) -> Self {
         Self::with_bases(
@@ -141,36 +116,20 @@ impl Tmdb {
         }
     }
 
-    /// Find artwork for `guess`. `Ok(None)` means TMDB has no confident match.
-    pub async fn find_artwork(
+    /// A confident match for a movie or TV guess, or `None`.
+    pub async fn search(
         &self,
         guess: &MediaGuess,
         key: &Secret,
-    ) -> Result<Option<Vec<u8>>, TmdbError> {
-        let results = self.search(guess, key).await?;
-        let Some(path) = choose(guess, &results).and_then(SearchResult::image_path) else {
-            return Ok(None);
-        };
-        let url = self
-            .image_base
-            .join(path.trim_start_matches('/'))
-            .map_err(|_| TmdbError::Failed("invalid image path".into()))?;
-        self.fetch_image(url).await.map(Some)
-    }
-
-    async fn search(
-        &self,
-        guess: &MediaGuess,
-        key: &Secret,
-    ) -> Result<Vec<SearchResult>, TmdbError> {
+    ) -> Result<Option<Found>, LookupError> {
         let (endpoint, year_param) = match guess.kind {
-            MediaKind::Movie => ("search/movie", "year"),
-            MediaKind::Tv => ("search/tv", "first_air_date_year"),
+            MediaType::Tv => ("search/tv", "first_air_date_year"),
+            _ => ("search/movie", "year"),
         };
         let mut url = self
             .api_base
             .join(endpoint)
-            .map_err(|_| TmdbError::Failed("invalid API URL".into()))?;
+            .map_err(|_| LookupError::Failed("invalid API URL".into()))?;
         {
             let mut query = url.query_pairs_mut();
             query
@@ -183,48 +142,27 @@ impl Tmdb {
                 query.append_pair("api_key", key.expose());
             }
         }
-        let mut request = self.client.get(url).timeout(REQUEST_TIMEOUT);
+        let mut request = self.client.get(url);
         if is_read_access_token(key.expose()) {
             request = request.bearer_auth(key.expose());
         }
-        let response = request.send().await.map_err(request_error)?;
-        check_status(response.status())?;
-        let bytes = read_capped(response, MAX_SEARCH_BYTES).await?;
-        let body: SearchResponse = serde_json::from_slice(&bytes)
-            .map_err(|_| TmdbError::Failed("unexpected search response".into()))?;
-        Ok(body.results)
+        let body: SearchResponse = get_json(request).await?;
+        let Some(result) = choose(guess, &body.results) else {
+            return Ok(None);
+        };
+        let (Some(path), Some(title)) = (result.image_path(), result.title.clone()) else {
+            return Ok(None);
+        };
+        let image = self
+            .image_base
+            .join(path.trim_start_matches('/'))
+            .map_err(|_| LookupError::Failed("invalid image path".into()))?;
+        Ok(Some(Found {
+            title,
+            year: result.year(),
+            image,
+        }))
     }
-
-    async fn fetch_image(&self, url: Url) -> Result<Vec<u8>, TmdbError> {
-        let response = self
-            .client
-            .get(url)
-            .timeout(REQUEST_TIMEOUT)
-            .send()
-            .await
-            .map_err(request_error)?;
-        check_status(response.status())?;
-        let bytes = read_capped(response, MAX_IMAGE_BYTES).await?;
-        if image_type(&bytes).is_none() {
-            return Err(TmdbError::Failed("not a JPEG or PNG image".into()));
-        }
-        Ok(bytes)
-    }
-}
-
-/// Read a response body, failing once it exceeds `max` bytes.
-async fn read_capped(mut response: reqwest::Response, max: usize) -> Result<Vec<u8>, TmdbError> {
-    if response.content_length().is_some_and(|n| n > max as u64) {
-        return Err(TmdbError::Failed("response too large".into()));
-    }
-    let mut bytes = Vec::new();
-    while let Some(chunk) = response.chunk().await.map_err(request_error)? {
-        if bytes.len() + chunk.len() > max {
-            return Err(TmdbError::Failed("response too large".into()));
-        }
-        bytes.extend_from_slice(&chunk);
-    }
-    Ok(bytes)
 }
 
 /// TMDB accepts a v3 API key (32 hex digits) as a query parameter, or a v4
@@ -252,20 +190,6 @@ pub fn validate_key(key: &str) -> Result<(), String> {
     }
 }
 
-fn check_status(status: StatusCode) -> Result<(), TmdbError> {
-    match status {
-        s if s.is_success() => Ok(()),
-        StatusCode::UNAUTHORIZED => Err(TmdbError::Unauthorized),
-        StatusCode::TOO_MANY_REQUESTS => Err(TmdbError::RateLimited),
-        s => Err(TmdbError::Failed(format!("HTTP {}", s.as_u16()))),
-    }
-}
-
-fn request_error(err: reqwest::Error) -> TmdbError {
-    // The classified message never includes the URL (and so the key).
-    TmdbError::Failed(crate::http_client::classify_reqwest_error(&err).message)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -280,7 +204,7 @@ mod tests {
         }
     }
 
-    fn guess(kind: MediaKind, title: &str, year: Option<u16>) -> MediaGuess {
+    fn guess(kind: MediaType, title: &str, year: Option<u16>) -> MediaGuess {
         MediaGuess {
             kind,
             title: title.into(),
@@ -296,21 +220,21 @@ mod tests {
             result("Cyberpunk 2077: The Movie", "2020-01-01", Some("/a.jpg")),
             result("Cyberpunk: Edgerunners", "2022-09-13", Some("/b.jpg")),
         ];
-        let g = guess(MediaKind::Tv, "Cyberpunk Edgerunners", None);
+        let g = guess(MediaType::Tv, "Cyberpunk Edgerunners", None);
         assert_eq!(
             choose(&g, &results).and_then(|r| r.image_path()),
             Some("/b.jpg")
         );
 
-        let g = guess(MediaKind::Movie, "Cyberpunk Edgerunners", Some(2022));
+        let g = guess(MediaType::Movie, "Cyberpunk Edgerunners", Some(2022));
         assert!(choose(&g, &results).is_some());
-        let g = guess(MediaKind::Movie, "Cyberpunk Edgerunners", Some(2010));
+        let g = guess(MediaType::Movie, "Cyberpunk Edgerunners", Some(2010));
         assert!(choose(&g, &results).is_none(), "year mismatch");
-        let g = guess(MediaKind::Movie, "Cyberpunk", None);
+        let g = guess(MediaType::Movie, "Cyberpunk", None);
         assert!(choose(&g, &results).is_none(), "partial title");
 
         let no_image = [result("Cyberpunk: Edgerunners", "2022-09-13", None)];
-        let g = guess(MediaKind::Tv, "Cyberpunk Edgerunners", None);
+        let g = guess(MediaType::Tv, "Cyberpunk Edgerunners", None);
         assert!(choose(&g, &no_image).is_none());
     }
 
@@ -359,12 +283,5 @@ mod tests {
         assert!(validate_key("short").is_err());
         assert!(validate_key("0123456789abcdef0123456789abcdeg").is_err());
         assert!(validate_key(&format!("{jwt} ")).is_err());
-    }
-
-    #[test]
-    fn image_types_are_sniffed() {
-        assert_eq!(image_type(&[0xFF, 0xD8, 0xFF, 0xE0]), Some("image/jpeg"));
-        assert_eq!(image_type(b"\x89PNG\r\n\x1a\nrest"), Some("image/png"));
-        assert_eq!(image_type(b"<html>"), None);
     }
 }

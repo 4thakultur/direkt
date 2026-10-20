@@ -430,13 +430,13 @@ pub(super) async fn remove_if_exists(path: &Path) -> Result<(), TransferError> {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-struct ContentRange {
+pub(crate) struct ContentRange {
     start: u64,
-    total: Option<u64>,
+    pub(crate) total: Option<u64>,
 }
 
 /// Parse `Content-Range: bytes <start>-<end>/<total|*>`.
-fn parse_content_range(headers: &HeaderMap) -> Option<ContentRange> {
+pub(crate) fn parse_content_range(headers: &HeaderMap) -> Option<ContentRange> {
     let value = headers.get(header::CONTENT_RANGE)?.to_str().ok()?;
     let rest = value.trim().strip_prefix("bytes ")?;
     let (range, total) = rest.split_once('/')?;
@@ -467,7 +467,7 @@ fn unsatisfied_range_total(headers: &HeaderMap) -> Option<u64> {
 
 /// Extract the filename from a `Content-Disposition` header, preferring the
 /// RFC 6266 `filename*` form. The result is untrusted and must be sanitized.
-fn content_disposition_filename(value: &str) -> Option<String> {
+pub(crate) fn content_disposition_filename(value: &str) -> Option<String> {
     let mut plain = None;
     let mut extended = None;
     for param in split_params(value).into_iter().skip(1) {
@@ -538,7 +538,7 @@ fn unquote(s: &str) -> String {
 }
 
 /// Last non-empty path segment of a URL, percent-decoded and sanitized.
-fn filename_from_url(url: &Url) -> Option<String> {
+pub(crate) fn filename_from_url(url: &Url) -> Option<String> {
     let segment = url.path_segments()?.rev().find(|s| !s.is_empty())?;
     let decoded = percent_encoding::percent_decode_str(segment).decode_utf8_lossy();
     fsutil::sanitize_filename(&decoded)
@@ -651,6 +651,9 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
             completed_at: None,
+            media_type: None,
+            title: None,
+            artwork_id: None,
         };
         assert_eq!(
             if_range_validator(&dl).as_deref(),

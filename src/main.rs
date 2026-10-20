@@ -3,7 +3,7 @@
 use direkt::auth::AuthService;
 use direkt::config::{Config, LogFormat};
 use direkt::engine::{Engine, EngineSettings};
-use direkt::media::{ArtworkService, Tmdb};
+use direkt::media::ArtworkService;
 use direkt::net::NetworkPolicy;
 use direkt::providers::{OneFichierAccount, Providers};
 use direkt::service::DownloadService;
@@ -147,12 +147,18 @@ async fn serve(config: Config, config_path: &Path) -> anyhow::Result<()> {
         EngineSettings::from_config(&config),
     );
     let dispatcher = engine.start();
-    let (artwork, artwork_worker) = ArtworkService::start(
+    let artwork = ArtworkService::new(
         config.storage.data_dir.join("artwork"),
-        Tmdb::new(client.clone()),
+        client.clone(),
         settings.tmdb_key(),
     );
-    let downloads = DownloadService::new(store.clone(), engine.clone(), providers, policy);
+    let downloads = DownloadService::new(
+        store.clone(),
+        engine.clone(),
+        providers,
+        policy,
+        artwork.clone(),
+    );
 
     let app = web::router(AppState {
         downloads,
@@ -168,8 +174,6 @@ async fn serve(config: Config, config_path: &Path) -> anyhow::Result<()> {
     web::server::serve(listener, app, shutdown_signal()).await?;
 
     engine.shutdown(dispatcher).await;
-    // Artwork writes are atomic renames; stopping mid-lookup loses nothing.
-    artwork_worker.abort();
     store.close().await;
     tracing::info!("shutdown complete");
     Ok(())

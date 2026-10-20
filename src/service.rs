@@ -2,20 +2,43 @@
 //!
 //! This is the single entry point for download operations, so the API, the
 //! web UI and future integrations share the same validation and state rules.
+//!
+//! Submitting can take two steps: [`DownloadService::preview`] looks the link
+//! up (name, size, suggested type, title and artwork) and keeps the result,
+//! with the password, under a preview id for an hour;
+//! [`DownloadService::confirm`] then queues it with the type the user chose.
+//! The password never leaves the server in between.
 
-use crate::domain::{Download, DownloadEvent, TransferState};
-use crate::engine::{Engine, LiveSnapshot, StopReason, ThroughputSnapshot};
-use crate::error::{AppError, AppResult, ErrorKind};
+use crate::domain::{Download, DownloadEvent, MediaType, TransferState};
+use crate::engine::{Engine, LiveSnapshot, StopReason, ThroughputSnapshot, filename_from_url};
+use crate::error::{AppError, AppResult, Disposition, ErrorKind};
+use crate::media::parse::{detect, guess_as};
+use crate::media::{Artwork, ArtworkService, Lookup};
 use crate::net::{NetworkPolicy, redact_url, validate_submission_url};
-use crate::providers::Providers;
+use crate::providers::{Provider, Providers, ResolveRequest, ResourceInfo};
 use crate::store::{NewDownload, Store, TransitionDetails};
 use chrono::Utc;
-use std::time::Duration;
+use serde::Serialize;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+use tokio::sync::Semaphore;
+use url::Url;
 use uuid::Uuid;
 
 /// Bound on optimistic-concurrency retries when a download changes state
 /// while a user action is being applied.
 const MAX_STATE_RACES: usize = 40;
+/// How long a preview waits for the provider to describe the link.
+const INSPECT_TIMEOUT: Duration = Duration::from_secs(25);
+/// How long a preview waits for the artwork lookup.
+const LOOKUP_TIMEOUT: Duration = Duration::from_secs(20);
+/// How long a preview can be confirmed.
+const PREVIEW_TTL: Duration = Duration::from_secs(3600);
+/// Previews kept at once; the oldest are dropped beyond this.
+const MAX_PREVIEWS: usize = 128;
+/// Previews being looked up at once.
+const MAX_CONCURRENT_PREVIEWS: usize = 4;
 
 #[derive(Clone)]
 pub struct DownloadService {
@@ -23,21 +46,201 @@ pub struct DownloadService {
     engine: Engine,
     providers: Providers,
     policy: NetworkPolicy,
+    artwork: ArtworkService,
+    previews: Arc<Mutex<HashMap<Uuid, Pending>>>,
+    preview_permits: Arc<Semaphore>,
+}
+
+/// What the confirmation step shows for a link.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+pub struct Preview {
+    /// Pass to `confirm` (`preview_id` when creating a download).
+    pub id: Uuid,
+    pub provider: String,
+    /// Submitted URL with the query string redacted.
+    pub display_url: String,
+    pub filename: Option<String>,
+    pub size_bytes: Option<u64>,
+    /// The size is rounded, as the provider displays it.
+    pub size_approximate: bool,
+    /// The type the download will get: detected, or chosen with `retype`.
+    pub media_type: MediaType,
+    /// The type Direkt detected from the name.
+    pub detected_type: MediaType,
+    /// Title found by the metadata lookup.
+    pub title: Option<String>,
+    pub year: Option<u16>,
+    /// Cached artwork, served at `/artwork/{id}`.
+    pub artwork_id: Option<String>,
+    /// Why some details are missing, e.g. no TMDB key is set.
+    pub notes: Vec<String>,
+}
+
+/// A preview waiting for confirmation. Holds the password: never serialized.
+#[derive(Clone)]
+struct Pending {
+    url: Url,
+    provider: &'static str,
+    password: Option<String>,
+    preview: Preview,
+    /// Notes from inspecting the link, kept when the type changes.
+    inspect_notes: Vec<String>,
+    created: Instant,
 }
 
 impl DownloadService {
-    pub fn new(store: Store, engine: Engine, providers: Providers, policy: NetworkPolicy) -> Self {
+    pub fn new(
+        store: Store,
+        engine: Engine,
+        providers: Providers,
+        policy: NetworkPolicy,
+        artwork: ArtworkService,
+    ) -> Self {
         Self {
             store,
             engine,
             providers,
             policy,
+            artwork,
+            previews: Arc::default(),
+            preview_permits: Arc::new(Semaphore::new(MAX_CONCURRENT_PREVIEWS)),
         }
     }
 
     /// Validate a URL, pick its provider, and queue it. `password` is for
     /// password-protected files on providers that support it.
-    pub async fn submit(&self, raw_url: &str, password: Option<&str>) -> AppResult<Download> {
+    pub async fn submit(
+        &self,
+        raw_url: &str,
+        password: Option<&str>,
+        media_type: Option<MediaType>,
+    ) -> AppResult<Download> {
+        let (url, provider, password) = self.validate(raw_url, password)?;
+        self.queue(NewDownload {
+            display_url: redact_url(&url),
+            url: url.into(),
+            provider: provider.id().to_owned(),
+            password,
+            media_type,
+            ..Default::default()
+        })
+        .await
+    }
+
+    /// Look a link up for the confirmation step: its name and size from the
+    /// provider, a suggested type, and a title and artwork when found. A link
+    /// that is gone or forbidden is an error; anything else that cannot be
+    /// read is reported in `notes`, and the download can still be confirmed.
+    pub async fn preview(&self, raw_url: &str, password: Option<&str>) -> AppResult<Preview> {
+        let (url, provider, password) = self.validate(raw_url, password)?;
+        let _permit = self
+            .preview_permits
+            .acquire()
+            .await
+            .map_err(|_| AppError::internal("shutting down"))?;
+        let mut notes = Vec::new();
+        let request = ResolveRequest {
+            url: &url,
+            password: password.as_deref(),
+        };
+        let info = match tokio::time::timeout(INSPECT_TIMEOUT, provider.inspect(request)).await {
+            Ok(Ok(info)) => info,
+            Ok(Err(e))
+                if e.disposition == Disposition::Fail
+                    && matches!(
+                        e.kind,
+                        ErrorKind::RemoteUnavailable | ErrorKind::InvalidRequest
+                    ) =>
+            {
+                return Err(AppError::new(e.kind, e.message));
+            }
+            Ok(Err(e)) => {
+                notes.push(format!("Could not read the file details: {}", e.message));
+                ResourceInfo::default()
+            }
+            Err(_) => {
+                notes.push("The file details took too long to load.".into());
+                ResourceInfo::default()
+            }
+        };
+        let filename = info
+            .filename
+            .as_deref()
+            .and_then(crate::fsutil::sanitize_filename)
+            .or_else(|| filename_from_url(&url));
+        let detected = filename
+            .as_deref()
+            .map_or(MediaType::Unsorted, |f| detect(f).media_type);
+        let mut preview = Preview {
+            id: Uuid::new_v4(),
+            provider: provider.id().to_owned(),
+            display_url: redact_url(&url),
+            filename,
+            size_bytes: info.size,
+            size_approximate: info.size_approximate,
+            media_type: detected,
+            detected_type: detected,
+            title: None,
+            year: None,
+            artwork_id: None,
+            notes: Vec::new(),
+        };
+        self.describe(&mut preview, &notes).await;
+        self.keep(Pending {
+            url,
+            provider: provider.id(),
+            password,
+            preview: preview.clone(),
+            inspect_notes: notes,
+            created: Instant::now(),
+        });
+        Ok(preview)
+    }
+
+    /// Change a preview's type, looking the title and artwork up again.
+    pub async fn retype(&self, id: Uuid, media_type: MediaType) -> AppResult<Preview> {
+        let mut pending = self.pending(id)?;
+        if pending.preview.media_type != media_type {
+            pending.preview.media_type = media_type;
+            self.describe(&mut pending.preview, &pending.inspect_notes)
+                .await;
+            self.keep(pending.clone());
+        }
+        Ok(pending.preview)
+    }
+
+    /// Queue a previewed link. `media_type` overrides the preview's type.
+    pub async fn confirm(&self, id: Uuid, media_type: Option<MediaType>) -> AppResult<Download> {
+        let mut pending = self.pending(id)?;
+        if let Some(t) = media_type
+            && t != pending.preview.media_type
+        {
+            pending.preview.media_type = t;
+            self.describe(&mut pending.preview, &[]).await;
+        }
+        // Taken once: a double click must not queue the link twice.
+        if self.take(id).is_none() {
+            return Err(expired());
+        }
+        let preview = pending.preview;
+        self.queue(NewDownload {
+            display_url: preview.display_url,
+            url: pending.url.into(),
+            provider: pending.provider.to_owned(),
+            password: pending.password,
+            filename: preview.filename,
+            media_type: Some(preview.media_type),
+            title: preview.title,
+            artwork_id: preview.artwork_id,
+        })
+        .await
+    }
+
+    fn validate(
+        &self,
+        raw_url: &str,
+        password: Option<&str>,
+    ) -> AppResult<(Url, &Arc<dyn Provider>, Option<String>)> {
         let url = validate_submission_url(raw_url, &self.policy)?;
         let provider = self.providers.for_url(&url).ok_or_else(|| {
             AppError::new(
@@ -52,18 +255,11 @@ impl DownloadService {
                 "this kind of link does not use a download password",
             ));
         }
-        let download = self
-            .store
-            .insert_download(
-                NewDownload {
-                    display_url: redact_url(&url),
-                    url: url.into(),
-                    provider: provider.id().to_owned(),
-                    password: password.map(str::to_owned),
-                },
-                Utc::now(),
-            )
-            .await?;
+        Ok((url, provider, password.map(str::to_owned)))
+    }
+
+    async fn queue(&self, new: NewDownload) -> AppResult<Download> {
+        let download = self.store.insert_download(new, Utc::now()).await?;
         tracing::info!(
             id = %download.id,
             url = %download.display_url,
@@ -72,6 +268,73 @@ impl DownloadService {
         );
         self.engine.wake();
         Ok(download)
+    }
+
+    /// Fill in title and artwork for the preview's type.
+    async fn describe(&self, preview: &mut Preview, inspect_notes: &[String]) {
+        preview.notes = inspect_notes.to_vec();
+        preview.title = None;
+        preview.year = None;
+        preview.artwork_id = None;
+        let Some(guess) = preview
+            .filename
+            .as_deref()
+            .and_then(|f| guess_as(f, preview.media_type))
+        else {
+            return;
+        };
+        let lookup = tokio::time::timeout(LOOKUP_TIMEOUT, self.artwork.find(&guess))
+            .await
+            .unwrap_or_else(|_| Lookup::Unavailable("the artwork lookup took too long".into()));
+        match lookup {
+            Lookup::Found(Artwork { id, title, year }) => {
+                preview.artwork_id = Some(id);
+                preview.title = Some(title);
+                preview.year = year;
+            }
+            Lookup::NotFound => preview.notes.push(format!(
+                "No artwork found for \u{201c}{}\u{201d}.",
+                guess.title
+            )),
+            Lookup::NeedsKey => preview.notes.push(
+                "Add a TMDB API key under Settings \u{2192} Artwork to see movie and series \
+                 artwork."
+                    .into(),
+            ),
+            Lookup::Unavailable(message) => {
+                preview.notes.push(format!("No artwork: {message}."));
+            }
+        }
+    }
+
+    fn keep(&self, pending: Pending) {
+        let mut previews = self.previews.lock().unwrap_or_else(|e| e.into_inner());
+        previews.retain(|_, p| p.created.elapsed() < PREVIEW_TTL);
+        if previews.len() >= MAX_PREVIEWS
+            && let Some(oldest) = previews
+                .iter()
+                .min_by_key(|(_, p)| p.created)
+                .map(|(id, _)| *id)
+        {
+            previews.remove(&oldest);
+        }
+        previews.insert(pending.preview.id, pending);
+    }
+
+    fn pending(&self, id: Uuid) -> AppResult<Pending> {
+        let previews = self.previews.lock().unwrap_or_else(|e| e.into_inner());
+        previews
+            .get(&id)
+            .filter(|p| p.created.elapsed() < PREVIEW_TTL)
+            .cloned()
+            .ok_or_else(expired)
+    }
+
+    fn take(&self, id: Uuid) -> Option<Pending> {
+        self.previews
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&id)
     }
 
     pub async fn get(&self, id: Uuid) -> AppResult<Download> {
@@ -243,6 +506,10 @@ impl DownloadService {
 const MAX_PASSWORD_CHARS: usize = 256;
 
 /// Treat an empty password as none and reject unusable ones.
+fn expired() -> AppError {
+    AppError::not_found("this confirmation has expired; paste the link and click Download again")
+}
+
 fn normalize_password(password: Option<&str>) -> AppResult<Option<&str>> {
     let Some(password) = password.filter(|p| !p.is_empty()) else {
         return Ok(None);

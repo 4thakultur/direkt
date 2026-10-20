@@ -1,13 +1,17 @@
 //! Media identification: release-name parsing and metadata lookup.
 //!
-//! For now this provides cover artwork for the web UI. The media organization
-//! pipeline will build on the same parser and metadata source.
+//! The confirmation step uses it to suggest a type, title and artwork for a
+//! link. The media organization pipeline will build on the same parser and
+//! metadata sources.
 
 mod artwork;
+mod fetch;
 pub mod parse;
+mod steam;
 pub mod tmdb;
 
-pub use artwork::ArtworkService;
 #[cfg(test)]
-pub(crate) use artwork::id_for_name as artwork_id_for_name;
+pub(crate) use artwork::tests as artwork_tests;
+pub use artwork::{Artwork, ArtworkService, Lookup};
+pub use steam::Steam;
 pub use tmdb::Tmdb;

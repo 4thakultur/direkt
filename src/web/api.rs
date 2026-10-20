@@ -3,15 +3,16 @@
 
 use super::error::{ApiJson, ApiPath, ApiQuery};
 use super::{ApiError, AppState, ErrorBody};
-use crate::domain::{Download, DownloadError, DownloadEvent, PostState, TransferState};
+use crate::domain::{Download, DownloadError, DownloadEvent, MediaType, PostState, TransferState};
 use crate::engine::LiveSnapshot;
 use crate::error::{AppError, ErrorKind};
+use crate::service::Preview;
 use crate::settings::{OneFichierSettings, TmdbSettings};
 use crate::store::ApiToken;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -31,6 +32,8 @@ pub fn routes() -> Router<AppState> {
         .route("/downloads/{id}/resume", post(resume_download))
         .route("/downloads/{id}/cancel", post(cancel_download))
         .route("/downloads/{id}/retry", post(retry_download))
+        .route("/previews", post(create_preview))
+        .route("/previews/{id}", put(retype_preview))
         .route("/stats", get(get_stats))
         .route("/tokens", get(list_tokens).post(create_token))
         .route("/tokens/{id}", delete(revoke_token))
@@ -83,6 +86,12 @@ pub struct DownloadDto {
     pub post_error: Option<DownloadError>,
     /// Location of the completed file.
     pub file_path: Option<String>,
+    /// Chosen when the download was confirmed.
+    pub media_type: Option<MediaType>,
+    /// Title found by the metadata lookup.
+    pub title: Option<String>,
+    /// Cached artwork, served at `/artwork/{id}` (session login).
+    pub artwork_id: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
@@ -108,6 +117,9 @@ impl DownloadDto {
             error: d.error,
             post_error: d.post_error,
             file_path: d.file_path,
+            media_type: d.media_type,
+            title: d.title,
+            artwork_id: d.artwork_id,
             created_at: d.created_at,
             updated_at: d.updated_at,
             completed_at: d.completed_at,
@@ -138,14 +150,37 @@ pub struct DownloadList {
     pub offset: i64,
 }
 
+/// Either `url` (queue directly) or `preview_id` (queue a preview from
+/// `POST /api/v1/previews`, with its password and lookup results).
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct CreateDownload {
     /// An http or https URL.
     #[schema(example = "https://example.com/files/movie.mkv")]
-    pub url: String,
+    pub url: Option<String>,
     /// Password for a password-protected file (1fichier). Write-only: never
     /// returned or logged.
     pub password: Option<String>,
+    /// A preview to confirm, instead of `url` and `password`.
+    pub preview_id: Option<Uuid>,
+    /// The download's type. With `preview_id`, defaults to the preview's.
+    pub media_type: Option<MediaType>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CreatePreview {
+    /// An http or https URL.
+    #[schema(example = "https://1fichier.com/?abcde12345")]
+    pub url: String,
+    /// Password for a password-protected file. Kept with the preview on the
+    /// server and never returned.
+    pub password: Option<String>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RetypePreview {
+    pub media_type: MediaType,
 }
 
 #[derive(Debug, Default, Deserialize, ToSchema)]
@@ -200,11 +235,62 @@ async fn create_download(
     State(state): State<AppState>,
     ApiJson(body): ApiJson<CreateDownload>,
 ) -> ApiResult<impl IntoResponse> {
-    let download = state
-        .downloads
-        .submit(&body.url, body.password.as_deref())
-        .await?;
+    let download = match (body.preview_id, body.url) {
+        (Some(id), None) => state.downloads.confirm(id, body.media_type).await?,
+        (None, Some(url)) => {
+            state
+                .downloads
+                .submit(&url, body.password.as_deref(), body.media_type)
+                .await?
+        }
+        (Some(_), Some(_)) => {
+            return Err(AppError::invalid("send either url or preview_id, not both").into());
+        }
+        (None, None) => return Err(AppError::invalid("url is required").into()),
+    };
     Ok((StatusCode::CREATED, Json(DownloadDto::new(download, None))))
+}
+
+/// Look a link up before downloading it: provider, file name, size,
+/// suggested type, and a title and artwork when found. Confirm it with
+/// `POST /api/v1/downloads` and `preview_id` within an hour.
+#[utoipa::path(
+    post, path = "/api/v1/previews", tag = "downloads",
+    request_body = CreatePreview,
+    responses(
+        (status = 200, body = Preview),
+        (status = 400, description = "Invalid or forbidden URL", body = ErrorBody),
+        (status = 422, description = "No provider supports the URL", body = ErrorBody),
+        (status = 502, description = "The file is gone", body = ErrorBody),
+    )
+)]
+async fn create_preview(
+    State(state): State<AppState>,
+    ApiJson(body): ApiJson<CreatePreview>,
+) -> ApiResult<Json<Preview>> {
+    Ok(Json(
+        state
+            .downloads
+            .preview(&body.url, body.password.as_deref())
+            .await?,
+    ))
+}
+
+/// Change a preview's type; the title and artwork are looked up again.
+#[utoipa::path(
+    put, path = "/api/v1/previews/{id}", tag = "downloads",
+    request_body = RetypePreview,
+    responses(
+        (status = 200, body = Preview),
+        (status = 404, description = "Unknown or expired preview", body = ErrorBody),
+    )
+)]
+async fn retype_preview(
+    State(state): State<AppState>,
+    ApiPath(id): ApiPath<Uuid>,
+    ApiJson(body): ApiJson<RetypePreview>,
+) -> ApiResult<Json<Preview>> {
+    Ok(Json(state.downloads.retype(id, body.media_type).await?))
 }
 
 /// List downloads, newest first.
@@ -627,7 +713,7 @@ async fn sign_out_onefichier(State(state): State<AppState>) -> ApiResult<Json<On
             Errors use the body `{\"error\": {\"kind\": ..., \"message\": ...}}`."
     ),
     paths(
-        create_download, list_downloads, get_download, download_events,
+        create_download, create_preview, retype_preview, list_downloads, get_download, download_events,
         pause_download, resume_download, cancel_download, retry_download, get_stats,
         list_tokens, create_token, revoke_token,
         get_onefichier, put_onefichier, delete_onefichier,

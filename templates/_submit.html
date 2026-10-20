@@ -1,4 +1,5 @@
-<form class="add" hx-post="/ui/downloads" hx-swap="outerHTML">
+<div id="submit" class="submit-area">
+<form class="add" hx-post="/ui/downloads/preview" hx-target="#submit" hx-swap="outerHTML" hx-disabled-elt="find button">
   <label class="field url">
     <svg class="icon" aria-hidden="true"><use href="#i-link"/></svg>
     <input name="url" type="url" placeholder="Paste a download link" value="{{ value }}" required aria-label="URL to download" autocomplete="off" spellcheck="false">
@@ -7,7 +8,37 @@
     <svg class="icon" aria-hidden="true"><use href="#i-lock"/></svg>
     <input name="password" type="password" placeholder="File password" autocomplete="off" aria-label="File password (optional)">
   </label>
-  <button type="submit" class="primary big">Download</button>
+  <button type="submit" class="primary big"><span class="when-idle">Download</span><span class="when-busy">Looking up…</span></button>
   {% if let Some(message) = message %}<p class="flash ok">{{ message }}</p>{% endif %}
   {% if let Some(error) = error %}<p class="flash error">{{ error }}</p>{% endif %}
 </form>
+{% if let Some(p) = preview %}
+<form class="confirm" hx-post="/ui/downloads" hx-target="#submit" hx-swap="outerHTML" hx-disabled-elt="find button, find select" aria-label="Confirm download">
+  <input type="hidden" name="preview_id" value="{{ p.id }}">
+  <input type="hidden" name="url" value="{{ value }}">
+  <div class="art art-lg hue-{{ p.hue }}{% if p.artwork.is_some() %} has-art{% endif %}" aria-hidden="true">{% if let Some(art) = p.artwork %}<img src="/artwork/{{ art }}" alt="" decoding="async">{% else %}<span>{{ p.badge }}</span>{% endif %}</div>
+  <div class="confirm-body">
+    <p class="eyebrow">Ready to download</p>
+    <h2 class="confirm-title">{{ p.heading }}{% if let Some(year) = p.year %} <span class="muted">({{ year }})</span>{% endif %}</h2>
+    {% if let Some(name) = p.filename %}<p class="muted small break">{{ name }}</p>{% endif %}
+    <dl class="hero-meta">
+      <div><dt>Provider</dt><dd>{{ p.provider }}</dd></div>
+      <div><dt>Size</dt><dd>{{ p.size }}</dd></div>
+      <div>
+        <dt><label for="media-type">Type</label></dt>
+        <dd>
+          <select id="media-type" name="media_type" hx-post="/ui/previews/{{ p.id }}/type" hx-trigger="change" hx-target="#submit" hx-swap="outerHTML">
+            {% for t in p.types %}<option value="{{ t.value }}"{% if t.selected %} selected{% endif %}>{{ t.label }}{% if t.detected %} (detected){% endif %}</option>{% endfor %}
+          </select>
+        </dd>
+      </div>
+    </dl>
+    {% for note in p.notes %}<p class="note">{{ note }}</p>{% endfor %}
+    <div class="actions">
+      <button type="submit" class="primary"><span class="when-idle">Start download</span><span class="when-busy">Starting…</span></button>
+      <button type="button" hx-get="/ui/submit" hx-target="#submit" hx-swap="outerHTML">Cancel</button>
+    </div>
+  </div>
+</form>
+{% endif %}
+</div>

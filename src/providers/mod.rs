@@ -56,6 +56,16 @@ pub struct ResolvedResource {
     pub reject_html: bool,
 }
 
+/// What a link points to, learned without downloading it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ResourceInfo {
+    /// Untrusted; sanitized before use.
+    pub filename: Option<String>,
+    pub size: Option<u64>,
+    /// The size is rounded, as the provider displays it.
+    pub size_approximate: bool,
+}
+
 pub trait Provider: Send + Sync {
     /// Stable identifier, persisted with each download.
     fn id(&self) -> &'static str;
@@ -82,6 +92,15 @@ pub trait Provider: Send + Sync {
         &'a self,
         request: ResolveRequest<'a>,
     ) -> BoxFuture<'a, Result<ResolvedResource, TransferError>>;
+
+    /// Describe a link for the confirmation step, without downloading it.
+    /// Fields the provider cannot tell stay `None`.
+    fn inspect<'a>(
+        &'a self,
+        _request: ResolveRequest<'a>,
+    ) -> BoxFuture<'a, Result<ResourceInfo, TransferError>> {
+        Box::pin(async { Ok(ResourceInfo::default()) })
+    }
 }
 
 /// The set of available providers, consulted in order. Specific hosters go
@@ -105,11 +124,11 @@ impl Providers {
     ) -> Self {
         Self::new(vec![
             Arc::new(OneFichierProvider::new(
-                client,
+                client.clone(),
                 onefichier_key,
                 onefichier_account,
             )),
-            Arc::new(HttpProvider),
+            Arc::new(HttpProvider::new(client)),
         ])
     }
 

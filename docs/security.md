@@ -56,12 +56,19 @@ used anywhere else. Once saved, keys and passwords are never shown again (the
 UI displays `************************`), returned by the API, or written to the
 logs.
 
-## Artwork lookups
+## Download previews and artwork
 
-With a TMDB key set, Direkt sends titles and years parsed from file names to
-TMDB, never download URLs. Images are fetched through the same
-network-policy-enforcing client as downloads, limited to 4 MiB, accepted only
-as JPEG or PNG, and served to the browser from Direkt's own cache. See
+Clicking Download inspects the link before anything is queued: one request for
+its first byte (direct links), or one anonymous visit to the 1fichier file
+page. Both go through the network-policy-enforcing client, so previews cannot
+reach private addresses either. The file password is kept server-side with the
+preview (in memory, one hour, single use) and never sent back to the browser.
+
+Titles parsed from file names go to TMDB (movies and series, with a TMDB key
+set) and the Steam store search (games), never download URLs. Images are
+fetched through the same policy-enforcing client, limited to 4 MiB, accepted
+only as JPEG or PNG, and served to the browser from Direkt's own cache. At
+most four previews and two metadata lookups run at once. See
 [artwork.md](artwork.md).
 
 ## Files on disk

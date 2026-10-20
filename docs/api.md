@@ -41,7 +41,9 @@ Every error uses the same body:
 
 | Method | Path | Description |
 |--------|------|-------------|
-| POST | `/api/v1/downloads` | Submit `{"url": "https://…", "password": "…"}` (`password` is optional and only for providers that support it, such as 1fichier). Returns `201` with the download. |
+| POST | `/api/v1/previews` | Look a link up before downloading: `{"url": "https://…", "password": "…"}`. Returns provider, `filename`, `size_bytes` (`size_approximate` for 1fichier), detected `media_type`, and `title`, `year` and `artwork_id` when found, plus `notes` explaining anything missing. See [artwork.md](artwork.md). The password stays on the server. |
+| PUT | `/api/v1/previews/{id}` | Change a preview's type: `{"media_type": "game"}`. Title and artwork are looked up again. |
+| POST | `/api/v1/downloads` | Submit `{"url": "https://…", "password": "…", "media_type": "movie"}`, or confirm a preview with `{"preview_id": "…", "media_type": "tv"}` (within an hour, once). `password` is only for providers that support it, such as 1fichier; `media_type` is optional (`movie`, `tv`, `game`, `music`, `software`, `unsorted`). Returns `201` with the download, including `media_type`, `title` and `artwork_id`. |
 | GET | `/api/v1/downloads?state=queued,downloading&limit=50&offset=0` | List downloads, newest first |
 | GET | `/api/v1/downloads/{id}` | One download, with live speed while running |
 | GET | `/api/v1/downloads/{id}/events` | Event history |

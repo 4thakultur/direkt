@@ -25,9 +25,11 @@
 //! The error messages handled below follow those observed and handled by
 //! JDownloader's 1fichier plugin. `file/info.cgi` and `user/info.cgi` are
 //! deliberately not called: JDownloader reports that the former causes IP
-//! blocks, and the latter is limited to one call per 5 minutes per user.
+//! blocks, and the latter is limited to one call per 5 minutes per user. The
+//! confirmation step reads a file's name and size from its public page
+//! instead: one throttled request, like a browser visit.
 
-use super::{BoxFuture, Provider, ResolveRequest, ResolvedResource};
+use super::{BoxFuture, Provider, ResolveRequest, ResolvedResource, ResourceInfo};
 use crate::error::{AppError, ErrorKind, TransferError};
 use crate::settings::SecretCell;
 use std::future::Future;
@@ -233,6 +235,20 @@ impl Provider for OneFichierProvider {
                 resumable: true,
                 stable_identity: true,
                 reject_html: true,
+            })
+        })
+    }
+
+    fn inspect<'a>(
+        &'a self,
+        request: ResolveRequest<'a>,
+    ) -> BoxFuture<'a, Result<ResourceInfo, TransferError>> {
+        Box::pin(async move {
+            let info = self.account.file_info(request.url).await?;
+            Ok(ResourceInfo {
+                filename: info.name,
+                size: info.size,
+                size_approximate: true,
             })
         })
     }

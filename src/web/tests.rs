@@ -19,6 +19,8 @@ struct TestApp {
     router: Router,
     auth: AuthService,
     _dir: tempfile::TempDir,
+    /// Base URL of a local file server, for apps built with `local_files`.
+    files: String,
 }
 
 struct Reply {
@@ -50,10 +52,26 @@ impl TestApp {
     }
 
     async fn build(env_onefichier_key: Option<crate::config::Secret>) -> Self {
+        Self::build_with(env_onefichier_key, false).await
+    }
+
+    /// `local_files`: allow loopback downloads and start a local file server,
+    /// so previews can inspect links without leaving the machine.
+    async fn build_with(
+        env_onefichier_key: Option<crate::config::Secret>,
+        local_files: bool,
+    ) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open_in_memory().await.unwrap();
         let auth = AuthService::new(store.clone(), dir.path()).await.unwrap();
-        let policy = NetworkPolicy::default();
+        let (policy, files) = if local_files {
+            (
+                NetworkPolicy::new(vec!["127.0.0.0/8".parse().unwrap()]),
+                file_server().await,
+            )
+        } else {
+            (NetworkPolicy::default(), String::new())
+        };
         let client = crate::http_client::build_client(policy.clone()).unwrap();
         let account = crate::providers::unconfigured_onefichier_account().await;
         let settings = crate::settings::SettingsService::load(
@@ -83,13 +101,15 @@ impl TestApp {
             policy.clone(),
             engine_settings,
         );
-        // No TMDB key: only images already in the cache directory are found.
-        let (artwork, _worker) = ArtworkService::start(
+        // TMDB and Steam are mocked; the TMDB key starts unset.
+        let (metadata, _) = crate::media::artwork_tests::mock_server().await;
+        let artwork = crate::media::artwork_tests::service(
+            &metadata,
             dir.path().join("artwork"),
-            crate::media::Tmdb::new(client.clone()),
             settings.tmdb_key(),
         );
-        let downloads = DownloadService::new(store.clone(), engine, providers, policy);
+        let downloads =
+            DownloadService::new(store.clone(), engine, providers, policy, artwork.clone());
         let router = router(AppState {
             downloads,
             auth: auth.clone(),
@@ -102,6 +122,7 @@ impl TestApp {
             router,
             auth,
             _dir: dir,
+            files,
         }
     }
 
@@ -111,7 +132,15 @@ impl TestApp {
     }
 
     async fn with_admin_and_env_key(key: Option<crate::config::Secret>) -> (Self, String) {
-        let app = Self::build(key).await;
+        Self::admin(Self::build(key).await).await
+    }
+
+    /// With an administrator and a local file server.
+    async fn with_admin_local() -> (Self, String) {
+        Self::admin(Self::build_with(None, true).await).await
+    }
+
+    async fn admin(app: Self) -> (Self, String) {
         let token = app.auth.read_setup_token();
         let session = app
             .auth
@@ -160,6 +189,59 @@ impl TestApp {
         self.send(builder.body(Body::from(form.to_owned())).unwrap())
             .await
     }
+}
+
+impl TestApp {
+    /// Click Download on `url` and return the confirmation's preview id.
+    async fn preview_id(&self, auth: &[(&str, &str)], url: &str) -> String {
+        let r = self
+            .post_form(
+                "/ui/downloads/preview",
+                auth,
+                &format!("url={}", encode(url)),
+            )
+            .await;
+        assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+        preview_id_in(&r.body)
+    }
+}
+
+fn preview_id_in(html: &str) -> String {
+    html.split("name=\"preview_id\" value=\"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .unwrap_or_else(|| panic!("no confirmation menu in: {html}"))
+        .to_owned()
+}
+
+fn encode(value: &str) -> String {
+    url::form_urlencoded::byte_serialize(value.as_bytes()).collect()
+}
+
+/// Serves `/files/{name}` as a 14,100,000-byte file that honours `Range`,
+/// and 404 for anything else.
+async fn file_server() -> String {
+    use axum::routing::get;
+    async fn file(headers: HeaderMap) -> Response {
+        const SIZE: u64 = 14_100_000;
+        if headers.contains_key(header::RANGE) {
+            (
+                StatusCode::PARTIAL_CONTENT,
+                [(header::CONTENT_RANGE, format!("bytes 0-0/{SIZE}"))],
+                "x",
+            )
+                .into_response()
+        } else {
+            (StatusCode::OK, [(header::CONTENT_LENGTH, SIZE.to_string())]).into_response()
+        }
+    }
+    let app = Router::new().route("/files/{name}", get(file));
+    let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+        .await
+        .unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    base
 }
 
 fn cookie_header(cookie: &str) -> [(&'static str, &str); 1] {
@@ -650,8 +732,9 @@ async fn invalid_requests_get_actionable_errors() {
     let r = app
         .post_json("/api/v1/downloads", &auth, serde_json::json!({"link": "x"}))
         .await;
-    assert_eq!(r.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(r.status, StatusCode::BAD_REQUEST);
     assert_eq!(r.error_kind(), "invalid_request");
+    assert!(r.body.contains("url is required"));
     let r = app
         .send(
             HttpRequest::post("/api/v1/downloads")
@@ -690,18 +773,20 @@ async fn invalid_requests_get_actionable_errors() {
 
 #[tokio::test]
 async fn ui_submit_and_actions() {
-    let (app, cookie) = TestApp::with_admin().await;
+    let (app, cookie) = TestApp::with_admin_local().await;
     let auth = cookie_header(&cookie);
 
+    let url = format!("{}/files/movie.mkv", app.files);
+    let id = app.preview_id(&auth, &url).await;
     let r = app
         .post_form(
             "/ui/downloads",
             &auth,
-            "url=https%3A%2F%2Fexample.com%2Fmovie.mkv",
+            &format!("preview_id={id}&media_type=unsorted"),
         )
         .await;
     assert_eq!(r.status, StatusCode::OK);
-    assert!(r.body.contains("Queued https://example.com/movie.mkv"));
+    assert!(r.body.contains("Queued movie.mkv"), "{}", r.body);
     assert_eq!(r.header("hx-trigger"), "downloads-changed");
 
     let rows = app.get("/ui/dashboard", &auth).await;
@@ -746,7 +831,7 @@ async fn ui_submit_errors_keep_input_escaped() {
     let (app, cookie) = TestApp::with_admin().await;
     let r = app
         .post_form(
-            "/ui/downloads",
+            "/ui/downloads/preview",
             &cookie_header(&cookie),
             "url=%22%3E%3Cscript%3Ealert(1)%3C%2Fscript%3E",
         )
@@ -1130,52 +1215,201 @@ async fn tmdb_key_via_api_and_settings_page() {
     assert_eq!(r.json()["configured"], false);
 }
 
+const EDGERUNNERS: &str = "Cyberpunk.Edgerunners.S02.MULTi.AD.1080p.NF.WEB.x264-BYOR.zip";
+
+async fn set_tmdb_key(app: &TestApp, auth: &[(&str, &str)]) {
+    let key = crate::media::artwork_tests::KEY;
+    let r = app
+        .post_form("/settings/tmdb", auth, &format!("api_key={key}"))
+        .await;
+    assert_eq!(r.status, StatusCode::OK);
+}
+
 #[tokio::test]
-async fn cached_artwork_replaces_the_file_type_tile() {
-    const JPEG: &[u8] = &[0xFF, 0xD8, 0xFF, 0xE0, 0, 0x10, b'J', b'F', b'I', b'F'];
-    let name = "Cyberpunk.Edgerunners.S02.MULTi.AD.1080p.NF.WEB.x264-BYOR.zip";
-    let (app, cookie) = TestApp::with_admin().await;
+async fn confirmation_menu_flow() {
+    let (app, cookie) = TestApp::with_admin_local().await;
     let auth = cookie_header(&cookie);
-    let id = crate::media::artwork_id_for_name(name).unwrap();
-    let cache = app._dir.path().join("artwork");
-    std::fs::create_dir_all(&cache).unwrap();
-    std::fs::write(cache.join(&id), JPEG).unwrap();
+    set_tmdb_key(&app, &auth).await;
+    let url = format!("{}/files/{EDGERUNNERS}", app.files);
 
-    for url in [
-        format!("https://example.com/files/{name}"),
-        "https://example.com/files/backup.zip".into(),
-    ] {
-        let r = app
-            .post_json("/api/v1/downloads", &auth, serde_json::json!({"url": url}))
-            .await;
-        assert_eq!(r.status, StatusCode::CREATED);
-    }
+    // Download: the menu shows what was looked up, nothing is queued yet.
+    let r = app
+        .post_form(
+            "/ui/downloads/preview",
+            &auth,
+            &format!("url={}", encode(&url)),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    let menu = &r.body;
+    assert!(menu.contains("Cyberpunk: Edgerunners"), "looked-up title");
+    assert!(menu.contains("(2022)"));
+    assert!(menu.contains(EDGERUNNERS), "file name");
+    assert!(menu.contains("Direct link"), "provider");
+    assert!(menu.contains("13.4 MiB"), "size");
+    assert!(menu.contains("<img src=\"/artwork/"), "artwork");
+    assert!(
+        menu.contains(r#"<option value="tv" selected>TV series (detected)</option>"#),
+        "type pre-filled"
+    );
+    let id = preview_id_in(menu);
+    let dash = app.get("/ui/dashboard", &auth).await;
+    assert!(
+        !dash.body.contains("Edgerunners"),
+        "not queued before confirming"
+    );
 
-    // The first render queues the lookup; the worker finds the cached file.
-    let src = format!("<img src=\"/artwork/{id}\"");
-    let mut found = false;
-    for _ in 0..200 {
-        let page = app.get("/ui/dashboard", &auth).await;
-        if page.body.contains(&src) {
-            assert!(
-                page.body.contains("<span>ZIP</span>"),
-                "no match keeps the tile"
-            );
-            found = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    assert!(found, "artwork never appeared");
+    // Changing the type looks it up again: nothing for Unsorted.
+    let r = app
+        .post_form(
+            &format!("/ui/previews/{id}/type"),
+            &auth,
+            &format!("preview_id={id}&media_type=unsorted"),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::OK);
+    assert!(r.body.contains("<span>ZIP</span>"), "file-type tile");
+    assert!(!r.body.contains("<img src=\"/artwork/"));
+    assert!(r.body.contains(r#"<option value="unsorted" selected>"#));
 
-    let r = app.get(&format!("/artwork/{id}"), &auth).await;
+    // Back to TV series, then start the download.
+    app.post_form(
+        &format!("/ui/previews/{id}/type"),
+        &auth,
+        &format!("preview_id={id}&media_type=tv"),
+    )
+    .await;
+    let r = app
+        .post_form(
+            "/ui/downloads",
+            &auth,
+            &format!("preview_id={id}&media_type=tv"),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    assert!(r.body.contains(&format!("Queued {EDGERUNNERS}")));
+    assert!(!r.body.contains("preview_id"), "menu closed");
+
+    let dash = app.get("/ui/dashboard", &auth).await;
+    assert!(dash.body.contains(EDGERUNNERS));
+    assert!(dash.body.contains("TV series"));
+    let art = dash
+        .body
+        .split("<img src=\"/artwork/")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .expect("artwork on the dashboard")
+        .to_owned();
+    let r = app.get(&format!("/artwork/{art}"), &auth).await;
     assert_eq!(r.status, StatusCode::OK);
     assert_eq!(r.header("content-type"), "image/jpeg");
-    assert!(!r.body.is_empty());
-    let r = app.get(&format!("/artwork/{id}"), &[]).await;
+    let r = app.get(&format!("/artwork/{art}"), &[]).await;
     assert_ne!(r.status, StatusCode::OK, "artwork requires a login");
-    for bad in ["0123456789abcdef0123456789abcdef", "..%2Fdirekt.db", "x"] {
-        let r = app.get(&format!("/artwork/{bad}"), &auth).await;
-        assert_eq!(r.status, StatusCode::NOT_FOUND, "{bad}");
-    }
+
+    // A confirmation works once.
+    let r = app
+        .post_form(
+            "/ui/downloads",
+            &auth,
+            &format!("preview_id={id}&media_type=tv"),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::NOT_FOUND);
+    assert!(r.body.contains("expired"));
+}
+
+#[tokio::test]
+async fn preview_without_tmdb_key_says_so() {
+    let (app, cookie) = TestApp::with_admin_local().await;
+    let auth = cookie_header(&cookie);
+    let url = format!("{}/files/{EDGERUNNERS}", app.files);
+    let r = app
+        .post_form(
+            "/ui/downloads/preview",
+            &auth,
+            &format!("url={}", encode(&url)),
+        )
+        .await;
+    assert!(r.body.contains("Add a TMDB API key"), "{}", r.body);
+    assert!(r.body.contains("<span>ZIP</span>"));
+
+    // Games need no key (Steam).
+    let url = format!("{}/files/Hades.II-TENOKE.zip", app.files);
+    let r = app
+        .post_form(
+            "/ui/downloads/preview",
+            &auth,
+            &format!("url={}", encode(&url)),
+        )
+        .await;
+    assert!(
+        r.body.contains(r#"<option value="game" selected>"#),
+        "{}",
+        r.body
+    );
+    assert!(r.body.contains("<img src=\"/artwork/"));
+}
+
+#[tokio::test]
+async fn preview_errors_and_api() {
+    let (app, cookie) = TestApp::with_admin_local().await;
+    let auth = cookie_header(&cookie);
+    let missing = format!("{}/nope/file.zip", app.files);
+    let r = app
+        .post_form(
+            "/ui/downloads/preview",
+            &auth,
+            &format!("url={}", encode(&missing)),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::BAD_GATEWAY);
+    assert!(r.body.contains("not found"), "{}", r.body);
+    assert!(
+        r.body.contains(&format!("value=\"{missing}\"")),
+        "link kept"
+    );
+
+    set_tmdb_key(&app, &auth).await;
+    let url = format!("{}/files/{EDGERUNNERS}", app.files);
+    let r = app
+        .post_json("/api/v1/previews", &auth, serde_json::json!({"url": url}))
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    let p = r.json();
+    assert_eq!(p["media_type"], "tv");
+    assert_eq!(p["detected_type"], "tv");
+    assert_eq!(p["size_bytes"], 14_100_000);
+    assert_eq!(p["title"], "Cyberpunk: Edgerunners");
+    let id = p["id"].as_str().unwrap().to_owned();
+
+    let r = app
+        .send(
+            HttpRequest::put(format!("/api/v1/previews/{id}"))
+                .header("cookie", &cookie)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"media_type":"movie"}"#))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(r.json()["media_type"], "movie");
+    assert!(r.json()["artwork_id"].is_null(), "no movie by that name");
+
+    let r = app
+        .post_json(
+            "/api/v1/downloads",
+            &auth,
+            serde_json::json!({"preview_id": id, "media_type": "tv"}),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::CREATED, "{}", r.body);
+    let d = r.json();
+    assert_eq!(d["media_type"], "tv");
+    assert_eq!(d["title"], "Cyberpunk: Edgerunners");
+    assert!(d["artwork_id"].is_string());
+    assert_eq!(d["filename"], EDGERUNNERS);
+
+    let r = app
+        .post_json("/api/v1/downloads", &auth, serde_json::json!({}))
+        .await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST);
 }

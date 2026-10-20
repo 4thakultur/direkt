@@ -66,6 +66,14 @@ pub(crate) struct CdnCredits {
     pub in_use: Option<bool>,
 }
 
+/// A file as its public page describes it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct FileInfo {
+    pub name: Option<String>,
+    /// Bytes, from the rounded size the page displays.
+    pub size: Option<u64>,
+}
+
 pub(crate) enum LinkOutcome {
     Link(Url),
     /// The page was served without a valid session.
@@ -294,6 +302,19 @@ impl Website {
             "1fichier did not provide a download link (unrecognized page)",
             Some(Duration::from_secs(5 * 60)),
         ))
+    }
+
+    /// Name and size from the file's public page, fetched without a session
+    /// (signed in, the page may redirect straight to the file).
+    pub(crate) async fn file_info(&self, file_url: &Url) -> Result<FileInfo, TransferError> {
+        let page = self
+            .request(self.client.get(self.file_page_url(file_url)), &[])
+            .await?;
+        if page.redirect().is_some() {
+            return Ok(FileInfo::default());
+        }
+        classify_file_page(&page)?;
+        Ok(parse_file_info(&page.body))
     }
 
     pub(crate) fn throttle(&self) -> Arc<Throttle> {
@@ -631,6 +652,38 @@ fn classify_file_page(page: &Page) -> Result<(), TransferError> {
     }
 }
 
+/// Read `<span class="tier-name">` and `<span class="tier-feat">` from a file
+/// page. Password-protected files may show neither.
+fn parse_file_info(html: &str) -> FileInfo {
+    static NAME: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r#"<span class="tier-name">([^<]{1,1024})</span>"#).unwrap());
+    static SIZE: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r#"<span class="tier-feat">([^<]{1,64})</span>"#).unwrap());
+    let capture = |re: &Regex| re.captures(html).map(|c| unescape(c[1].trim()));
+    FileInfo {
+        name: capture(&NAME).filter(|n| !n.is_empty()),
+        size: capture(&SIZE).as_deref().and_then(size_to_bytes),
+    }
+}
+
+/// Parse a displayed size such as "30.14 Go", "512 KB" or "1,5 Mo". 1fichier
+/// uses binary multiples, like JDownloader assumes.
+fn size_to_bytes(text: &str) -> Option<u64> {
+    static SIZE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(?i)^\s*(\d+(?:[.,]\d+)?)\s*(o|b|ko|kb|mo|mb|go|gb|to|tb)\s*$").unwrap()
+    });
+    let c = SIZE.captures(text)?;
+    let value: f64 = c[1].replace(',', ".").parse().ok()?;
+    let power = match c[2].to_ascii_lowercase().as_str() {
+        "o" | "b" => 0,
+        "ko" | "kb" => 1,
+        "mo" | "mb" => 2,
+        "go" | "gb" => 3,
+        _ => 4,
+    };
+    Some((value * 1024f64.powi(power)) as u64)
+}
+
 fn contains_ci(haystack: &str, needle: &str) -> bool {
     haystack.to_lowercase().contains(&needle.to_lowercase())
 }
@@ -804,6 +857,33 @@ mod tests {
                 ("kept".to_owned(), String::new()),
             ]
         );
+    }
+
+    #[test]
+    fn reads_file_name_and_size() {
+        let html = r#"<div class="tier-body">
+					<span class="tier-name">Superman.2025.Multi.Truefrench.1080p.Bluray.Remux.AVC-BDHD.mkv</span>
+					<span class="tier-feat">30.14 Go</span>
+				</div>"#;
+        let info = parse_file_info(html);
+        assert_eq!(
+            info.name.as_deref(),
+            Some("Superman.2025.Multi.Truefrench.1080p.Bluray.Remux.AVC-BDHD.mkv")
+        );
+        assert_eq!(info.size, Some((30.14 * 1024f64.powi(3)) as u64));
+        assert_eq!(
+            parse_file_info(r#"<span class="tier-name">a &amp; b.zip</span>"#)
+                .name
+                .as_deref(),
+            Some("a & b.zip")
+        );
+        assert_eq!(parse_file_info("<p>password form</p>"), FileInfo::default());
+
+        assert_eq!(size_to_bytes("512 KB"), Some(512 * 1024));
+        assert_eq!(size_to_bytes("1,5 Mo"), Some(1024 * 1024 * 3 / 2));
+        assert_eq!(size_to_bytes("12 o"), Some(12));
+        assert_eq!(size_to_bytes("2 TB"), Some(2 << 40));
+        assert_eq!(size_to_bytes("lots"), None);
     }
 
     #[test]

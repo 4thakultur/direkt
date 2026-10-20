@@ -1,44 +1,77 @@
-# Artwork
+# Confirming a download: type, title and artwork
 
-The dashboard shows cover artwork for movies and TV shows, found from each
-download's file name. Downloads without a confident match keep their
-file-type tile (`ZIP`, `MKV`, …).
+Clicking **Download** doesn't queue the link right away. Direkt first looks it
+up and opens a confirmation menu showing:
 
-## Setup
+- **Provider**: 1fichier, or "Direct link" for ordinary HTTP/HTTPS links.
+- **Name**: the title found by the metadata lookup (for example
+  "Cyberpunk: Edgerunners (2022)"), with the file name under it.
+- **Artwork**, or the file-type tile (`ZIP`, `MKV`, …) when none is found.
+- **Size**: exact for direct links; about the size 1fichier displays (≈) for
+  1fichier.
+- **Type**: Movie, TV series, Video game, Music, Software or Unsorted,
+  pre-filled with what Direkt detected (marked "detected"). Changing it looks
+  the title and artwork up again for that type.
 
-Artwork needs a free API key from [The Movie Database](https://www.themoviedb.org/)
-(TMDB): create an account, open **Settings → API**, and paste either the
-**API key** or the **API read access token** into Direkt under
-**Settings → Artwork**. You can set it with the `DIREKT_TMDB_API_KEY`
-environment variable instead, which then takes precedence and locks the field.
-Without a key, Direkt makes no requests to TMDB.
+**Start download** queues it with the chosen type; **Cancel** closes the menu.
+The type is stored with the download, so media organization can use it.
 
-## How a match is found
+## Where the details come from
 
-1. The file name is parsed, for example
-   `Cyberpunk.Edgerunners.S02.MULTi.1080p.NF.WEB.x264-BYOR.zip` becomes the TV
-   show "Cyberpunk Edgerunners", season 2, and
-   `Blade.Runner.2049.2017.1080p.BluRay.mkv` becomes the movie
-   "Blade Runner 2049" (2017). Names without an episode marker, a release year,
-   or a release tag such as `1080p` or `WEB` are not looked up, so ordinary
-   files (`backup.zip`, `ubuntu-24.04.iso`) are left alone.
-2. TMDB is searched for that title (and year, if any).
-3. A result counts only if its title or original title matches exactly once
-   punctuation and case are ignored (`Cyberpunk: Edgerunners` matches) and,
-   when the name has a year, the release year is within one year. Otherwise
-   there is no artwork. Direkt never guesses with a loose match.
-4. The wide backdrop is used if TMDB has one, else the poster.
+| Detail | Direct link | 1fichier |
+|--------|-------------|----------|
+| Name and size | A request for the first byte only (`Range: bytes=0-0`): `Content-Disposition` or the URL for the name, `Content-Range` or `Content-Length` for the size | The file's public page, fetched without signing in (`tier-name` and `tier-feat`), spaced like every other 1fichier request. `file/info.cgi` is never used: it is known to get IP addresses banned. |
+| Title and artwork | Movies and TV series: [TMDB](https://www.themoviedb.org/) (needs a free API key). Video games: the Steam store search (no key). Music, Software, Unsorted: none. | same |
 
-Episodes of one show share the show's artwork.
+If the link is gone (HTTP 404 or 410, or "file not found" on 1fichier) or
+forbidden by the network policy, Direkt shows the error instead of the menu.
+Other problems (a timeout, a rate limit) are shown as notes in the menu, and
+you can still start the download.
+
+## Setting up TMDB
+
+Movie and series artwork needs a free TMDB API key: create an account, open
+**Settings → API**, and paste either the **API key** or the **API read access
+token** into Direkt under **Settings → Artwork**. Alternatively, set the
+`DIREKT_TMDB_API_KEY` environment variable, which takes precedence and locks
+the field. Without a key, the menu says so and shows the file-type tile.
+
+## How the type is detected
+
+From the file name, in this order:
+
+1. Video extensions (`.mkv`, `.mp4`, …): a TV series if there's an episode or
+   season marker (`S02`, `S03E10`, `2x05`, `Season 2`), otherwise a movie if
+   there's a release year or a release tag (`1080p`, `WEB`, `BluRay`, …).
+2. Audio extensions (`.mp3`, `.flac`, …): Music.
+3. A game group or repacker (`CODEX`, `TENOKE`, `FitGirl`, `GOG`, …) or a
+   Switch file (`.nsp`, `.xci`): Video game. The title stops at the version,
+   build or group: `Hades.II-TENOKE.zip` is "Hades II".
+4. Installers (`.exe`, `.msi`, `.dmg`, `.deb`, …): Software.
+5. Episode markers, then audio tags (`FLAC`, `MP3`, `320kbps`) without
+   video tags, then a year or release tag, then platform words (`x64`,
+   `amd64`, `Portable`, …).
+6. Anything else: Unsorted.
+
+## Matching is conservative
+
+A search result counts only if its title (or original title) matches exactly,
+ignoring punctuation and case (`Cyberpunk: Edgerunners` matches, `Hades™ II`
+matches "Hades II"), and, when the name has a year, the release year is within
+one year. Otherwise the menu shows no artwork rather than a wrong one. Episodes
+of one show share the show's artwork.
 
 ## Privacy and caching
 
-- Only the parsed title and year are sent to TMDB, never the download URL.
-- Direkt downloads the image itself and caches it in `<data_dir>/artwork`.
-  Your browser loads it from Direkt (`/artwork/<id>`, login required), so it
-  never contacts TMDB, and the Content-Security-Policy stays `img-src 'self'`.
-- Lookups run in one background worker and never slow down the page. Names
-  with no match are looked up again after a day, and after network errors
-  after 10 minutes. Saving a new key retries them at once.
-- Deleting `<data_dir>/artwork` is safe: images are fetched again when needed.
-  Removing the key keeps cached images.
+- TMDB receives only the parsed title and year; Steam only the parsed game
+  title. The download link and password are never sent to them.
+- Direkt downloads the image itself and caches it, with its title, in
+  `<data_dir>/artwork`. Your browser loads it from Direkt (`/artwork/<id>`,
+  login required), so it never contacts TMDB or Steam, and the
+  Content-Security-Policy stays `img-src 'self'`.
+- Titles with no match are looked up again after a day; after errors, after
+  10 minutes. Saving a new TMDB key retries at once.
+- Deleting `<data_dir>/artwork` is safe; downloads confirmed earlier then show
+  their file-type tile.
+- A confirmation, including the file password, stays in memory for an hour
+  and is used once. The password is never sent back to the browser.

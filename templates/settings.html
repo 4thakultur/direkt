@@ -101,17 +101,19 @@
   <summary>
     <span class="panel-title">
       <span class="panel-name">Artwork</span>
-      <span class="panel-desc">Cover images from The Movie Database (TMDB)</span>
+      <span class="panel-desc">Cover images for movies, series and games</span>
     </span>
     {% if tmdb.configured %}<span class="pill ok">TMDB key set</span>{% else %}<span class="pill">Off</span>{% endif %}
     <svg class="icon chevron" aria-hidden="true"><use href="#i-chevron"/></svg>
   </summary>
   <div class="panel-body stack">
     <p class="muted">
-      Direkt reads the title, year and season from each file name and looks up
-      matching artwork on TMDB. Only the parsed title and year are sent. Images
-      are cached in the data directory and served by Direkt, so your browser
-      never contacts TMDB. Files without a confident match keep their file-type tile.
+      When you click Download, Direkt reads the title from the file name and
+      shows matching artwork in the confirmation menu: from TMDB for movies and
+      TV series (needs the key below), from Steam for video games (no key).
+      Only the parsed title and year are sent. Images are cached in the data
+      directory and served by Direkt, so your browser never contacts TMDB or
+      Steam. Files without a confident match keep their file-type tile.
     </p>
     <p class="muted small">
       Create a free API key in your TMDB account under Settings → API, then

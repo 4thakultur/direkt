@@ -1,32 +1,20 @@
 //! Release-style filename parsing.
 //!
-//! Turns names like `Show.Name.S02E05.1080p.WEB.x264-GRP.mkv` or
-//! `Movie.Title.2017.1080p.BluRay.mkv` into a [`MediaGuess`]. Parsing is
-//! deterministic and conservative: a name without a recognizable structure
-//! (episode marker, release year, or quality tag) yields `None` rather than a
-//! guess.
+//! [`detect`] suggests a [`MediaType`] for a file name and, for movies, TV
+//! series and games, a [`MediaGuess`] to look up: names like
+//! `Show.Name.S02E05.1080p.WEB.x264-GRP.mkv`, `Movie.Title.2017.1080p.mkv` or
+//! `Game.Title.v1.2-CODEX.zip`. Parsing is deterministic and conservative: a
+//! name without a recognizable structure is `Unsorted` rather than a guess.
+//! [`guess_as`] redoes the guess for a type the user picked.
 
+use crate::domain::MediaType;
 use regex::Regex;
 use std::sync::LazyLock;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MediaKind {
-    Movie,
-    Tv,
-}
-
-impl MediaKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Movie => "movie",
-            Self::Tv => "tv",
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MediaGuess {
-    pub kind: MediaKind,
+    /// `Movie`, `Tv` or `Game`: the types that have a lookup.
+    pub kind: MediaType,
     /// Title as written in the name, separators replaced by spaces.
     pub title: String,
     pub year: Option<u16>,
@@ -34,14 +22,22 @@ pub struct MediaGuess {
     pub episode: Option<u32>,
 }
 
-/// Extensions stripped before parsing: video, subtitles, archives, and split
-/// archive parts.
-const EXTENSIONS: &[&str] = &[
-    "mkv", "mp4", "m4v", "avi", "mov", "wmv", "ts", "m2ts", "webm", "mpg", "mpeg", "flv", "iso",
-    "srt", "zip", "rar", "7z", "tar", "gz", "tgz", "bz2", "xz",
-];
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Detection {
+    pub media_type: MediaType,
+    pub guess: Option<MediaGuess>,
+}
 
-/// Tokens that start the technical part of a release name.
+const VIDEO_EXTENSIONS: &[&str] = &[
+    "mkv", "mp4", "m4v", "avi", "mov", "wmv", "ts", "m2ts", "webm", "mpg", "mpeg", "flv", "srt",
+];
+const AUDIO_EXTENSIONS: &[&str] = &["mp3", "flac", "m4a", "ogg", "opus", "wav", "alac", "ape"];
+const SOFTWARE_EXTENSIONS: &[&str] = &["exe", "msi", "dmg", "deb", "rpm", "appimage", "apk"];
+const GAME_EXTENSIONS: &[&str] = &["nsp", "xci"];
+/// Containers that say nothing about the content.
+const ARCHIVE_EXTENSIONS: &[&str] = &["iso", "zip", "rar", "7z", "tar", "gz", "tgz", "bz2", "xz"];
+
+/// Tokens that start the technical part of a movie or TV release name.
 const RELEASE_TAGS: &[&str] = &[
     "480p",
     "576p",
@@ -92,6 +88,70 @@ const RELEASE_TAGS: &[&str] = &[
     "integrale",
 ];
 
+/// Tags only video releases carry; they rule out music.
+const VIDEO_TAGS: &[&str] = &[
+    "480p", "576p", "720p", "1080p", "2160p", "x264", "x265", "h264", "h265", "hevc", "bluray",
+    "webrip", "hdtv", "remux",
+];
+
+/// Scene groups and repackers that release games.
+const GAME_GROUPS: &[&str] = &[
+    "codex",
+    "plaza",
+    "skidrow",
+    "reloaded",
+    "cpy",
+    "empress",
+    "tenoke",
+    "rune",
+    "flt",
+    "doge",
+    "tinyiso",
+    "darksiders",
+    "razor1911",
+    "prophet",
+    "hoodlum",
+    "chronos",
+    "simplex",
+    "fitgirl",
+    "dodi",
+    "elamigos",
+    "kaos",
+    "goldberg",
+    "gog",
+    "steamrip",
+    "anadius",
+    "nsw",
+];
+
+const MUSIC_WORDS: &[&str] = &[
+    "flac",
+    "mp3",
+    "alac",
+    "320kbps",
+    "lossless",
+    "discography",
+    "24bit",
+    "16bit",
+    "vinyl",
+];
+
+const SOFTWARE_WORDS: &[&str] = &[
+    "x64",
+    "x86",
+    "amd64",
+    "arm64",
+    "win64",
+    "win32",
+    "windows",
+    "macos",
+    "linux",
+    "portable",
+    "setup",
+    "installer",
+    "multilingual",
+];
+
 static SEASON_EPISODE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)^s(\d{1,2})(?:e(\d{1,3}))?(?:-?e\d{1,3})*$").expect("valid regex")
 });
@@ -103,20 +163,128 @@ static LEADING_GROUP: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^\s*\[[^\]]*\]\s*").expect("valid regex"));
 static PART_SUFFIX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)[._ -]part\d{1,3}$").expect("valid regex"));
+/// Tokens that end a game title: versions, builds, updates, edition notes.
+static GAME_STOP: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^(?:v\d.*|build|update|repack|multi\d*|incl|dlcs?|\+|[\[(].*)$")
+        .expect("valid regex")
+});
 
 /// Longest title worth looking up; anything longer is not a release name.
 const MAX_TITLE_LEN: usize = 120;
 
-pub fn parse_filename(name: &str) -> Option<MediaGuess> {
-    let base = name.rsplit(['/', '\\']).next().unwrap_or(name);
-    let stem = PART_SUFFIX.replace(strip_extensions(base), "");
-    let stem = LEADING_GROUP.replace(&stem, "");
-    let spaced: String = stem
-        .chars()
-        .map(|c| if matches!(c, '.' | '_') { ' ' } else { c })
-        .collect();
-    let tokens: Vec<&str> = spaced.split_whitespace().collect();
+/// A file name split for parsing.
+struct Name {
+    /// The last extension that says what the content is (not an archive).
+    content_ext: Option<String>,
+    /// Whitespace-separated tokens, `.` and `_` read as spaces.
+    tokens: Vec<String>,
+    /// Lowercase words, also split on `-` and brackets, for tag matching.
+    words: Vec<String>,
+}
 
+impl Name {
+    fn new(name: &str) -> Self {
+        let base = name.rsplit(['/', '\\']).next().unwrap_or(name);
+        let (stem, content_ext) = strip_extensions(base);
+        let stem = PART_SUFFIX.replace(stem, "");
+        let stem = LEADING_GROUP.replace(&stem, "");
+        let spaced: String = stem
+            .chars()
+            .map(|c| if matches!(c, '.' | '_') { ' ' } else { c })
+            .collect();
+        let tokens: Vec<String> = spaced.split_whitespace().map(str::to_owned).collect();
+        let words = spaced
+            .split(|c: char| c.is_whitespace() || matches!(c, '-' | '[' | ']' | '(' | ')'))
+            .filter(|w| !w.is_empty())
+            .map(str::to_ascii_lowercase)
+            .collect();
+        Self {
+            content_ext,
+            tokens,
+            words,
+        }
+    }
+
+    fn ext_in(&self, list: &[&str]) -> bool {
+        self.content_ext
+            .as_deref()
+            .is_some_and(|e| list.contains(&e))
+    }
+
+    fn has_word(&self, list: &[&str]) -> bool {
+        self.words.iter().any(|w| list.contains(&w.as_str()))
+    }
+
+    fn tokens(&self) -> Vec<&str> {
+        self.tokens.iter().map(String::as_str).collect()
+    }
+}
+
+pub fn detect(filename: &str) -> Detection {
+    let name = Name::new(filename);
+    let found = |media_type, guess| Detection { media_type, guess };
+    if name.ext_in(VIDEO_EXTENSIONS) {
+        return match release_guess(&name) {
+            Some(g) => found(g.kind, Some(g)),
+            None => found(MediaType::Unsorted, None),
+        };
+    }
+    if name.ext_in(AUDIO_EXTENSIONS) {
+        return found(MediaType::Music, None);
+    }
+    if name.ext_in(GAME_EXTENSIONS) || name.has_word(GAME_GROUPS) {
+        let guess = game_guess(&name);
+        return found(MediaType::Game, guess);
+    }
+    if name.ext_in(SOFTWARE_EXTENSIONS) {
+        return found(MediaType::Software, None);
+    }
+    if let Some(g) = tv_guess(&name.tokens()) {
+        return found(MediaType::Tv, Some(g));
+    }
+    if name.has_word(MUSIC_WORDS) && !name.has_word(VIDEO_TAGS) {
+        return found(MediaType::Music, None);
+    }
+    if let Some(g) = movie_guess(&name.tokens()) {
+        return found(MediaType::Movie, Some(g));
+    }
+    if name.has_word(SOFTWARE_WORDS) {
+        return found(MediaType::Software, None);
+    }
+    found(MediaType::Unsorted, None)
+}
+
+/// A movie or TV guess, as the structure of the name says.
+pub fn parse_filename(filename: &str) -> Option<MediaGuess> {
+    release_guess(&Name::new(filename))
+}
+
+/// The guess to look up when the user says the file is `kind`. Falls back to
+/// the name up to its first release tag, version or year.
+pub fn guess_as(filename: &str, kind: MediaType) -> Option<MediaGuess> {
+    if !matches!(kind, MediaType::Movie | MediaType::Tv | MediaType::Game) {
+        return None;
+    }
+    let name = Name::new(filename);
+    let parsed = match kind {
+        MediaType::Game => game_guess(&name),
+        _ => release_guess(&name),
+    };
+    if let Some(g) = parsed {
+        return Some(MediaGuess { kind, ..g });
+    }
+    let title = title_until(&name.tokens(), |t| {
+        is_release_tag(t) || parse_year(t).is_some()
+    });
+    guess(kind, &title, None, None, None)
+}
+
+fn release_guess(name: &Name) -> Option<MediaGuess> {
+    let tokens = name.tokens();
+    tv_guess(&tokens).or_else(|| movie_guess(&tokens))
+}
+
+fn tv_guess(tokens: &[&str]) -> Option<MediaGuess> {
     for (i, token) in tokens.iter().enumerate().skip(1) {
         let (season, episode) = if let Some(c) = SEASON_EPISODE.captures(token) {
             (
@@ -142,9 +310,12 @@ pub fn parse_filename(name: &str) -> Option<MediaGuess> {
             year = Some(y);
             title = rest;
         }
-        return guess(MediaKind::Tv, title, year, season, episode);
+        return guess(MediaType::Tv, title, year, season, episode);
     }
+    None
+}
 
+fn movie_guess(tokens: &[&str]) -> Option<MediaGuess> {
     let cut = tokens
         .iter()
         .skip(1)
@@ -154,35 +325,81 @@ pub fn parse_filename(name: &str) -> Option<MediaGuess> {
     let year_at = (1..cut).rev().find(|&i| parse_year(tokens[i]).is_some());
     match year_at {
         Some(i) => guess(
-            MediaKind::Movie,
+            MediaType::Movie,
             &tokens[..i],
             parse_year(tokens[i]),
             None,
             None,
         ),
         // Without a year, only a release tag shows this is media at all.
-        None if cut < tokens.len() => guess(MediaKind::Movie, &tokens[..cut], None, None, None),
+        None if cut < tokens.len() => guess(MediaType::Movie, &tokens[..cut], None, None, None),
         None => None,
     }
 }
 
-fn strip_extensions(mut name: &str) -> &str {
-    // At most two: "name.mkv.001", "name.tar.gz".
+/// The game title: the name up to its version, build, or bracketed notes,
+/// without a trailing `-GROUP`.
+fn game_guess(name: &Name) -> Option<MediaGuess> {
+    let title = title_until(&name.tokens(), |_| false);
+    guess(MediaType::Game, &title, None, None, None)
+}
+
+/// Leading tokens up to a game stop token, a group tag, or `stop`. A trailing
+/// `-GROUP` on a token is dropped ("II-TENOKE" ends the title as "II").
+fn title_until<'a>(tokens: &[&'a str], stop: impl Fn(&str) -> bool) -> Vec<&'a str> {
+    let mut title = Vec::new();
+    for (i, &token) in tokens.iter().enumerate() {
+        let leading_group = token.split('-').next().is_some_and(is_game_group);
+        if i > 0 && (GAME_STOP.is_match(token) || leading_group || stop(token)) {
+            break;
+        }
+        if let Some((head, group)) = token.rsplit_once('-')
+            && is_game_group(group)
+        {
+            if !head.is_empty() {
+                title.push(head);
+            }
+            break;
+        }
+        title.push(token);
+    }
+    title
+}
+
+fn is_game_group(word: &str) -> bool {
+    GAME_GROUPS.iter().any(|g| g.eq_ignore_ascii_case(word))
+}
+
+/// Strip up to two extensions ("name.mkv.001", "name.tar.gz"), returning the
+/// stem and the content extension, lowercase.
+fn strip_extensions(mut name: &str) -> (&str, Option<String>) {
+    let mut content_ext = None;
     for _ in 0..2 {
         let Some((stem, ext)) = name.rsplit_once('.') else {
             break;
         };
+        let ext = ext.to_ascii_lowercase();
         let split_part = ext.len() == 3 && ext.bytes().all(|b| b.is_ascii_digit());
-        let rar_part = ext.len() == 3
-            && ext.as_bytes()[0].eq_ignore_ascii_case(&b'r')
-            && ext[1..].bytes().all(|b| b.is_ascii_digit());
-        let known = EXTENSIONS.iter().any(|e| e.eq_ignore_ascii_case(ext));
-        if stem.is_empty() || !(known || split_part || rar_part) {
+        let rar_part =
+            ext.len() == 3 && ext.starts_with('r') && ext[1..].bytes().all(|b| b.is_ascii_digit());
+        let container = split_part || rar_part || ARCHIVE_EXTENSIONS.contains(&ext.as_str());
+        let content = [
+            VIDEO_EXTENSIONS,
+            AUDIO_EXTENSIONS,
+            SOFTWARE_EXTENSIONS,
+            GAME_EXTENSIONS,
+        ]
+        .iter()
+        .any(|list| list.contains(&ext.as_str()));
+        if stem.is_empty() || !(container || content) {
             break;
+        }
+        if content && content_ext.is_none() {
+            content_ext = Some(ext);
         }
         name = stem;
     }
-    name
+    (name, content_ext)
 }
 
 fn parse_year(token: &str) -> Option<u16> {
@@ -195,7 +412,7 @@ fn is_release_tag(token: &str) -> bool {
 }
 
 fn guess(
-    kind: MediaKind,
+    kind: MediaType,
     title: &[&str],
     year: Option<u16>,
     season: Option<u32>,
@@ -241,7 +458,7 @@ mod tests {
 
     fn tv(title: &str, year: Option<u16>, season: u32, episode: Option<u32>) -> Option<MediaGuess> {
         Some(MediaGuess {
-            kind: MediaKind::Tv,
+            kind: MediaType::Tv,
             title: title.into(),
             year,
             season: Some(season),
@@ -251,9 +468,19 @@ mod tests {
 
     fn movie(title: &str, year: Option<u16>) -> Option<MediaGuess> {
         Some(MediaGuess {
-            kind: MediaKind::Movie,
+            kind: MediaType::Movie,
             title: title.into(),
             year,
+            season: None,
+            episode: None,
+        })
+    }
+
+    fn game(title: &str) -> Option<MediaGuess> {
+        Some(MediaGuess {
+            kind: MediaType::Game,
+            title: title.into(),
+            year: None,
             season: None,
             episode: None,
         })
@@ -283,6 +510,7 @@ mod tests {
         ];
         for (name, expected) in cases {
             assert_eq!(parse_filename(name), expected, "{name}");
+            assert_eq!(detect(name).media_type, MediaType::Tv, "{name}");
         }
     }
 
@@ -301,25 +529,102 @@ mod tests {
                 movie("Some Movie", Some(2019)),
             ),
             ("Some.Movie.2019.mkv.001", movie("Some Movie", Some(2019))),
+            (
+                "Superman.2025.Multi.Truefrench.1080p.Bluray.Remux.AVC-BDHD.mkv",
+                movie("Superman", Some(2025)),
+            ),
         ];
         for (name, expected) in cases {
             assert_eq!(parse_filename(name), expected, "{name}");
+            assert_eq!(detect(name).guess, expected, "{name}");
         }
     }
 
     #[test]
-    fn non_media_names_are_not_guessed() {
+    fn game_names() {
+        let cases = [
+            ("Hades.II-TENOKE.zip", game("Hades II")),
+            ("Cyberpunk.2077-CODEX.iso", game("Cyberpunk 2077")),
+            (
+                "Baldurs.Gate.3.v4.1.1.MULTi12-ElAmigos.rar",
+                game("Baldurs Gate 3"),
+            ),
+            ("Elden Ring [FitGirl Repack].part02.rar", game("Elden Ring")),
+            ("Stardew.Valley.Build.12345-GOG.zip", game("Stardew Valley")),
+            ("Some.Game.NSW-VENOM.nsp", game("Some Game")),
+        ];
+        for (name, expected) in cases {
+            let d = detect(name);
+            assert_eq!(d.media_type, MediaType::Game, "{name}");
+            assert_eq!(d.guess, expected, "{name}");
+        }
+    }
+
+    #[test]
+    fn music_and_software_names() {
+        for name in [
+            "Artist-Album-WEB-2023-FLAC.zip",
+            "Some Artist - Discography (1999-2020) [MP3 320kbps].rar",
+            "song.mp3",
+        ] {
+            assert_eq!(detect(name).media_type, MediaType::Music, "{name}");
+        }
+        assert_eq!(
+            detect("Movie.2019.1080p.BluRay.FLAC.x264.mkv").media_type,
+            MediaType::Movie,
+            "audio codec tags on a movie"
+        );
         for name in [
             "ubuntu-24.04-desktop-amd64.iso",
+            "SomeTool.v2.1.x64.Portable.zip",
+            "installer.msi",
+        ] {
+            assert_eq!(detect(name).media_type, MediaType::Software, "{name}");
+        }
+    }
+
+    #[test]
+    fn unstructured_names_are_unsorted() {
+        for name in [
             "archive.zip",
             "report.pdf",
             "2019.mkv",
             "S01E01.mkv",
-            "setup.exe",
+            "holiday.mp4",
             "",
         ] {
-            assert_eq!(parse_filename(name), None, "{name}");
+            let d = detect(name);
+            assert_eq!(d.media_type, MediaType::Unsorted, "{name}");
+            assert_eq!(d.guess, None, "{name}");
         }
+    }
+
+    #[test]
+    fn guesses_follow_the_chosen_type() {
+        let name = "Cyberpunk.Edgerunners.S02.MULTi.AD.1080p.NF.WEB.x264-BYOR.zip";
+        let g = guess_as(name, MediaType::Movie).unwrap();
+        assert_eq!(
+            (g.kind, g.title.as_str()),
+            (MediaType::Movie, "Cyberpunk Edgerunners")
+        );
+        assert_eq!(
+            guess_as("Hades.II-TENOKE.zip", MediaType::Tv)
+                .unwrap()
+                .title,
+            "Hades II"
+        );
+        assert_eq!(
+            guess_as("holiday.mp4", MediaType::Movie).unwrap().title,
+            "holiday"
+        );
+        assert_eq!(
+            guess_as("Cool.Game.v1.0.zip", MediaType::Game)
+                .unwrap()
+                .title,
+            "Cool Game"
+        );
+        assert_eq!(guess_as(name, MediaType::Music), None);
+        assert_eq!(guess_as(name, MediaType::Unsorted), None);
     }
 
     #[test]
@@ -332,5 +637,6 @@ mod tests {
         assert_eq!(normalize_title("Law & Order"), "law and order");
         assert_eq!(normalize_title("Grey's Anatomy"), "greys anatomy");
         assert_eq!(normalize_title("  Amélie  "), "amélie");
+        assert_eq!(normalize_title("Hades™ II"), "hades ii");
     }
 }

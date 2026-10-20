@@ -14,7 +14,7 @@
 
 use super::api::{API_BASE, ApiClient};
 use super::website::{
-    BROWSER_USER_AGENT, CdnCredits, LinkOutcome, LoginOutcome, PendingTwoFactor, Website,
+    BROWSER_USER_AGENT, CdnCredits, FileInfo, LinkOutcome, LoginOutcome, PendingTwoFactor, Website,
 };
 use super::{DEFAULT_MIN_INTERVAL, Throttle};
 use crate::config::Secret;
@@ -153,6 +153,11 @@ impl OneFichierAccount {
     }
 
     /// `api_base` is used for reading CDN credits with an API key.
+    /// Name and size of a file from its public page (no sign-in needed).
+    pub(crate) async fn file_info(&self, file_url: &Url) -> Result<FileInfo, TransferError> {
+        self.website.file_info(file_url).await
+    }
+
     pub(crate) async fn load(store: Store, website: Website, api_base: Url) -> AppResult<Self> {
         let cdn = load_cdn(&store).await?;
         let api = ApiClient {

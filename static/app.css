@@ -136,7 +136,7 @@ label { display: block; font-weight: 500; color: var(--muted); font-size: 0.85re
 label > input { display: block; width: 100%; margin-top: 0.3rem; }
 label > .muted { color: var(--dim); }
 
-input {
+input, select {
   font: inherit;
   font-size: 0.9rem;
   padding: 0.55rem 0.7rem;
@@ -148,6 +148,8 @@ input {
   transition: border-color 0.15s, box-shadow 0.15s;
 }
 input::placeholder { color: var(--dim); }
+select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(26, 159, 255, 0.18); }
+select:disabled { color: var(--dim); }
 input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(26, 159, 255, 0.18); }
 input:disabled { color: var(--dim); }
 
@@ -226,6 +228,34 @@ button.htmx-request { opacity: 0.55; pointer-events: none; }
 .field.url { flex: 1 1 20rem; }
 .field.password { flex: 0 1 12rem; }
 .add .flash { flex-basis: 100%; margin: 0; }
+
+/* Busy labels: htmx marks the form making a request with .htmx-request. */
+.when-busy { display: none; }
+.htmx-request .when-busy { display: inline; }
+.htmx-request .when-idle { display: none; }
+
+/* Confirmation menu, shown under the bar after clicking Download. */
+.confirm {
+  display: flex;
+  gap: 1.25rem;
+  align-items: stretch;
+  margin: -0.5rem 0 1rem;
+  padding: 1rem;
+  background: linear-gradient(90deg, rgba(26, 159, 255, 0.07) 0%, rgba(26, 159, 255, 0) 55%), var(--surface);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(26, 159, 255, 0.08);
+  animation: confirm-open 0.16s ease-out;
+}
+@keyframes confirm-open {
+  from { opacity: 0; transform: translateY(-6px); }
+  to { opacity: 1; transform: none; }
+}
+.confirm-body { flex: 1; min-width: 0; display: flex; flex-direction: column; justify-content: center; gap: 0.35rem; }
+.confirm-title { margin: 0.1rem 0 0; font-size: 1.35rem; font-weight: 600; overflow-wrap: anywhere; }
+.confirm .actions { margin-top: 0.5rem; }
+.confirm select { padding-block: 0.35rem; margin-top: 0.15rem; }
+.confirm .note { color: var(--muted); }
 
 /* ---------------------------------------------------------------------------
    Network graph
@@ -705,7 +735,7 @@ th { font-size: 0.7rem; color: var(--dim); font-weight: 600; letter-spacing: 0.1
 @media (max-width: 760px) {
   .network { grid-template-columns: 1fr; gap: 1.5rem; }
   .net-stats { grid-template-columns: repeat(2, 1fr); }
-  .hero { flex-direction: column; }
+  .hero, .confirm { flex-direction: column; }
   .art-lg { width: 100%; font-size: 2.4rem; }
   .events li { grid-template-columns: 1fr; gap: 0; }
 }

@@ -5,7 +5,7 @@
 //! state machine enforced at the storage boundary and prevents two actors
 //! (e.g. a worker and a user pausing) from silently overwriting each other.
 
-use crate::domain::{Download, DownloadError, DownloadEvent, PostState, TransferState};
+use crate::domain::{Download, DownloadError, DownloadEvent, MediaType, PostState, TransferState};
 use crate::error::{AppError, AppResult, ErrorKind};
 use chrono::{DateTime, Utc};
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
@@ -27,12 +27,18 @@ pub struct Store {
 }
 
 /// Fields for a newly submitted download.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct NewDownload {
     pub url: String,
     pub display_url: String,
     pub provider: String,
     pub password: Option<String>,
+    /// File name from the confirmation step: shown until the transfer
+    /// reports one, and the engine's last-resort name.
+    pub filename: Option<String>,
+    pub media_type: Option<MediaType>,
+    pub title: Option<String>,
+    pub artwork_id: Option<String>,
 }
 
 /// Optional data recorded atomically with a transfer state change.
@@ -129,8 +135,9 @@ impl Store {
         let mut tx = self.pool.begin().await?;
         let row: DownloadRow = sqlx::query_as(
             "INSERT INTO downloads
-                (id, url, display_url, provider, download_password, state, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, 'queued', ?, ?)
+                (id, url, display_url, provider, download_password, filename, media_type,
+                 title, artwork_id, state, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)
              RETURNING *",
         )
         .bind(id.to_string())
@@ -138,6 +145,10 @@ impl Store {
         .bind(&new.display_url)
         .bind(&new.provider)
         .bind(&new.password)
+        .bind(&new.filename)
+        .bind(new.media_type.map(MediaType::as_str))
+        .bind(&new.title)
+        .bind(&new.artwork_id)
         .bind(ts)
         .bind(ts)
         .fetch_one(&mut *tx)
@@ -578,6 +589,9 @@ struct DownloadRow {
     resume_last_modified: Option<String>,
     file_path: Option<String>,
     download_password: Option<String>,
+    media_type: Option<String>,
+    title: Option<String>,
+    artwork_id: Option<String>,
     created_at: i64,
     updated_at: i64,
     completed_at: Option<i64>,
@@ -606,6 +620,12 @@ impl TryFrom<DownloadRow> for Download {
             resume_etag: r.resume_etag,
             resume_last_modified: r.resume_last_modified,
             download_password: r.download_password,
+            media_type: r
+                .media_type
+                .map(|t| MediaType::parse(&t).ok_or_else(|| corrupt("unknown media_type")))
+                .transpose()?,
+            title: r.title,
+            artwork_id: r.artwork_id,
             created_at: from_millis(r.created_at)?,
             updated_at: from_millis(r.updated_at)?,
             completed_at: r.completed_at.map(from_millis).transpose()?,
@@ -651,7 +671,7 @@ mod tests {
             url: format!("https://example.com/{name}?token=secret"),
             display_url: format!("https://example.com/{name}?…"),
             provider: "http".into(),
-            password: None,
+            ..Default::default()
         }
     }
 

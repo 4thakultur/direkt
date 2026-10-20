@@ -145,6 +145,56 @@ impl PostState {
     }
 }
 
+/// What a download is, chosen when it is confirmed. Media organization will
+/// route files by it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum MediaType {
+    Movie,
+    Tv,
+    Game,
+    Music,
+    Software,
+    Unsorted,
+}
+
+impl MediaType {
+    pub const ALL: [Self; 6] = [
+        Self::Movie,
+        Self::Tv,
+        Self::Game,
+        Self::Music,
+        Self::Software,
+        Self::Unsorted,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Movie => "movie",
+            Self::Tv => "tv",
+            Self::Game => "game",
+            Self::Music => "music",
+            Self::Software => "software",
+            Self::Unsorted => "unsorted",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|t| t.as_str() == s)
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Movie => "Movie",
+            Self::Tv => "TV series",
+            Self::Game => "Video game",
+            Self::Music => "Music",
+            Self::Software => "Software",
+            Self::Unsorted => "Unsorted",
+        }
+    }
+}
+
 /// Persisted error details attached to a download.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
 pub struct DownloadError {
@@ -181,6 +231,12 @@ pub struct Download {
     /// Password for a protected provider file. Never serialized or logged.
     #[serde(skip)]
     pub download_password: Option<String>,
+    /// Chosen at confirmation; absent for downloads submitted without one.
+    pub media_type: Option<MediaType>,
+    /// Title found by the metadata lookup, e.g. "Cyberpunk: Edgerunners".
+    pub title: Option<String>,
+    /// Cached artwork, served at `/artwork/{id}`.
+    pub artwork_id: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
@@ -205,6 +261,14 @@ mod tests {
             assert_eq!(TransferState::parse(state.as_str()), Some(state));
         }
         assert_eq!(TransferState::parse("nope"), None);
+    }
+
+    #[test]
+    fn media_type_string_round_trip() {
+        for t in MediaType::ALL {
+            assert_eq!(MediaType::parse(t.as_str()), Some(t));
+        }
+        assert_eq!(MediaType::parse("film"), None);
     }
 
     #[test]
