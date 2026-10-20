@@ -983,9 +983,18 @@ td button { padding: 0.3rem 0.85rem; font-size: 0.82rem; }
   body { font-size: 16px; }
   .topbar-inner { gap: 1rem; }
   .nav { display: none; }
-  .brand { font-size: 1rem; }
-  .brand-mark { width: 26px; height: 26px; }
   .logout { display: none; }
+
+  /* No bar on phones: only the corner button floats over the page, as in an
+     iOS 26 navigation bar. */
+  .topbar {
+    background: none;
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+    box-shadow: none;
+    pointer-events: none;
+  }
+  .topbar .brand { display: none; }
 
   /* Liquid Glass: a translucent, blurred lens with a bright rim on its top
      edge and a soft fade at the bottom, floating on a faint shadow. A press
@@ -998,6 +1007,7 @@ td button { padding: 0.3rem 0.85rem; font-size: 0.82rem; }
     --edge: rgba(0, 0, 0, 0.06);
     position: relative;
     margin-left: auto;
+    pointer-events: auto;
     width: 40px;
     height: 40px;
     display: grid;
@@ -1051,8 +1061,8 @@ td button { padding: 0.3rem 0.85rem; font-size: 0.82rem; }
   }
   .logout-row button:hover { background: var(--surface-2); }
 
-  main { padding-top: 0.5rem; }
-  .page-title { margin: 0.35rem 0 0.9rem; font-size: 2.125rem; }
+  main { padding-top: 0; }
+  .page-title { margin: 0 0 0.9rem; font-size: 2.125rem; }
 
   .network { grid-template-columns: 1fr; gap: 1.75rem; padding: 1rem 1.1rem 1.25rem; }
   .graph { height: 100px; }
@@ -1086,7 +1096,7 @@ td button { padding: 0.3rem 0.85rem; font-size: 0.82rem; }
     flex-direction: column;
     height: calc(100vh - var(--topbar-h) - env(safe-area-inset-top));
     height: calc(100dvh - var(--topbar-h) - env(safe-area-inset-top));
-    padding: 0.5rem 0 env(safe-area-inset-bottom);
+    padding: 0 0 env(safe-area-inset-bottom);
   }
   main:has(.pager) .page-title { flex: none; padding: 0 1rem; }
   .pager { flex: 1; min-height: 0; display: flex; flex-direction: column; }
