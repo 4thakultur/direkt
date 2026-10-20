@@ -135,7 +135,7 @@ impl TestServer {
             .route("/login.pl", axum::routing::post(site_login))
             .route("/console/index.pl", get(site_console))
             .route("/console/abo.pl", get(site_subscription))
-            .route("/en/console/params.pl", get(site_params))
+            .route("/console/params.pl", get(site_params))
             .route("/v1/user/info.cgi", axum::routing::post(mock_user_info))
             .route("/", get(site_file_page).post(site_file_page))
             .with_state(state.clone());
@@ -463,7 +463,9 @@ async fn site_params(State(state): State<Arc<ServerState>>, headers: HeaderMap) 
     let balance = site
         .cdn_balance
         .as_ref()
-        .map(|b| format!("<p> Your account have {b} of CDN credits</p>"))
+        .map(|b| {
+            format!(r#"<div class="notice">Your account has <b>{b}</b> of CDN credits.</div>"#)
+        })
         .unwrap_or_default();
     let checked = if site.cdn_in_use {
         r#" checked="checked""#
@@ -1835,7 +1837,7 @@ async fn account_without_premium_needs_attention() {
     let h = site_harness(&server, account, None, |_| {}).await;
     let d = h.service.submit(FILE_LINK, None).await.unwrap();
     let d = h.wait_state(d.id, TransferState::Blocked).await;
-    assert!(d.error.unwrap().message.contains("no active premium"));
+    assert!(d.error.unwrap().message.contains("Use my credits for my own downloads"));
 }
 
 #[tokio::test]
@@ -1901,12 +1903,12 @@ async fn cdn_credits_from_signed_in_account() {
     let server = TestServer::start([127, 0, 0, 1], content(10)).await;
     {
         let mut site = server.site();
-        site.cdn_balance = Some("25.5 GB".into());
+        site.cdn_balance = Some("2964.31862 GB".into());
         site.cdn_in_use = true;
     }
     let account = signed_in_account(&server).await;
     let cdn = account.view_cdn();
-    assert_eq!(cdn.balance.as_deref(), Some("25.5 GB"));
+    assert_eq!(cdn.balance.as_deref(), Some("2964.32 GB"));
     assert_eq!(cdn.in_use, Some(true));
     assert_eq!(cdn.source, crate::providers::CdnSource::Account);
     assert_eq!(
@@ -2013,8 +2015,29 @@ async fn cdn_credits_survive_restart() {
     let reloaded = crate::providers::OneFichierAccount::load(store, website(), server.api_base())
         .await
         .unwrap();
-    assert_eq!(reloaded.view_cdn().balance.as_deref(), Some("3 GB"));
+    assert_eq!(reloaded.view_cdn().balance.as_deref(), Some("3.00 GB"));
     assert_eq!(reloaded.view_cdn().checked_at, first.view_cdn().checked_at);
+}
+
+#[tokio::test]
+async fn api_downloads_spend_credits_only_when_the_account_uses_them() {
+    let server = TestServer::start([127, 0, 0, 1], content(10)).await;
+    let account = site_account(&server, Duration::ZERO).await;
+    let h = site_harness(&server, account.clone(), Some(TEST_API_KEY), |_| {}).await;
+
+    // Unknown credits: no "cdn" parameter.
+    let d = h.service.submit(FILE_LINK, None).await.unwrap();
+    h.wait_state(d.id, TransferState::Completed).await;
+    assert!(server.api_calls()[0].body.get("cdn").is_none());
+
+    // Credits in use (user/info.cgi says use_cdn = 1): ask to spend them.
+    account
+        .refresh_cdn(Some(crate::config::Secret::new(TEST_API_KEY)))
+        .await
+        .unwrap();
+    let d = h.service.submit(FILE_LINK, None).await.unwrap();
+    h.wait_state(d.id, TransferState::Completed).await;
+    assert_eq!(server.api_calls()[1].body["cdn"], 1);
 }
 
 impl crate::providers::OneFichierAccount {

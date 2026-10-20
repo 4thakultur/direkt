@@ -211,8 +211,14 @@ impl Provider for OneFichierProvider {
                     .direct_link(request.url, request.password)
                     .await?
             } else if let Some(api_key) = self.api_key.get() {
+                // Ask to spend CDN credits when the last check showed the
+                // account uses them.
+                let use_credits = self
+                    .account
+                    .cdn_view()
+                    .is_some_and(|c| c.in_use == Some(true) && c.balance.is_some());
                 self.api
-                    .get_token(&api_key, request.url, request.password)
+                    .get_token(&api_key, request.url, request.password, use_credits)
                     .await?
             } else {
                 return Err(TransferError::block(

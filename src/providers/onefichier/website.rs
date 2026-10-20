@@ -307,13 +307,10 @@ impl Website {
     /// CDN credits from the account's settings page: the balance as 1fichier
     /// writes it (e.g. "12.5 GB"), and whether downloads use them.
     pub(crate) async fn cdn_credits(&self, session: &Secret) -> Result<CdnCredits, TransferError> {
-        static BALANCE: LazyLock<Regex> = LazyLock::new(|| {
-            Regex::new(r#"(?i)>\s*Your account have ([^<>"]*?) of[^<]*credits"#).unwrap()
-        });
         let page = self
             .request(
                 self.client
-                    .get(self.url("en/console/params.pl"))
+                    .get(self.url("console/params.pl"))
                     .header("X-Requested-With", "XMLHttpRequest"),
                 &session_cookie(session),
             )
@@ -327,12 +324,8 @@ impl Website {
                 ),
             ));
         }
-        let balance = BALANCE
-            .captures(&page.body)
-            .map(|c| super::clean_message(&c[1]))
-            .filter(|b| !b.is_empty());
         Ok(CdnCredits {
-            balance,
+            balance: credit_balance(&page.body),
             in_use: checkbox_checked(&page.body, "own_credit"),
         })
     }
@@ -574,7 +567,9 @@ fn classify_file_page(page: &Page) -> Result<(), TransferError> {
     if NOT_PREMIUM.is_match(body) {
         return Err(TransferError::block(
             ErrorKind::AuthenticationFailed,
-            "the signed-in 1fichier account has no active premium subscription",
+            "the signed-in 1fichier account has no premium subscription, and 1fichier did not \
+             let it download with CDN credits (check \"Use my credits for my own downloads\" \
+             in the 1fichier account settings)",
         ));
     }
     if contains_ci(body, "Your account will be unlock") {
@@ -707,6 +702,29 @@ fn forms(html: &str) -> Vec<Form> {
             Form { action, inputs }
         })
         .collect()
+}
+
+/// The CDN credit balance from the account settings page, as in
+/// `Your account has <b>2964.31862 GB</b> of CDN credits.` (older pages, as
+/// matched by JDownloader, read "have" without the bold tag). Numbers are
+/// rounded to two decimals; zero means no credits.
+fn credit_balance(html: &str) -> Option<String> {
+    static BALANCE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(
+            r#"(?i)Your account ha(?:s|ve)\s*(?:<b>)?\s*([^<>"]*?)\s*(?:</b>)?\s*of[^<]*credits"#,
+        )
+        .unwrap()
+    });
+    static AMOUNT: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"^([0-9]+(?:[.,][0-9]+)?)\s*([A-Za-z]{1,3})$").unwrap());
+    let raw = super::clean_message(&BALANCE.captures(html)?[1]);
+    match AMOUNT.captures(&raw) {
+        Some(c) => {
+            let amount: f64 = c[1].replace(',', ".").parse().ok()?;
+            (amount > 0.0).then(|| format!("{amount:.2} {}", &c[2]))
+        }
+        None => (!raw.is_empty()).then_some(raw),
+    }
 }
 
 /// Whether the checkbox named `name` is checked, if it exists.
@@ -900,13 +918,22 @@ mod tests {
 
     #[test]
     fn reads_cdn_settings_markup() {
-        let html = r#"<p> Your account have 12.34 GB of CDN credits</p>
-            <input type="checkbox" checked="checked" name="own_credit" value="1">"#;
-        static BALANCE: LazyLock<Regex> = LazyLock::new(|| {
-            Regex::new(r#"(?i)>\s*Your account have ([^<>"]*?) of[^<]*credits"#).unwrap()
-        });
-        assert_eq!(&BALANCE.captures(html).unwrap()[1], "12.34 GB");
+        // Markup of the live page (2026-10).
+        let html = r#"<div class="notice">Your account has <b>2964.31862 GB</b> of CDN credits.</div>
+            <p><label for="own_credit"><input type="checkbox" name="own_credit" id="own_credit" checked="checked"> Use my credits for my own downloads</label></p>"#;
+        assert_eq!(credit_balance(html).as_deref(), Some("2964.32 GB"));
         assert_eq!(checkbox_checked(html, "own_credit"), Some(true));
+
+        // The older wording JDownloader matches.
+        assert_eq!(
+            credit_balance("<p> Your account have 12,5 Go of CDN credits</p>").as_deref(),
+            Some("12.50 Go")
+        );
+        assert_eq!(
+            credit_balance("Your account has <b>0 GB</b> of CDN credits."),
+            None
+        );
+        assert_eq!(credit_balance("<p>nothing</p>"), None);
         assert_eq!(
             checkbox_checked(r#"<input name="own_credit" type="checkbox">"#, "own_credit"),
             Some(false)

@@ -31,7 +31,7 @@
   {% if onefichier.account.signed_in %}
   <p>
     Signed in as <strong>{% if let Some(email) = onefichier.account.email %}{{ email }}{% endif %}</strong>
-    {% if let Some(until) = onefichier.account.premium_until %}· Premium until {{ until }}{% else %}· <span class="note">No premium subscription found</span>{% endif %}
+    {% if let Some(until) = onefichier.account.premium_until %}· Premium until {{ until }}{% else if has_credits %}· No subscription, downloads use CDN credits{% else %}· <span class="note">No premium subscription or CDN credits found</span>{% endif %}
     {% if onefichier.account.two_factor %}· two-factor authentication{% endif %}
   </p>
   {% endif %}

@@ -77,8 +77,9 @@ balance, whether the account is set to spend the credits on its own
 downloads, where the figures came from, and when they were checked.
 
 - With a signed-in account, Direkt reads them from the account's settings
-  page (*"Your account have … of … credits"* and the *use my credits*
-  checkbox), as JDownloader does. This happens right after signing in.
+  page, `/console/params.pl` (*"Your account has **… GB** of CDN credits"*
+  and the *Use my credits for my own downloads* checkbox). This happens right
+  after signing in.
 - With only an API key, Direkt calls `user/info.cgi`, which reports `cdn`
   (credits in GB) and `use_cdn`. This happens right after the key is saved.
 - **Refresh credits** reads them again. 1fichier allows `user/info.cgi` only
@@ -86,8 +87,16 @@ downloads, where the figures came from, and when they were checked.
   refuses a refresh within 5 minutes of the last check.
 - Signing out or removing the key clears the figures that came from it.
 
-Direkt only displays the balance. Whether downloads spend credits is decided
-by your 1fichier account settings, not by Direkt.
+Whether downloads spend credits is decided by the *Use my credits for my own
+downloads* setting in your 1fichier account.
+
+**Accounts with CDN credits but no subscription** are supported. Settings
+shows "No subscription, downloads use CDN credits". In API-key mode, Direkt
+asks `get_token.cgi` to spend credits (`"cdn": 1`) when the last check showed
+the account uses them, as the API documentation describes for credit-based
+downloads. If 1fichier refuses a download for lack of premium status, the
+download waits in *needs attention* with a hint to check the *Use my
+credits* setting.
 
 ## Supported links
 

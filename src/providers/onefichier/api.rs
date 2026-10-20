@@ -31,10 +31,15 @@ impl ApiClient {
         api_key: &Secret,
         file_url: &Url,
         password: Option<&str>,
+        use_credits: bool,
     ) -> Result<Url, TransferError> {
         let mut body = serde_json::json!({ "url": file_url.as_str() });
         if let Some(password) = password {
             body["pass"] = password.into();
+        }
+        if use_credits {
+            // Spend CDN credits (needed for accounts without a subscription).
+            body["cdn"] = 1.into();
         }
         let endpoint = self
             .base

@@ -662,6 +662,8 @@ impl From<ApiToken> for TokenView {
 struct SettingsPage {
     onefichier: OneFichierSettings,
     cdn: Option<CdnDisplay>,
+    /// The account has CDN credits it uses for its own downloads.
+    has_credits: bool,
     tokens: Vec<TokenView>,
     new_token: Option<String>,
     message: Option<String>,
@@ -671,6 +673,11 @@ struct SettingsPage {
 async fn settings_with(state: &AppState, mut page: SettingsPage) -> SettingsPage {
     page.onefichier = state.settings.onefichier();
     page.cdn = page.onefichier.cdn.as_ref().map(CdnDisplay::from);
+    page.has_credits = page
+        .onefichier
+        .cdn
+        .as_ref()
+        .is_some_and(|c| c.balance.is_some() && c.in_use != Some(false));
     match state.auth.list_api_tokens().await {
         Ok(tokens) => page.tokens = tokens.into_iter().map(TokenView::from).collect(),
         Err(e) => page.error = page.error.or(Some(e.message)),
