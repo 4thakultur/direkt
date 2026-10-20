@@ -220,7 +220,7 @@ button.htmx-request { opacity: 0.55; pointer-events: none; }
 .field:focus-within { color: var(--text); }
 .field.url { flex: 1 1 20rem; }
 .field.password { flex: 0 1 12rem; }
-.add .flash { flex-basis: 100%; margin: 0; }
+.add .flash { flex-basis: 100%; margin: 0; overflow-wrap: anywhere; }
 
 /* Busy labels: htmx marks the form making a request with .htmx-request. */
 .when-busy { display: none; }

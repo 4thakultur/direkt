@@ -9,7 +9,6 @@
     <input name="password" type="password" placeholder="File password" autocomplete="off" aria-label="File password (optional)">
   </label>
   <button type="submit" class="primary big"><span class="when-idle">Download</span><span class="when-busy">Looking up…</span></button>
-  {% if let Some(message) = message %}<p class="flash ok">{{ message }}</p>{% endif %}
   {% if let Some(error) = error %}<p class="flash error">{{ error }}</p>{% endif %}
 </form>
 {% if let Some(p) = preview %}

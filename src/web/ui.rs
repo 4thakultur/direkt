@@ -624,7 +624,6 @@ struct Dashboard {
 struct SubmitForm {
     value: String,
     preview: Option<PreviewView>,
-    message: Option<String>,
     error: Option<String>,
 }
 
@@ -868,13 +867,16 @@ async fn confirm_download(
         Err(e) => Err(e),
     };
     match result {
-        Ok(d) => with_refresh(render(&SubmitForm {
-            message: Some(format!(
-                "Queued {}",
-                d.filename.as_deref().unwrap_or(&d.display_url)
-            )),
-            ..Default::default()
-        })),
+        // No message: the empty form and the new download in the list (on
+        // phones, the slide to Activity) say it started.
+        Ok(_) => {
+            let mut response = render(&SubmitForm::default());
+            response.headers_mut().insert(
+                "hx-trigger",
+                HeaderValue::from_static("downloads-changed, download-started"),
+            );
+            response
+        }
         Err(e) => submit_error(e, body.url),
     }
 }

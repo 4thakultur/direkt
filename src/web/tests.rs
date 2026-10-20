@@ -1030,8 +1030,11 @@ async fn ui_submit_and_actions() {
         )
         .await;
     assert_eq!(r.status, StatusCode::OK);
-    assert!(r.body.contains("Queued movie.mkv"), "{}", r.body);
-    assert_eq!(r.header("hx-trigger"), "downloads-changed");
+    assert!(!r.body.contains("movie.mkv"), "no message: {}", r.body);
+    assert_eq!(
+        r.header("hx-trigger"),
+        "downloads-changed, download-started"
+    );
 
     let rows = app.get("/ui/dashboard", &auth).await;
     assert!(rows.body.contains("movie.mkv"));
@@ -1531,7 +1534,6 @@ async fn confirmation_menu_flow() {
         )
         .await;
     assert_eq!(r.status, StatusCode::OK, "{}", r.body);
-    assert!(r.body.contains(&format!("Queued {EDGERUNNERS}")));
     assert!(!r.body.contains("preview_id"), "menu closed");
 
     let dash = app.get("/ui/dashboard", &auth).await;

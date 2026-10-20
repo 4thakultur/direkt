@@ -91,11 +91,9 @@
     if (event.target.id === "dashboard") updateCount();
   });
 
-  // A download started from the New pane: slide over to watch it.
-  document.body.addEventListener("downloads-changed", (event) => {
-    if (small.matches && current === 0 && event.target.closest?.(".pane-new")) {
-      setTimeout(() => go(1), 450);
-    }
+  // A download was confirmed: slide over to Activity to watch it.
+  document.body.addEventListener("download-started", () => {
+    if (small.matches) go(1);
   });
 
   updateCount();
