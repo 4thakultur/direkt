@@ -219,7 +219,23 @@ button.htmx-request { opacity: 0.55; pointer-events: none; }
 .field input { width: 100%; margin: 0; padding-left: 2.2rem; }
 .field:focus-within { color: var(--text); }
 .field.url { flex: 1 1 20rem; }
-.field.password { flex: 0 1 12rem; }
+/* The file password is rarely needed, so it waits behind a disclosure. */
+.more { flex-basis: 100%; order: 1; }
+.more > summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  color: var(--muted);
+  font-size: 0.8rem;
+  cursor: pointer;
+  list-style: none;
+}
+.more > summary::-webkit-details-marker { display: none; }
+.more > summary::marker { content: ""; }
+.more > summary:hover, .more[open] > summary { color: var(--text); }
+.more .chevron { width: 12px; height: 12px; transform: rotate(-90deg); transition: transform 0.2s ease; }
+.more[open] .chevron { transform: none; }
+.more .field { max-width: 16rem; margin-top: 0.5rem; }
 .add .flash { flex-basis: 100%; margin: 0; overflow-wrap: anywhere; }
 
 /* Busy labels: htmx marks the form making a request with .htmx-request. */
@@ -829,7 +845,8 @@ th { font-size: 0.7rem; color: var(--dim); font-weight: 600; letter-spacing: 0.1
   .topbar-inner { gap: 1rem; }
   .brand-text { display: none; }
   .nav { gap: 1rem; }
-  .field.password, .add button { flex: 1 1 100%; }
+  .add button { flex: 1 1 100%; }
+  .more .field { max-width: none; }
   .art-sm { width: 64px; font-size: 0.62rem; }
   .row { gap: 0.6rem; }
   .row .actions { gap: 0.3rem; }
@@ -851,6 +868,8 @@ th { font-size: 0.7rem; color: var(--dim); font-weight: 600; letter-spacing: 0.1
 
 @media (max-width: 760px) {
   main:has(.pager) { padding: 0; }
+  .empty-hint .hint-wide { display: none; }
+  .empty-hint .hint-phone { display: inline; }
   .pager {
     display: flex;
     flex-direction: column;

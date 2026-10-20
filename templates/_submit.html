@@ -4,11 +4,14 @@
     <svg class="icon" aria-hidden="true"><use href="#i-link"/></svg>
     <input name="url" type="url" placeholder="Paste a download link" value="{{ value }}" required aria-label="URL to download" autocomplete="off" spellcheck="false">
   </label>
-  <label class="field password">
-    <svg class="icon" aria-hidden="true"><use href="#i-lock"/></svg>
-    <input name="password" type="password" placeholder="File password" autocomplete="off" aria-label="File password (optional)">
-  </label>
   <button type="submit" class="primary big"><span class="when-idle">Download</span><span class="when-busy">Looking up…</span></button>
+  <details class="more">
+    <summary>File password<svg class="icon chevron" aria-hidden="true"><use href="#i-chevron"/></svg></summary>
+    <label class="field password">
+      <svg class="icon" aria-hidden="true"><use href="#i-lock"/></svg>
+      <input name="password" type="password" placeholder="Only if the file has one" autocomplete="off" aria-label="File password (optional)">
+    </label>
+  </details>
   {% if let Some(error) = error %}<p class="flash error">{{ error }}</p>{% endif %}
 </form>
 {% if let Some(p) = preview %}
