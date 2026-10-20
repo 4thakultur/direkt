@@ -11,8 +11,8 @@ use crate::engine::{HISTORY_SECS, LiveSnapshot, ThroughputSnapshot};
 use crate::error::{AppError, ErrorKind};
 use crate::service::Preview;
 use crate::settings::{
-    FolderSetting, LibrarySettings, LibraryUpdate, MiscSettings, MiscUpdate, OneFichierSettings,
-    SECRET_MASK, SpeedUnit, TmdbSettings, parse_speed_limit,
+    FolderSetting, LibrarySettings, MiscSettings, MiscUpdate, OneFichierSettings, SECRET_MASK,
+    SpeedUnit, TmdbSettings, parse_speed_limit,
 };
 use crate::store::ApiToken;
 use askama::Template;
@@ -58,7 +58,6 @@ pub fn protected_routes() -> Router<AppState> {
         .route("/settings/tmdb", post(save_tmdb))
         .route("/settings/tmdb/remove", post(remove_tmdb))
         .route("/settings/misc", post(save_misc))
-        .route("/settings/library", post(save_library))
         .route("/artwork/{id}", get(artwork_image))
         .route("/settings/onefichier", post(save_onefichier))
         .route("/settings/onefichier/remove", post(remove_onefichier))
@@ -1290,7 +1289,6 @@ const SECTION_TOKENS: &str = "tokens";
 const SECTION_PASSWORD: &str = "password";
 const SECTION_APPEARANCE: &str = "appearance";
 const SECTION_MISC: &str = "misc";
-const SECTION_LIBRARY: &str = "library";
 
 async fn settings_with(state: &AppState, theme: Theme, mut page: SettingsPage) -> SettingsPage {
     page.theme = theme;
@@ -1656,43 +1654,32 @@ async fn save_misc(
     section_result(&state, theme, SECTION_MISC, result).await
 }
 
-/// Library folders prepared for the settings page.
+/// Library folders prepared for the settings page (read-only).
 #[derive(Default)]
 struct LibraryView {
     folders: Vec<FolderView>,
     /// The pill: which libraries are set.
     summary: &'static str,
-    /// Whether any folder is set by the environment.
-    any_locked: bool,
-    /// Whether any folder can be changed here.
-    any_editable: bool,
+    /// Whether any set folder had a problem at startup.
+    any_problem: bool,
 }
 
 struct FolderView {
-    /// Form field name.
-    name: &'static str,
     label: &'static str,
     hint: &'static str,
-    placeholder: &'static str,
-    path: String,
-    editable: bool,
+    variable: String,
+    path: Option<String>,
+    problem: Option<String>,
 }
 
 impl FolderView {
-    fn new(
-        name: &'static str,
-        label: &'static str,
-        hint: &'static str,
-        placeholder: &'static str,
-        f: FolderSetting,
-    ) -> Self {
+    fn new(label: &'static str, hint: &'static str, f: FolderSetting) -> Self {
         Self {
-            name,
             label,
             hint,
-            placeholder,
-            path: f.path.unwrap_or_default(),
-            editable: f.editable,
+            variable: f.variable,
+            path: f.path,
+            problem: f.problem,
         }
     }
 }
@@ -1705,69 +1692,27 @@ impl From<LibrarySettings> for LibraryView {
             (false, true) => "TV only",
             (false, false) => "Off",
         };
-        let all = [&l.movies, &l.tv, &l.unsorted];
-        let any_locked = all.iter().any(|f| !f.editable);
-        let any_editable = all.iter().any(|f| f.editable);
+        let any_problem = [&l.movies, &l.tv, &l.unsorted]
+            .iter()
+            .any(|f| f.problem.is_some());
         Self {
             folders: vec![
+                FolderView::new("Movies", "Title (year)/Title (year).mkv", l.movies),
                 FolderView::new(
-                    "movies",
-                    "Movies",
-                    "Title (year)/Title (year).mkv",
-                    "/media/movies",
-                    l.movies,
-                ),
-                FolderView::new(
-                    "tv",
                     "TV series",
                     "Show (year)/Season 01/Show (year) - S01E02.mkv",
-                    "/media/tv",
                     l.tv,
                 ),
                 FolderView::new(
-                    "unsorted",
                     "Fallback",
                     "videos that can't be identified with confidence",
-                    "/media/unsorted",
                     l.unsorted,
                 ),
             ],
             summary,
-            any_locked,
-            any_editable,
+            any_problem,
         }
     }
-}
-
-/// Fields of locked folders are disabled, so browsers leave them out.
-#[derive(Deserialize)]
-struct LibraryForm {
-    movies: Option<String>,
-    tv: Option<String>,
-    unsorted: Option<String>,
-}
-
-async fn save_library(
-    State(state): State<AppState>,
-    theme: Theme,
-    Form(form): Form<LibraryForm>,
-) -> Response {
-    let result = state
-        .settings
-        .update_library(LibraryUpdate {
-            movies: form.movies,
-            tv: form.tv,
-            unsorted: form.unsorted,
-        })
-        .await
-        .map(|l| {
-            if l.movies.path.is_some() || l.tv.path.is_some() {
-                "Library folders saved. Completed downloads are organized into them from now on."
-            } else {
-                "Library folders saved. Downloads stay in the download folder."
-            }
-        });
-    section_result(&state, theme, SECTION_LIBRARY, result).await
 }
 
 #[derive(Deserialize)]

@@ -317,7 +317,7 @@ impl Inner {
         if !paths.any_library() {
             return Outcome::Skipped {
                 note: Some(
-                    "no media library folders are set (Settings \u{2192} Media library)".into(),
+                    "no media library folders are set (DIREKT_MOVIES_DIR, DIREKT_TV_DIR)".into(),
                 ),
             };
         }
@@ -439,8 +439,8 @@ impl Inner {
             return Outcome::failed(
                 ErrorKind::MediaIdentification,
                 format!(
-                    "not identified ({reason}). Set a fallback folder under Settings \u{2192} \
-                     Media library, or move the file yourself"
+                    "not identified ({reason}). Move the file yourself, or set a fallback \
+                     folder with DIREKT_UNSORTED_DIR"
                 ),
             );
         };
@@ -782,7 +782,7 @@ mod tests {
             .await;
         let d = s.organize(id).await;
         assert_eq!(d.post_state, PostState::Skipped);
-        assert!(d.post_error.unwrap().message.contains("Media library"));
+        assert!(d.post_error.unwrap().message.contains("DIREKT_MOVIES_DIR"));
     }
 
     #[tokio::test]

@@ -16,9 +16,12 @@ knows exactly when a transfer is complete.
 
 ## Setting it up
 
-Set the folders under **Settings → Media library**, or with environment
-variables. An environment variable takes precedence over the settings page and
-locks the field there.
+Set the folders with environment variables when Direkt is launched. For
+safety, the web UI and the API cannot change them: nothing reachable over the
+network can redirect where Direkt writes files. **Settings → Media library**
+shows the folders and whether each one passed its startup check (it exists, is
+a folder, and Direkt can write to it). Problems are also logged at startup.
+Restart Direkt after changing a variable.
 
 | Folder   | Environment variable  | Holds |
 |----------|-----------------------|-------|
@@ -27,13 +30,25 @@ locks the field there.
 | Fallback | `DIREKT_UNSORTED_DIR` | Videos that can't be identified, under their original name |
 
 Each folder must be an absolute path to an existing directory that Direkt can
-write to. The settings page checks this when you save. Movie, TV and fallback
-folders must be separate, and none may be inside another. Point your Jellyfin
+write to. Movie, TV and fallback folders must be separate, and none may be
+inside another; Direkt refuses to start otherwise. Point your Jellyfin
 "Movies" and "Shows" libraries at the first two.
 
 In Docker, these are paths **inside the container**. Mount your library into
-the Direkt container, for example `- /srv/media:/media`, then use
-`/media/movies` and `/media/tv`. When the library is on the same filesystem as
+the Direkt container and set the variables in the compose file:
+
+```yaml
+services:
+  direkt:
+    volumes:
+      - /srv/media:/media
+    environment:
+      DIREKT_MOVIES_DIR: /media/movies
+      DIREKT_TV_DIR: /media/tv
+      DIREKT_UNSORTED_DIR: /media/unsorted   # optional
+```
+
+ When the library is on the same filesystem as
 the download folder, a move is an instant rename. Otherwise Direkt copies the
 file and then deletes the original.
 
@@ -87,8 +102,8 @@ Organizing is tracked separately from the transfer (`post_state`; see
 | `failed` | Organizing failed | `post_error` says why. The file is where it was. |
 
 `post_error` holds the reason a download failed, was skipped, or went to the
-fallback folder. After fixing the cause (setting a folder, freeing the name,
-fixing a mount), click **Organize again** on the download, or call
+fallback folder. After fixing the cause (setting a folder and restarting,
+freeing the name, fixing a mount), click **Organize again** on the download, or call
 `POST /api/v1/downloads/{id}/organize`. This works for `failed` and `skipped`
 downloads.
 

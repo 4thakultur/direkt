@@ -2009,59 +2009,35 @@ async fn download_starts_without_confirmation_when_turned_off() {
 }
 
 #[tokio::test]
-async fn library_folders_via_api_and_settings_page() {
+async fn library_folders_are_read_only() {
     let (app, cookie) = TestApp::with_admin().await;
     let auth = cookie_header(&cookie);
     let r = app.get("/api/v1/settings/library", &auth).await;
     assert_eq!(r.status, StatusCode::OK);
     assert_eq!(r.json()["movies"]["path"], Value::Null);
+    assert_eq!(r.json()["movies"]["variable"], "DIREKT_MOVIES_DIR");
+
+    let page = app.get("/settings", &auth).await;
+    assert!(page.body.contains("Media library"));
+    assert!(page.body.contains("DIREKT_TV_DIR"));
     assert!(
-        app.get("/settings", &auth)
-            .await
-            .body
-            .contains("Media library")
+        !page.body.contains("action=\"/settings/library\""),
+        "no form"
     );
 
-    let movies = app._dir.path().join("movies");
-    std::fs::create_dir(&movies).unwrap();
-    let movies = movies.to_string_lossy().into_owned();
+    // Nothing over HTTP can change where Direkt writes.
     let r = app
         .patch_json(
             "/api/v1/settings/library",
             &cookie,
-            serde_json::json!({ "movies": movies }),
+            serde_json::json!({ "movies": "/etc" }),
         )
         .await;
-    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
-    assert_eq!(r.json()["movies"]["path"], movies.as_str());
-    assert_eq!(r.json()["movies"]["source"], "settings");
-
+    assert_eq!(r.status, StatusCode::METHOD_NOT_ALLOWED);
     let r = app
-        .patch_json(
-            "/api/v1/settings/library",
-            &cookie,
-            serde_json::json!({ "tv": "relative/path" }),
-        )
+        .post_form("/settings/library", &auth, "movies=%2Fetc")
         .await;
-    assert_eq!(r.status, StatusCode::BAD_REQUEST);
-    assert!(r.body.contains("absolute"), "{}", r.body);
-
-    let r = app
-        .post_form(
-            "/settings/library",
-            &auth,
-            "movies=%2Fdoes%2Fnot%2Fexist&tv=&unsorted=",
-        )
-        .await;
-    assert_eq!(r.status, StatusCode::BAD_REQUEST);
-    assert!(r.body.contains("does not exist"));
-    assert!(r.body.contains("id=\"library\" open"), "section stays open");
-
-    let r = app
-        .post_form("/settings/library", &auth, "movies=&tv=&unsorted=")
-        .await;
-    assert_eq!(r.status, StatusCode::OK);
-    assert!(r.body.contains("Downloads stay in the download folder"));
+    assert_ne!(r.status, StatusCode::OK);
     let r = app.get("/api/v1/settings/library", &auth).await;
     assert_eq!(r.json()["movies"]["path"], Value::Null);
 }

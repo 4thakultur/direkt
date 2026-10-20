@@ -150,7 +150,7 @@
       <span class="panel-name">Media library</span>
       <span class="panel-desc">Where movies and series are organized for Jellyfin and Plex</span>
     </span>
-    <span class="pill{% if library.summary != "Off" %} ok{% endif %}">{{ library.summary }}</span>
+    {% if library.any_problem %}<span class="pill warn">Needs attention</span>{% else %}<span class="pill{% if library.summary != "Off" %} ok{% endif %}">{{ library.summary }}</span>{% endif %}
     <svg class="icon chevron" aria-hidden="true"><use href="#i-chevron"/></svg>
   </summary>
   <div class="panel-body stack">
@@ -162,27 +162,26 @@
       Existing files are never replaced. Games, music, software and archives
       stay in the download folder.
     </p>
-    {% if library.any_locked %}
-    <p class="note">
-      Folders set by the <code>DIREKT_MOVIES_DIR</code>, <code>DIREKT_TV_DIR</code>
-      or <code>DIREKT_UNSORTED_DIR</code> environment variables can't be changed here.
-    </p>
-    {% endif %}
-    <form method="post" action="/settings/library" class="stack">
+    <dl class="details">
       {% for f in library.folders %}
-      <label>{{ f.label }} <span class="muted">({{ f.hint }})</span>
-        <input name="{{ f.name }}" type="text" value="{{ f.path }}" placeholder="{{ f.placeholder }}"
-               autocomplete="off" spellcheck="false"{% if !f.editable %} disabled{% endif %}>
-      </label>
+      <dt>{{ f.label }}</dt>
+      <dd>
+        {% if let Some(path) = f.path %}<code class="break">{{ path }}</code>{% else %}<span class="muted">Not set</span>{% endif %}
+        <span class="muted small">· <code>{{ f.variable }}</code> · {{ f.hint }}</span>
+        {% if let Some(problem) = f.problem %}<span class="note failed folder-problem">{{ problem }}</span>{% endif %}
+      </dd>
       {% endfor %}
-      <p class="muted small">
-        Absolute paths to existing folders that Direkt can write to; in Docker,
-        paths inside the container. Leave a folder empty to turn it off. Without
-        a fallback folder, videos that can't be identified stay in the download
-        folder and are marked for attention.
-      </p>
-      {% if library.any_editable %}<button type="submit" class="primary">Save</button>{% endif %}
-    </form>
+    </dl>
+    {% if library.any_problem %}
+    <p class="note">Checked when Direkt started. Fix the folder or its mount, then restart Direkt.</p>
+    {% endif %}
+    <p class="muted small">
+      For safety, these folders can only be set when Direkt is launched, with
+      the environment variables shown (in Docker, under <code>environment:</code>
+      in your compose file, as paths inside the container). Restart Direkt to
+      change them. Without a fallback folder, videos that can't be identified
+      stay in the download folder and are marked for attention.
+    </p>
   </div>
 </details>
 

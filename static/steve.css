@@ -1218,3 +1218,6 @@ td button { padding: 0.3rem 0.85rem; font-size: 0.82rem; }
   .pane { animation: none !important; }
   *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition: none !important; }
 }
+
+/* Media library folder that failed its startup check. */
+.folder-problem { display: block; }

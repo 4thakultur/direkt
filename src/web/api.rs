@@ -8,7 +8,7 @@ use crate::engine::LiveSnapshot;
 use crate::error::{AppError, ErrorKind};
 use crate::service::Preview;
 use crate::settings::{
-    LibrarySettings, LibraryUpdate, MiscSettings, MiscUpdate, OneFichierSettings, TmdbSettings,
+    LibrarySettings, MiscSettings, MiscUpdate, OneFichierSettings, TmdbSettings,
 };
 use crate::store::ApiToken;
 use axum::extract::State;
@@ -57,7 +57,7 @@ pub fn routes() -> Router<AppState> {
             post(refresh_onefichier_cdn),
         )
         .route("/settings/misc", get(get_misc).patch(patch_misc))
-        .route("/settings/library", get(get_library).patch(patch_library))
+        .route("/settings/library", get(get_library))
         .route(
             "/settings/tmdb",
             get(get_tmdb).put(put_tmdb).delete(delete_tmdb),
@@ -698,32 +698,13 @@ async fn patch_misc(
 }
 
 /// Media library folders that completed movies and episodes are organized
-/// into.
+/// into. Read-only: they are set with environment variables at launch.
 #[utoipa::path(
     get, path = "/api/v1/settings/library", tag = "settings",
     responses((status = 200, body = LibrarySettings))
 )]
 async fn get_library(State(state): State<AppState>) -> Json<LibrarySettings> {
     Json(state.settings.library())
-}
-
-/// Change the media library folders. Fields left out keep their value; an
-/// empty string removes a folder. Each folder must be an existing directory
-/// Direkt can write to, given as an absolute path.
-#[utoipa::path(
-    patch, path = "/api/v1/settings/library", tag = "settings",
-    request_body = LibraryUpdate,
-    responses(
-        (status = 200, body = LibrarySettings),
-        (status = 400, description = "A folder is not usable", body = ErrorBody),
-        (status = 409, description = "The folder is set by an environment variable", body = ErrorBody),
-    )
-)]
-async fn patch_library(
-    State(state): State<AppState>,
-    ApiJson(body): ApiJson<LibraryUpdate>,
-) -> ApiResult<Json<LibrarySettings>> {
-    Ok(Json(state.settings.update_library(body).await?))
 }
 
 /// TMDB settings (artwork lookup). The key itself is never returned.
@@ -867,7 +848,7 @@ async fn sign_out_onefichier(State(state): State<AppState>) -> ApiResult<Json<On
         list_tokens, create_token, revoke_token,
         get_onefichier, put_onefichier, delete_onefichier,
         sign_in_onefichier, sign_out_onefichier, refresh_onefichier_cdn,
-        get_tmdb, put_tmdb, delete_tmdb, get_misc, patch_misc, get_library, patch_library,
+        get_tmdb, put_tmdb, delete_tmdb, get_misc, patch_misc, get_library,
     ),
     components(schemas(ErrorBody, ErrorKind)),
     modifiers(&SecuritySchemes),

@@ -70,8 +70,7 @@ Every error uses the same body:
 | GET | `/api/v1/settings/tmdb` | Whether a TMDB key (for [artwork](artwork.md)) is configured, and its source. Masked like the 1fichier key. |
 | PUT | `/api/v1/settings/tmdb` | Set the key: `{"api_key": "…"}` (API key or read access token). Returns `409` if it comes from `DIREKT_TMDB_API_KEY`. |
 | DELETE | `/api/v1/settings/tmdb` | Remove the stored key. Cached artwork stays. |
-| GET | `/api/v1/settings/library` | The [media library](media-organization.md) folders: `movies`, `tv` and `unsorted` (fallback), each with `path`, `source` (`none`, `settings` or `environment`) and `editable`. |
-| PATCH | `/api/v1/settings/library` | Change any of `movies`, `tv`, `unsorted`: an absolute path to an existing folder Direkt can write to, or `""` to remove it. Fields left out keep their value; nothing changes if one is invalid. `409` for a folder set by `DIREKT_MOVIES_DIR`, `DIREKT_TV_DIR` or `DIREKT_UNSORTED_DIR`. |
+| GET | `/api/v1/settings/library` | The [media library](media-organization.md) folders, read-only: `movies`, `tv` and `unsorted` (fallback), each with `path` (`null` when unset), the environment `variable` that sets it, and `problem` (what was wrong with it at startup, if anything). They can only be set at launch with `DIREKT_MOVIES_DIR`, `DIREKT_TV_DIR` and `DIREKT_UNSORTED_DIR`. |
 
 Download passwords are write-only: no endpoint ever returns them.
 

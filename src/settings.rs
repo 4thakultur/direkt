@@ -7,10 +7,11 @@
 //! attempt. Keys are never returned; callers only ever see a mask.
 //!
 //! Media library folders ([`LibrarySettings`]): where movies, TV series and
-//! unidentified videos are organized into. Each comes from an environment
-//! variable (`DIREKT_MOVIES_DIR`, `DIREKT_TV_DIR`, `DIREKT_UNSORTED_DIR`),
-//! which locks it, or from the settings page. The organizer reads them from a
-//! shared [`LibraryCell`] for each download.
+//! unidentified videos are organized into. They come only from environment
+//! variables set at launch (`DIREKT_MOVIES_DIR`, `DIREKT_TV_DIR`,
+//! `DIREKT_UNSORTED_DIR`) and are read-only here: the web UI and API can show
+//! them but never change where Direkt writes. The organizer reads them from
+//! a shared [`LibraryCell`].
 //!
 //! Miscellaneous preferences ([`MiscSettings`]): the unit speeds are shown
 //! in, an overall speed limit, how many downloads run at once (the
@@ -26,7 +27,7 @@ use crate::providers::{AccountView, CdnSource, CdnView, OneFichierAccount, SignI
 use crate::store::Store;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 const ONEFICHIER_KEY: &str = "onefichier.api_key";
@@ -35,11 +36,6 @@ const SPEED_UNIT: &str = "ui.speed_unit";
 const CONFIRM_DOWNLOADS: &str = "ui.confirm_downloads";
 const SPEED_LIMIT: &str = "downloads.speed_limit";
 const MAX_CONCURRENT: &str = "downloads.max_concurrent";
-const MOVIES_DIR: &str = "library.movies_dir";
-const TV_DIR: &str = "library.tv_dir";
-const UNSORTED_DIR: &str = "library.unsorted_dir";
-/// Longest library folder path accepted, in bytes.
-const MAX_LIBRARY_PATH: usize = 1024;
 
 /// Lowest speed limit, in bytes per second (10 kB/s).
 pub const MIN_SPEED_LIMIT: u64 = 10_000;
@@ -368,6 +364,7 @@ impl LibraryCell {
         self.0.read().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
+    #[cfg(test)]
     pub(crate) fn set(&self, paths: LibraryPaths) {
         *self.0.write().unwrap_or_else(|e| e.into_inner()) = paths;
     }
@@ -376,15 +373,18 @@ impl LibraryCell {
 /// One library folder as shown on the settings page.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, utoipa::ToSchema)]
 pub struct FolderSetting {
-    /// Absolute path; absent when not set.
+    /// Absolute path; absent when the variable is not set.
     pub path: Option<String>,
-    pub source: KeySource,
-    /// False when the folder comes from the environment.
-    pub editable: bool,
+    /// The environment variable that sets it.
+    pub variable: String,
+    /// What was wrong with the folder when Direkt started, e.g. it does not
+    /// exist or cannot be written to.
+    pub problem: Option<String>,
 }
 
-/// The media library folders. Completed movies and episodes are organized
-/// into them; without a movie or TV folder, files stay where they are.
+/// The media library folders, set with environment variables at launch.
+/// Completed movies and episodes are organized into them; without a movie or
+/// TV folder, files stay where they are.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, utoipa::ToSchema)]
 pub struct LibrarySettings {
     pub movies: FolderSetting,
@@ -392,24 +392,6 @@ pub struct LibrarySettings {
     /// Where videos that cannot be identified go. When absent, they stay in
     /// the download folder and are reported.
     pub unsorted: FolderSetting,
-}
-
-/// A change to [`LibrarySettings`]. Fields left out keep their value; an
-/// empty string removes the folder.
-#[derive(Debug, Clone, Default, Deserialize, utoipa::ToSchema)]
-#[serde(deny_unknown_fields)]
-pub struct LibraryUpdate {
-    pub movies: Option<String>,
-    pub tv: Option<String>,
-    pub unsorted: Option<String>,
-}
-
-/// Which folders the environment sets.
-#[derive(Debug, Clone, Copy, Default)]
-struct LibraryLocks {
-    movies: bool,
-    tv: bool,
-    unsorted: bool,
 }
 
 /// The preferences not held by [`Limits`].
@@ -430,9 +412,8 @@ pub struct SettingsService {
     limits: Limits,
     preferences: Arc<RwLock<Preferences>>,
     library: LibraryCell,
-    library_locks: LibraryLocks,
-    /// Serializes library changes, so two saves cannot interleave.
-    library_update: Arc<tokio::sync::Mutex<()>>,
+    /// The library folders as checked at startup.
+    library_view: LibrarySettings,
 }
 
 /// Settings from the environment, which take precedence over stored ones.
@@ -483,25 +464,15 @@ impl SettingsService {
         if let Some(n) = max_concurrent {
             limits.set_max_concurrent(n);
         }
-        let library_locks = LibraryLocks {
-            movies: env.library.movies.is_some(),
-            tv: env.library.tv.is_some(),
-            unsorted: env.library.unsorted.is_some(),
-        };
-        let folder = async |key: &str, env: Option<PathBuf>| -> AppResult<Option<PathBuf>> {
-            if env.is_some() {
-                return Ok(env);
-            }
-            stored(&store, key, None, |v| {
-                Some(Some(PathBuf::from(v))).filter(|_| Path::new(v).is_absolute())
-            })
-            .await
-        };
         let library = LibraryPaths {
-            movies: folder(MOVIES_DIR, env.library.movies).await?,
-            tv: folder(TV_DIR, env.library.tv).await?,
-            unsorted: folder(UNSORTED_DIR, env.library.unsorted).await?,
+            movies: env.library.movies,
+            tv: env.library.tv,
+            unsorted: env.library.unsorted,
         };
+        let checked = library.clone();
+        let library_view = tokio::task::spawn_blocking(move || describe_library(&checked))
+            .await
+            .map_err(|_| AppError::internal("internal task failed"))?;
         Ok(Self {
             store,
             onefichier_key: SecretCell::new(key),
@@ -512,8 +483,7 @@ impl SettingsService {
             limits,
             preferences: Arc::new(RwLock::new(preferences)),
             library: LibraryCell::new(library),
-            library_locks,
-            library_update: Arc::default(),
+            library_view,
         })
     }
 
@@ -523,88 +493,7 @@ impl SettingsService {
     }
 
     pub fn library(&self) -> LibrarySettings {
-        let paths = self.library.get();
-        let locks = self.library_locks;
-        let folder = |path: Option<PathBuf>, locked: bool| FolderSetting {
-            source: KeySource::of(path.is_some(), locked),
-            path: path.map(|p| p.to_string_lossy().into_owned()),
-            editable: !locked,
-        };
-        LibrarySettings {
-            movies: folder(paths.movies, locks.movies),
-            tv: folder(paths.tv, locks.tv),
-            unsorted: folder(paths.unsorted, locks.unsorted),
-        }
-    }
-
-    /// Validate and save library folders, then apply them. Each folder must
-    /// be an absolute path to an existing directory Direkt can write to.
-    /// Nothing changes if any field is invalid.
-    pub async fn update_library(&self, update: LibraryUpdate) -> AppResult<LibrarySettings> {
-        let _guard = self.library_update.lock().await;
-        let mut paths = self.library.get();
-        let locks = self.library_locks;
-        let mut changes: Vec<(&str, Option<String>)> = Vec::new();
-        for (value, key, locked, label, slot) in [
-            (
-                update.movies,
-                MOVIES_DIR,
-                locks.movies,
-                "movie",
-                &mut paths.movies,
-            ),
-            (update.tv, TV_DIR, locks.tv, "TV", &mut paths.tv),
-            (
-                update.unsorted,
-                UNSORTED_DIR,
-                locks.unsorted,
-                "fallback",
-                &mut paths.unsorted,
-            ),
-        ] {
-            let Some(value) = value else { continue };
-            let value = value.trim().to_owned();
-            let current = slot.as_ref().map(|p| p.to_string_lossy().into_owned());
-            if current.as_deref().unwrap_or("") == value {
-                continue;
-            }
-            if locked {
-                return Err(AppError::conflict(format!(
-                    "the {label} folder is set by an environment variable; change it there"
-                )));
-            }
-            if value.is_empty() {
-                *slot = None;
-                changes.push((key, None));
-                continue;
-            }
-            let path = tokio::task::spawn_blocking(move || validate_library_dir(&value))
-                .await
-                .map_err(|_| AppError::internal("internal task failed"))?
-                .map_err(|e| AppError::invalid(format!("{label} folder: {e}")))?;
-            changes.push((key, Some(path.to_string_lossy().into_owned())));
-            *slot = Some(path);
-        }
-        let folders = [&paths.movies, &paths.tv, &paths.unsorted];
-        for (i, a) in folders.iter().enumerate() {
-            for b in &folders[i + 1..] {
-                if let (Some(a), Some(b)) = (a, b)
-                    && (a.starts_with(b) || b.starts_with(a))
-                {
-                    return Err(AppError::invalid(
-                        "the movie, TV and fallback folders must be separate, and none inside \
-                         another: Jellyfin scans movies and series as separate libraries",
-                    ));
-                }
-            }
-        }
-        if changes.is_empty() {
-            return Ok(self.library());
-        }
-        self.store.apply_settings(&changes, Utc::now()).await?;
-        self.library.set(paths);
-        tracing::info!("media library folders updated");
-        Ok(self.library())
+        self.library_view.clone()
     }
 
     pub fn misc(&self) -> MiscSettings {
@@ -823,33 +712,38 @@ async fn stored<T>(
     }))
 }
 
-/// Check a library folder typed on the settings page: an absolute path,
-/// without `..`, to an existing directory that Direkt can write to.
-pub fn validate_library_dir(value: &str) -> Result<PathBuf, String> {
-    if value.len() > MAX_LIBRARY_PATH || value.chars().any(char::is_control) {
-        return Err("this is not a usable folder path".into());
+/// Check each library folder and log what is wrong with it, so a missing
+/// mount or a permission problem shows up at launch rather than on the first
+/// download.
+fn describe_library(paths: &LibraryPaths) -> LibrarySettings {
+    use crate::config::{MOVIES_DIR_ENV, TV_DIR_ENV, UNSORTED_DIR_ENV};
+    let folder = |path: &Option<PathBuf>, variable: &str| {
+        let problem = path.as_deref().and_then(|p| check_library_dir(p).err());
+        if let (Some(path), Some(problem)) = (path, &problem) {
+            tracing::warn!(variable, path = %path.display(), %problem, "media library folder is not usable");
+        }
+        FolderSetting {
+            path: path.as_ref().map(|p| p.to_string_lossy().into_owned()),
+            variable: variable.to_owned(),
+            problem,
+        }
+    };
+    LibrarySettings {
+        movies: folder(&paths.movies, MOVIES_DIR_ENV),
+        tv: folder(&paths.tv, TV_DIR_ENV),
+        unsorted: folder(&paths.unsorted, UNSORTED_DIR_ENV),
     }
-    let path = Path::new(value);
-    if !path.is_absolute() {
-        return Err(
-            "enter an absolute path, such as /media/movies (inside the container when \
-             Direkt runs in Docker)"
-                .into(),
-        );
-    }
-    if path.components().any(|c| c == Component::ParentDir) {
-        return Err("the path must not contain \"..\"".into());
-    }
+}
+
+/// Whether `path` is an existing directory Direkt can write to.
+pub fn check_library_dir(path: &Path) -> Result<(), String> {
     match std::fs::metadata(path) {
         Ok(meta) if meta.is_dir() => {}
-        Ok(_) => return Err(format!("{value} is not a folder")),
+        Ok(_) => return Err("not a folder".into()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Err(format!(
-                "{value} does not exist; create it first (when Direkt runs in Docker, check \
-                 the volume mounts)"
-            ));
+            return Err("does not exist; check the container's volume mounts".into());
         }
-        Err(e) => return Err(format!("{value} cannot be read: {e}")),
+        Err(e) => return Err(format!("cannot be read: {e}")),
     }
     // Media servers often run as another user: catch permission problems now
     // rather than on the first download.
@@ -861,19 +755,16 @@ pub fn validate_library_dir(value: &str) -> Result<PathBuf, String> {
     {
         Ok(_) => {
             let _ = std::fs::remove_file(&probe);
+            Ok(())
         }
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
             let _ = std::fs::remove_file(&probe);
+            Ok(())
         }
-        Err(e) => {
-            return Err(format!(
-                "Direkt cannot write to {value} ({e}); check the folder's owner and permissions"
-            ));
-        }
+        Err(e) => Err(format!(
+            "Direkt cannot write to it ({e}); check the folder's owner and permissions"
+        )),
     }
-    let mut clean = PathBuf::new();
-    clean.extend(path.components());
-    Ok(clean)
 }
 
 #[cfg(test)]
@@ -1136,65 +1027,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn library_folders_are_validated_saved_and_shared() {
+    async fn library_folders_come_only_from_the_environment() {
         let store = Store::open_in_memory().await.unwrap();
         let settings = load(&store, None).await;
-        let cell = settings.library_cell();
-        assert_eq!(cell.get(), LibraryPaths::default());
+        assert_eq!(settings.library_cell().get(), LibraryPaths::default());
+        assert_eq!(settings.library().movies.path, None);
+        assert_eq!(settings.library().movies.variable, "DIREKT_MOVIES_DIR");
+
         let root = tempfile::tempdir().unwrap();
-        for dir in ["movies", "tv", "movies/inner"] {
-            std::fs::create_dir(root.path().join(dir)).unwrap();
-        }
-        let path = |rel: &str| root.path().join(rel).to_string_lossy().into_owned();
-
-        let shown = settings
-            .update_library(LibraryUpdate {
-                movies: Some(format!(" {} ", path("movies"))),
-                tv: Some(path("tv")),
-                unsorted: None,
-            })
-            .await
-            .unwrap();
-        assert_eq!(shown.movies.path.as_deref(), Some(path("movies").as_str()));
-        assert_eq!(shown.tv.source, KeySource::Settings);
-        assert_eq!(cell.get().tv, Some(root.path().join("tv")), "applied live");
-        assert!(!root.path().join("tv/.direkt-write-check").exists());
-        assert_eq!(load(&store, None).await.library_cell().get(), cell.get());
-
-        for (bad, why) in [
-            ("relative", "absolute"),
-            ("/does/not/exist", "does not exist"),
-            (&*format!("{}/../tv", path("movies")), ".."),
-            (&*path("movies/inner"), "separate"),
-        ] {
-            let err = settings
-                .update_library(LibraryUpdate {
-                    unsorted: Some(bad.to_owned()),
-                    ..Default::default()
-                })
-                .await
-                .unwrap_err();
-            assert_eq!(err.kind, ErrorKind::InvalidRequest, "{bad}");
-            assert!(err.message.contains(why), "{bad}: {}", err.message);
-        }
-        assert_eq!(cell.get().unsorted, None, "invalid input changes nothing");
-
-        settings
-            .update_library(LibraryUpdate {
-                movies: Some(String::new()),
-                ..Default::default()
-            })
-            .await
-            .unwrap();
-        assert_eq!(cell.get().movies, None);
-        assert_eq!(load(&store, None).await.library_cell().get().movies, None);
-
-        let locked = SettingsService::load(
+        std::fs::create_dir(root.path().join("movies")).unwrap();
+        std::fs::write(root.path().join("file"), b"x").unwrap();
+        let settings = SettingsService::load(
             store.clone(),
             EnvKeys {
                 library: LibraryEnv {
-                    movies: Some("/env/movies".into()),
-                    ..Default::default()
+                    movies: Some(root.path().join("movies")),
+                    tv: Some(root.path().join("missing")),
+                    unsorted: Some(root.path().join("file")),
                 },
                 ..Default::default()
             },
@@ -1203,16 +1052,16 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(locked.library().movies.source, KeySource::Environment);
-        assert!(!locked.library().movies.editable);
-        let err = locked
-            .update_library(LibraryUpdate {
-                movies: Some(path("tv")),
-                ..Default::default()
-            })
-            .await
-            .unwrap_err();
-        assert_eq!(err.kind, ErrorKind::Conflict);
+        assert_eq!(
+            settings.library_cell().get().movies,
+            Some(root.path().join("movies")),
+            "the organizer sees them"
+        );
+        let shown = settings.library();
+        assert_eq!(shown.movies.problem, None);
+        assert!(!root.path().join("movies/.direkt-write-check").exists());
+        assert!(shown.tv.problem.unwrap().contains("does not exist"));
+        assert!(shown.unsorted.problem.unwrap().contains("not a folder"));
     }
 
     #[tokio::test]

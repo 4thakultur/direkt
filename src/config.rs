@@ -142,11 +142,26 @@ pub fn library_from_env(var: impl Fn(&str) -> Option<String>) -> Result<LibraryE
         }
         Ok(Some(path))
     };
-    Ok(LibraryEnv {
+    let env = LibraryEnv {
         movies: folder(MOVIES_DIR_ENV)?,
         tv: folder(TV_DIR_ENV)?,
         unsorted: folder(UNSORTED_DIR_ENV)?,
-    })
+    };
+    let folders = [&env.movies, &env.tv, &env.unsorted];
+    for (i, a) in folders.iter().enumerate() {
+        for b in &folders[i + 1..] {
+            if let (Some(a), Some(b)) = (a, b)
+                && (a.starts_with(b) || b.starts_with(a))
+            {
+                return Err(ConfigError::Invalid(format!(
+                    "{MOVIES_DIR_ENV}, {TV_DIR_ENV} and {UNSORTED_DIR_ENV} must be separate \
+                     folders, none inside another: Jellyfin scans movies and series as \
+                     separate libraries"
+                )));
+            }
+        }
+    }
+    Ok(env)
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -459,6 +474,12 @@ mod tests {
                 unsorted: None,
             }
         );
+        let nested = library_from_env(|name| match name {
+            MOVIES_DIR_ENV => Some("/media".into()),
+            TV_DIR_ENV => Some("/media/tv".into()),
+            _ => None,
+        });
+        assert!(nested.unwrap_err().to_string().contains("separate"));
         for bad in ["media/movies", "/media/../etc"] {
             let err =
                 library_from_env(|name| (name == TV_DIR_ENV).then(|| bad.to_owned())).unwrap_err();

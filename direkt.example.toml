@@ -52,9 +52,9 @@ allowed_private_networks = []
 # Images are cached in <data_dir>/artwork.
 
 # Media library: completed movies and episodes are renamed and moved into
-# Jellyfin/Plex-style folders. Set the folders on the Settings page, or with
-# DIREKT_MOVIES_DIR, DIREKT_TV_DIR and DIREKT_UNSORTED_DIR (the fallback for
-# videos that can't be identified), which take precedence and lock them.
+# Jellyfin/Plex-style folders. For safety the folders are set only at launch,
+# with DIREKT_MOVIES_DIR, DIREKT_TV_DIR and DIREKT_UNSORTED_DIR (the fallback
+# for videos that can't be identified); the Settings page just shows them.
 # Use absolute paths (inside the container in Docker). See
 # docs/media-organization.md.
 

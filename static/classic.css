@@ -968,3 +968,6 @@ th { font-size: 0.7rem; color: var(--dim); font-weight: 600; letter-spacing: 0.1
   .pane { animation: none !important; }
   *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition: none !important; }
 }
+
+/* Media library folder that failed its startup check. */
+.folder-problem { display: block; }
