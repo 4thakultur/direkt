@@ -43,6 +43,10 @@ pub fn routes() -> Router<AppState> {
             "/settings/onefichier/account",
             post(sign_in_onefichier).delete(sign_out_onefichier),
         )
+        .route(
+            "/settings/onefichier/cdn/refresh",
+            post(refresh_onefichier_cdn),
+        )
 }
 
 type ApiResult<T> = Result<T, ApiError>;
@@ -497,6 +501,23 @@ async fn sign_in_onefichier(
     }))
 }
 
+/// Read the 1fichier CDN credit balance again, from the signed-in account or
+/// with the API key. Allowed once every 5 minutes (1fichier's limit).
+#[utoipa::path(
+    post, path = "/api/v1/settings/onefichier/cdn/refresh", tag = "settings",
+    responses(
+        (status = 200, body = OneFichierSettings),
+        (status = 409, description = "Neither signed in nor an API key configured", body = ErrorBody),
+        (status = 429, description = "Checked less than 5 minutes ago", body = ErrorBody),
+        (status = 503, description = "1fichier refused the request (e.g. flood protection)", body = ErrorBody),
+    )
+)]
+async fn refresh_onefichier_cdn(
+    State(state): State<AppState>,
+) -> ApiResult<Json<OneFichierSettings>> {
+    Ok(Json(state.settings.refresh_onefichier_cdn().await?))
+}
+
 /// Sign out of 1fichier and forget the stored email, password and session.
 #[utoipa::path(
     delete, path = "/api/v1/settings/onefichier/account", tag = "settings",
@@ -523,7 +544,7 @@ async fn sign_out_onefichier(State(state): State<AppState>) -> ApiResult<Json<On
         pause_download, resume_download, cancel_download, retry_download,
         list_tokens, create_token, revoke_token,
         get_onefichier, put_onefichier, delete_onefichier,
-        sign_in_onefichier, sign_out_onefichier,
+        sign_in_onefichier, sign_out_onefichier, refresh_onefichier_cdn,
     ),
     components(schemas(ErrorBody, ErrorKind)),
     modifiers(&SecuritySchemes),

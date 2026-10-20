@@ -1,5 +1,6 @@
 //! The official 1fichier API (premium API key).
 
+use super::website::CdnCredits;
 use super::{Throttle, clean_message};
 use crate::config::Secret;
 use crate::error::{ErrorKind, TransferError};
@@ -71,6 +72,66 @@ impl ApiClient {
             Some(r) => Err(classify_api_error(status, r.message.as_deref())),
             None => Err(classify_api_error(status, None)),
         }
+    }
+}
+
+#[derive(Deserialize)]
+struct UserInfoResponse {
+    status: Option<String>,
+    message: Option<String>,
+    /// CDN credits in GB, as a number (sometimes a string).
+    cdn: Option<serde_json::Value>,
+    use_cdn: Option<serde_json::Value>,
+}
+
+impl ApiClient {
+    /// CDN credits from `user/info.cgi`. 1fichier allows this call once per
+    /// minute per IP and once per 5 minutes per account.
+    pub async fn cdn_credits(&self, api_key: &Secret) -> Result<CdnCredits, TransferError> {
+        let endpoint = self
+            .base
+            .join("user/info.cgi")
+            .expect("relative path joins");
+        let request = self
+            .client
+            .post(endpoint)
+            .bearer_auth(api_key.expose())
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body("{}")
+            .timeout(API_TIMEOUT);
+        let response = self
+            .throttle
+            .run(request.send())
+            .await
+            .map_err(|e| classify_reqwest_error(&e))?;
+        let status = response.status();
+        let bytes = read_limited(response).await?;
+        let parsed: Option<UserInfoResponse> = serde_json::from_slice(&bytes).ok();
+        match parsed {
+            Some(r)
+                if status.is_success()
+                    && !r
+                        .status
+                        .as_deref()
+                        .is_some_and(|s| s.eq_ignore_ascii_case("KO")) =>
+            {
+                let gigabytes = r.cdn.as_ref().and_then(json_number);
+                Ok(CdnCredits {
+                    balance: gigabytes.filter(|g| *g > 0.0).map(|g| format!("{g:.2} GB")),
+                    in_use: r.use_cdn.as_ref().and_then(json_number).map(|v| v >= 1.0),
+                })
+            }
+            Some(r) => Err(classify_api_error(status, r.message.as_deref())),
+            None => Err(classify_api_error(status, None)),
+        }
+    }
+}
+
+fn json_number(value: &serde_json::Value) -> Option<f64> {
+    match value {
+        serde_json::Value::Number(n) => n.as_f64(),
+        serde_json::Value::String(s) => s.trim().parse().ok(),
+        _ => None,
     }
 }
 

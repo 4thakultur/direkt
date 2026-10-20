@@ -57,6 +57,13 @@ struct Site {
     not_premium: bool,
     /// Page served for every login attempt (e.g. a rate-limit message).
     login_page: Option<String>,
+    /// CDN balance text on the settings page (`None`: no credits).
+    cdn_balance: Option<String>,
+    cdn_in_use: bool,
+    /// `user/info.cgi` calls received.
+    user_info_calls: usize,
+    /// Scripted `user/info.cgi` reply (status, body); default: credits.
+    user_info_reply: Option<(u16, String)>,
     login_bodies: Vec<String>,
     /// (method, query, body, cookie header) of file-page requests.
     page_requests: Vec<(String, String, String, String)>,
@@ -128,6 +135,8 @@ impl TestServer {
             .route("/login.pl", axum::routing::post(site_login))
             .route("/console/index.pl", get(site_console))
             .route("/console/abo.pl", get(site_subscription))
+            .route("/en/console/params.pl", get(site_params))
+            .route("/v1/user/info.cgi", axum::routing::post(mock_user_info))
             .route("/", get(site_file_page).post(site_file_page))
             .with_state(state.clone());
         let listener = tokio::net::TcpListener::bind(SocketAddr::from((ip, 0)))
@@ -446,6 +455,48 @@ async fn site_subscription(State(state): State<Arc<ServerState>>, headers: Heade
     ))
 }
 
+async fn site_params(State(state): State<Arc<ServerState>>, headers: HeaderMap) -> Response {
+    let site = state.site.lock().unwrap();
+    if site.session_of(&headers).is_none() {
+        return (StatusCode::FOUND, [(header::LOCATION, "/login.pl")]).into_response();
+    }
+    let balance = site
+        .cdn_balance
+        .as_ref()
+        .map(|b| format!("<p> Your account have {b} of CDN credits</p>"))
+        .unwrap_or_default();
+    let checked = if site.cdn_in_use {
+        r#" checked="checked""#
+    } else {
+        ""
+    };
+    html(format!(
+        r#"{LOGGED_IN_NAV}{balance}<label><input type="checkbox"{checked} name="own_credit" value="1"> Use my credits</label>"#
+    ))
+}
+
+/// Mock of `POST /v1/user/info.cgi`.
+async fn mock_user_info(State(state): State<Arc<ServerState>>, headers: HeaderMap) -> Response {
+    let mut site = state.site.lock().unwrap();
+    site.user_info_calls += 1;
+    let authorized = headers
+        .get(header::AUTHORIZATION)
+        .is_some_and(|v| v.to_str().unwrap() == format!("Bearer {TEST_API_KEY}"));
+    let (status, body) = site.user_info_reply.clone().unwrap_or_else(|| {
+        if authorized {
+            (200, r#"{"email":"me@example.com","offer":1,"cdn":12.3456,"use_cdn":1,"subscription_end":"2027-01-31 00:00:00"}"#.into())
+        } else {
+            (401, r#"{"status":"KO","message":"Not authenticated #247"}"#.into())
+        }
+    });
+    (
+        StatusCode::from_u16(status).unwrap(),
+        [(header::CONTENT_TYPE, "application/json")],
+        body,
+    )
+        .into_response()
+}
+
 async fn site_file_page(
     State(state): State<Arc<ServerState>>,
     method: axum::http::Method,
@@ -592,7 +643,7 @@ async fn site_account(
     );
     let store = Store::open_in_memory().await.unwrap();
     Arc::new(
-        crate::providers::OneFichierAccount::load(store, website)
+        crate::providers::OneFichierAccount::load(store, website, server.api_base())
             .await
             .unwrap(),
     )
@@ -1815,16 +1866,20 @@ async fn account_session_survives_restart() {
             crate::providers::Throttle::new(Duration::ZERO),
         )
     };
-    let first = crate::providers::OneFichierAccount::load(store.clone(), website(&server))
-        .await
-        .unwrap();
+    let first = crate::providers::OneFichierAccount::load(
+        store.clone(),
+        website(&server),
+        server.api_base(),
+    )
+    .await
+    .unwrap();
     first
         .sign_in(SITE_EMAIL, SITE_PASSWORD, None)
         .await
         .unwrap();
 
     let reloaded = Arc::new(
-        crate::providers::OneFichierAccount::load(store, website(&server))
+        crate::providers::OneFichierAccount::load(store, website(&server), server.api_base())
             .await
             .unwrap(),
     );
@@ -1837,6 +1892,135 @@ async fn account_session_survives_restart() {
         1,
         "the stored session was reused"
     );
+}
+
+// --- 1fichier CDN credits ------------------------------------------------------
+
+#[tokio::test]
+async fn cdn_credits_from_signed_in_account() {
+    let server = TestServer::start([127, 0, 0, 1], content(10)).await;
+    {
+        let mut site = server.site();
+        site.cdn_balance = Some("25.5 GB".into());
+        site.cdn_in_use = true;
+    }
+    let account = signed_in_account(&server).await;
+    let cdn = account.view_cdn();
+    assert_eq!(cdn.balance.as_deref(), Some("25.5 GB"));
+    assert_eq!(cdn.in_use, Some(true));
+    assert_eq!(cdn.source, crate::providers::CdnSource::Account);
+    assert_eq!(
+        server.site().user_info_calls,
+        0,
+        "the account page is used, not the API"
+    );
+
+    // Signing out forgets them.
+    account.sign_out().await.unwrap();
+    assert!(account.cdn_view().is_none());
+}
+
+#[tokio::test]
+async fn cdn_credits_with_api_key_respect_the_rate_limit() {
+    let server = TestServer::start([127, 0, 0, 1], content(10)).await;
+    let account = site_account(&server, Duration::ZERO).await;
+    let key = crate::config::Secret::new(TEST_API_KEY);
+    account.refresh_cdn(Some(key.clone())).await.unwrap();
+    let cdn = account.view_cdn();
+    assert_eq!(cdn.balance.as_deref(), Some("12.35 GB"));
+    assert_eq!(cdn.in_use, Some(true));
+    assert_eq!(cdn.source, crate::providers::CdnSource::ApiKey);
+
+    let err = account.refresh_cdn(Some(key)).await.unwrap_err();
+    assert_eq!(err.kind, ErrorKind::RateLimited);
+    assert!(err.message.contains("5 minutes"), "{}", err.message);
+    assert_eq!(
+        server.site().user_info_calls,
+        1,
+        "the second refresh made no request"
+    );
+
+    // Removing the key's figures does not touch the account's, and vice versa.
+    account
+        .clear_cdn(crate::providers::CdnSource::Account)
+        .await
+        .unwrap();
+    assert!(account.cdn_view().is_some());
+    account
+        .clear_cdn(crate::providers::CdnSource::ApiKey)
+        .await
+        .unwrap();
+    assert!(account.cdn_view().is_none());
+}
+
+#[tokio::test]
+async fn cdn_credits_errors_and_empty_balances() {
+    let server = TestServer::start([127, 0, 0, 1], content(10)).await;
+    let account = site_account(&server, Duration::ZERO).await;
+    let err = account.refresh_cdn(None).await.unwrap_err();
+    assert_eq!(err.kind, ErrorKind::Conflict, "nothing configured");
+
+    server.site().user_info_reply = Some((
+        403,
+        r#"{"status":"KO","message":"Flood detected: User Locked #31"}"#.into(),
+    ));
+    let err = account
+        .refresh_cdn(Some(crate::config::Secret::new(TEST_API_KEY)))
+        .await
+        .unwrap_err();
+    assert_eq!(err.kind, ErrorKind::ProviderRestricted);
+    assert!(account.cdn_view().is_none(), "nothing stored on failure");
+
+    server.site().user_info_reply = Some((200, r#"{"cdn":0,"use_cdn":0}"#.into()));
+    account
+        .refresh_cdn(Some(crate::config::Secret::new(TEST_API_KEY)))
+        .await
+        .unwrap();
+    let cdn = account.view_cdn();
+    assert_eq!(cdn.balance, None, "zero credits show as none");
+    assert_eq!(cdn.in_use, Some(false));
+
+    // A signed-in account without credits shows none, too.
+    let account = signed_in_account(&server).await;
+    assert_eq!(account.view_cdn().balance, None);
+    assert_eq!(account.view_cdn().in_use, Some(false));
+}
+
+#[tokio::test]
+async fn cdn_credits_survive_restart() {
+    let server = TestServer::start([127, 0, 0, 1], content(10)).await;
+    server.site().cdn_balance = Some("3 GB".into());
+    let store = Store::open_in_memory().await.unwrap();
+    let website = || {
+        crate::providers::Website::with_base(
+            crate::http_client::build_no_redirect_client(
+                loopback_policy(),
+                crate::providers::BROWSER_USER_AGENT,
+            )
+            .unwrap(),
+            url::Url::parse(&server.url("/")).unwrap(),
+            crate::providers::Throttle::new(Duration::ZERO),
+        )
+    };
+    let first =
+        crate::providers::OneFichierAccount::load(store.clone(), website(), server.api_base())
+            .await
+            .unwrap();
+    first
+        .sign_in(SITE_EMAIL, SITE_PASSWORD, None)
+        .await
+        .unwrap();
+    let reloaded = crate::providers::OneFichierAccount::load(store, website(), server.api_base())
+        .await
+        .unwrap();
+    assert_eq!(reloaded.view_cdn().balance.as_deref(), Some("3 GB"));
+    assert_eq!(reloaded.view_cdn().checked_at, first.view_cdn().checked_at);
+}
+
+impl crate::providers::OneFichierAccount {
+    fn view_cdn(&self) -> crate::providers::CdnView {
+        self.cdn_view().expect("CDN credits were read")
+    }
 }
 
 // --- harness helpers for crash simulation ---------------------------------

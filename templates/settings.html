@@ -11,6 +11,22 @@
     an API key. When both are set, downloads use the account.
   </p>
 
+  <h3>CDN credits</h3>
+  {% if let Some(cdn) = cdn %}
+  <p>
+    <strong>{{ cdn.balance }}</strong> · {{ cdn.usage }}
+    <span class="muted">· from the {{ cdn.source }}, checked {{ cdn.checked }}</span>
+  </p>
+  {% else %}
+  <p class="muted">Not checked yet.</p>
+  {% endif %}
+  {% if onefichier.account.signed_in || onefichier.configured %}
+  <form method="post" action="/settings/onefichier/cdn/refresh" class="inline">
+    <button type="submit">Refresh credits</button>
+  </form>
+  <p class="muted">1fichier allows checking credits once every 5 minutes.</p>
+  {% endif %}
+
   <h3>Account</h3>
   {% if onefichier.account.signed_in %}
   <p>

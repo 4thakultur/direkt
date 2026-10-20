@@ -39,7 +39,7 @@ mod account;
 mod api;
 mod website;
 
-pub use account::{AccountView, OneFichierAccount, SignInOutcome};
+pub use account::{AccountView, CdnSource, CdnView, OneFichierAccount, SignInOutcome};
 #[cfg(test)]
 pub(crate) use website::{BROWSER_USER_AGENT, Website};
 
@@ -246,7 +246,13 @@ pub(crate) mod tests {
             crate::http_client::build_no_redirect_client(Default::default(), BROWSER_USER_AGENT)
                 .unwrap();
         let website = Website::new(client, Throttle::new(Duration::ZERO));
-        Arc::new(OneFichierAccount::load(store, website).await.unwrap())
+        // Unreachable API base: tests must never contact the real API.
+        let api_base = Url::parse("http://127.0.0.1:9/v1/").unwrap();
+        Arc::new(
+            OneFichierAccount::load(store, website, api_base)
+                .await
+                .unwrap(),
+        )
     }
 
     async fn provider() -> OneFichierProvider {

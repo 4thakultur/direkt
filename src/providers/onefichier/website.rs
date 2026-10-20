@@ -57,6 +57,15 @@ pub(crate) struct PendingTwoFactor {
     cookies: Vec<(String, String)>,
 }
 
+/// CDN credits as read from 1fichier.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CdnCredits {
+    /// Display text of the balance; `None` if the account shows no credits.
+    pub balance: Option<String>,
+    /// Whether the account is set to spend credits on its own downloads.
+    pub in_use: Option<bool>,
+}
+
 pub(crate) enum LinkOutcome {
     Link(Url),
     /// The page was served without a valid session.
@@ -289,6 +298,43 @@ impl Website {
 
     pub(crate) fn throttle(&self) -> Arc<Throttle> {
         self.throttle.clone()
+    }
+
+    pub(crate) fn client(&self) -> reqwest::Client {
+        self.client.clone()
+    }
+
+    /// CDN credits from the account's settings page: the balance as 1fichier
+    /// writes it (e.g. "12.5 GB"), and whether downloads use them.
+    pub(crate) async fn cdn_credits(&self, session: &Secret) -> Result<CdnCredits, TransferError> {
+        static BALANCE: LazyLock<Regex> = LazyLock::new(|| {
+            Regex::new(r#"(?i)>\s*Your account have ([^<>"]*?) of[^<]*credits"#).unwrap()
+        });
+        let page = self
+            .request(
+                self.client
+                    .get(self.url("en/console/params.pl"))
+                    .header("X-Requested-With", "XMLHttpRequest"),
+                &session_cookie(session),
+            )
+            .await?;
+        if page.status.is_redirection() || !page.status.is_success() {
+            return Err(TransferError::retry(
+                ErrorKind::ProviderRestricted,
+                format!(
+                    "could not open the 1fichier account settings (HTTP {})",
+                    page.status.as_u16()
+                ),
+            ));
+        }
+        let balance = BALANCE
+            .captures(&page.body)
+            .map(|c| super::clean_message(&c[1]))
+            .filter(|b| !b.is_empty());
+        Ok(CdnCredits {
+            balance,
+            in_use: checkbox_checked(&page.body, "own_credit"),
+        })
     }
 
     fn url(&self, path: &str) -> Url {
@@ -663,6 +709,17 @@ fn forms(html: &str) -> Vec<Form> {
         .collect()
 }
 
+/// Whether the checkbox named `name` is checked, if it exists.
+fn checkbox_checked(html: &str, name: &str) -> Option<bool> {
+    static INPUT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?is)<input\b([^>]*)>").unwrap());
+    INPUT.captures_iter(html).find_map(|c| {
+        let attrs = attributes(&c[1]);
+        let has = |key: &str| attrs.iter().any(|(k, _)| k == key);
+        let named = attrs.iter().any(|(k, v)| k == "name" && v == name);
+        named.then(|| has("checked"))
+    })
+}
+
 fn attributes(tag: &str) -> Vec<(String, String)> {
     static ATTR: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(r#"(?i)([a-z_:][-a-z0-9_:.]*)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+)))?"#)
@@ -839,6 +896,22 @@ mod tests {
         let bad = login_failure("<p>Invalid email address or password</p>");
         assert_eq!(bad.disposition, Disposition::Block);
         assert_eq!(bad.kind, ErrorKind::AuthenticationFailed);
+    }
+
+    #[test]
+    fn reads_cdn_settings_markup() {
+        let html = r#"<p> Your account have 12.34 GB of CDN credits</p>
+            <input type="checkbox" checked="checked" name="own_credit" value="1">"#;
+        static BALANCE: LazyLock<Regex> = LazyLock::new(|| {
+            Regex::new(r#"(?i)>\s*Your account have ([^<>"]*?) of[^<]*credits"#).unwrap()
+        });
+        assert_eq!(&BALANCE.captures(html).unwrap()[1], "12.34 GB");
+        assert_eq!(checkbox_checked(html, "own_credit"), Some(true));
+        assert_eq!(
+            checkbox_checked(r#"<input name="own_credit" type="checkbox">"#, "own_credit"),
+            Some(false)
+        );
+        assert_eq!(checkbox_checked("<p>nothing</p>", "own_credit"), None);
     }
 
     #[test]

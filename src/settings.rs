@@ -8,7 +8,7 @@
 
 use crate::config::{Secret, validate_onefichier_key};
 use crate::error::{AppError, AppResult};
-use crate::providers::{AccountView, OneFichierAccount, SignInOutcome};
+use crate::providers::{AccountView, CdnSource, CdnView, OneFichierAccount, SignInOutcome};
 use crate::store::Store;
 use chrono::Utc;
 use serde::Serialize;
@@ -61,6 +61,8 @@ pub enum KeySource {
 pub struct OneFichierSettings {
     /// The signed-in account, used in preference to the API key.
     pub account: AccountView,
+    /// CDN credits as last read from 1fichier.
+    pub cdn: Option<CdnView>,
     /// Whether an API key is configured.
     pub configured: bool,
     /// `SECRET_MASK` when configured, otherwise absent.
@@ -108,6 +110,7 @@ impl SettingsService {
         let configured = self.onefichier_key.get().is_some();
         OneFichierSettings {
             account: self.onefichier_account.view(),
+            cdn: self.onefichier_account.cdn_view(),
             configured,
             api_key: configured.then(|| SECRET_MASK.to_owned()),
             source: match (configured, self.env_locked) {
@@ -128,6 +131,16 @@ impl SettingsService {
             .await?;
         self.onefichier_key.set(Some(Secret::new(key)));
         tracing::info!("1fichier API key updated");
+        if !self.onefichier_account.is_signed_in() {
+            // Show the key's CDN credits right away; informative only.
+            if let Err(e) = self
+                .onefichier_account
+                .refresh_cdn(Some(Secret::new(key)))
+                .await
+            {
+                tracing::warn!(error = %e, "could not read 1fichier CDN credits");
+            }
+        }
         Ok(self.onefichier())
     }
 
@@ -135,6 +148,7 @@ impl SettingsService {
         self.ensure_editable()?;
         self.store.delete_setting(ONEFICHIER_KEY).await?;
         self.onefichier_key.set(None);
+        self.onefichier_account.clear_cdn(CdnSource::ApiKey).await?;
         tracing::info!("1fichier API key removed");
         Ok(self.onefichier())
     }
@@ -152,6 +166,14 @@ impl SettingsService {
             .sign_in(email, password, code)
             .await?;
         Ok(matches!(outcome, SignInOutcome::TwoFactorRequired))
+    }
+
+    /// Read the 1fichier CDN credits again (at most every 5 minutes).
+    pub async fn refresh_onefichier_cdn(&self) -> AppResult<OneFichierSettings> {
+        self.onefichier_account
+            .refresh_cdn(self.onefichier_key.get())
+            .await?;
+        Ok(self.onefichier())
     }
 
     pub async fn sign_out_onefichier(&self) -> AppResult<OneFichierSettings> {
@@ -177,28 +199,14 @@ mod tests {
 
     const KEY: &str = "AbCdEfGhIjKlMnOpQrStUvWxYz012345";
 
-    async fn account(store: &Store) -> Arc<OneFichierAccount> {
-        Arc::new(
-            OneFichierAccount::load(
-                store.clone(),
-                crate::providers::Website::new(
-                    crate::http_client::build_no_redirect_client(
-                        Default::default(),
-                        crate::providers::BROWSER_USER_AGENT,
-                    )
-                    .unwrap(),
-                    crate::providers::Throttle::new(std::time::Duration::ZERO),
-                ),
-            )
-            .await
-            .unwrap(),
-        )
-    }
-
     async fn load(store: &Store, env: Option<Secret>) -> SettingsService {
-        SettingsService::load(store.clone(), env, account(store).await)
-            .await
-            .unwrap()
+        SettingsService::load(
+            store.clone(),
+            env,
+            crate::providers::unconfigured_onefichier_account().await,
+        )
+        .await
+        .unwrap()
     }
 
     #[tokio::test]

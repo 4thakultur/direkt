@@ -11,7 +11,9 @@ mod onefichier;
 pub use http::HttpProvider;
 #[cfg(test)]
 pub(crate) use onefichier::tests::unconfigured_account as unconfigured_onefichier_account;
-pub use onefichier::{AccountView, OneFichierAccount, OneFichierProvider, SignInOutcome};
+pub use onefichier::{
+    AccountView, CdnSource, CdnView, OneFichierAccount, OneFichierProvider, SignInOutcome,
+};
 #[cfg(test)]
 pub(crate) use onefichier::{BROWSER_USER_AGENT, Throttle, Website};
 

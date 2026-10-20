@@ -45,6 +45,10 @@ pub fn protected_routes() -> Router<AppState> {
         .route("/settings/onefichier/remove", post(remove_onefichier))
         .route("/settings/onefichier/sign-in", post(sign_in_onefichier))
         .route("/settings/onefichier/sign-out", post(sign_out_onefichier))
+        .route(
+            "/settings/onefichier/cdn/refresh",
+            post(refresh_onefichier_cdn),
+        )
         .route("/logout", post(logout))
         .route("/ui/rows", get(rows_fragment))
         .route("/ui/downloads", post(submit_download))
@@ -657,6 +661,7 @@ impl From<ApiToken> for TokenView {
 #[template(path = "settings.html")]
 struct SettingsPage {
     onefichier: OneFichierSettings,
+    cdn: Option<CdnDisplay>,
     tokens: Vec<TokenView>,
     new_token: Option<String>,
     message: Option<String>,
@@ -665,6 +670,7 @@ struct SettingsPage {
 
 async fn settings_with(state: &AppState, mut page: SettingsPage) -> SettingsPage {
     page.onefichier = state.settings.onefichier();
+    page.cdn = page.onefichier.cdn.as_ref().map(CdnDisplay::from);
     match state.auth.list_api_tokens().await {
         Ok(tokens) => page.tokens = tokens.into_iter().map(TokenView::from).collect(),
         Err(e) => page.error = page.error.or(Some(e.message)),
@@ -711,6 +717,32 @@ async fn revoke_token(State(state): State<AppState>, Path(id): Path<Uuid>) -> Re
         },
     };
     render(&settings_with(&state, page).await)
+}
+
+/// CDN credits prepared for the settings page.
+struct CdnDisplay {
+    balance: String,
+    usage: &'static str,
+    source: &'static str,
+    checked: String,
+}
+
+impl From<&crate::providers::CdnView> for CdnDisplay {
+    fn from(c: &crate::providers::CdnView) -> Self {
+        Self {
+            balance: c.balance.clone().unwrap_or_else(|| "none".into()),
+            usage: match c.in_use {
+                Some(true) => "used for your downloads",
+                Some(false) => "not used for your downloads",
+                None => "usage unknown",
+            },
+            source: match c.source {
+                crate::providers::CdnSource::Account => "account",
+                crate::providers::CdnSource::ApiKey => "API key",
+            },
+            checked: fmt_time(c.checked_at),
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -771,6 +803,15 @@ async fn sign_out_onefichier(State(state): State<AppState>) -> Response {
         .sign_out_onefichier()
         .await
         .map(|_| "Signed out of 1fichier; the stored email and password were deleted.");
+    settings_result(&state, result).await
+}
+
+async fn refresh_onefichier_cdn(State(state): State<AppState>) -> Response {
+    let result = state
+        .settings
+        .refresh_onefichier_cdn()
+        .await
+        .map(|_| "1fichier CDN credits updated.");
     settings_result(&state, result).await
 }
 

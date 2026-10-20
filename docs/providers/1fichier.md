@@ -70,6 +70,25 @@ when they change. The API key is the more stable fallback.
 Without a sign-in or a key, 1fichier links are still accepted, but they stop
 in *needs attention* until you configure one and retry them.
 
+## CDN credits
+
+**Settings → 1fichier → CDN credits** shows the account's CDN credit
+balance, whether the account is set to spend the credits on its own
+downloads, where the figures came from, and when they were checked.
+
+- With a signed-in account, Direkt reads them from the account's settings
+  page (*"Your account have … of … credits"* and the *use my credits*
+  checkbox), as JDownloader does. This happens right after signing in.
+- With only an API key, Direkt calls `user/info.cgi`, which reports `cdn`
+  (credits in GB) and `use_cdn`. This happens right after the key is saved.
+- **Refresh credits** reads them again. 1fichier allows `user/info.cgi` only
+  once every 5 minutes per account (and once a minute per IP), so Direkt
+  refuses a refresh within 5 minutes of the last check.
+- Signing out or removing the key clears the figures that came from it.
+
+Direkt only displays the balance. Whether downloads spend credits is decided
+by your 1fichier account settings, not by Direkt.
+
 ## Supported links
 
 `https://<domain>/?<file id>`, where the file ID is 5–20 lowercase letters

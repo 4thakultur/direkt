@@ -1032,3 +1032,40 @@ async fn onefichier_account_endpoints_validate_input() {
     assert_eq!(r.status, StatusCode::BAD_REQUEST);
     assert!(r.body.contains("email address of your 1fichier account"));
 }
+
+#[tokio::test]
+async fn onefichier_cdn_section() {
+    let (app, cookie) = TestApp::with_admin().await;
+    let auth = cookie_header(&cookie);
+    let page = app.get("/settings", &auth).await;
+    assert!(page.body.contains("CDN credits"));
+    assert!(page.body.contains("Not checked yet"));
+    assert!(
+        !page.body.contains("Refresh credits"),
+        "nothing to refresh with"
+    );
+
+    let r = app
+        .post_json(
+            "/api/v1/settings/onefichier/cdn/refresh",
+            &auth,
+            Value::Null,
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::CONFLICT);
+    assert!(app.get("/api/v1/settings/onefichier", &auth).await.json()["cdn"].is_null());
+
+    // With an API key the button appears.
+    app.post_form(
+        "/settings/onefichier",
+        &auth,
+        &format!("api_key={ONEFICHIER_KEY}"),
+    )
+    .await;
+    assert!(
+        app.get("/settings", &auth)
+            .await
+            .body
+            .contains("Refresh credits")
+    );
+}

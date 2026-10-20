@@ -12,7 +12,10 @@
 //! * accounts with two-factor authentication cannot be signed in again
 //!   automatically. Their downloads wait for the user instead.
 
-use super::website::{BROWSER_USER_AGENT, LinkOutcome, LoginOutcome, PendingTwoFactor, Website};
+use super::api::{API_BASE, ApiClient};
+use super::website::{
+    BROWSER_USER_AGENT, CdnCredits, LinkOutcome, LoginOutcome, PendingTwoFactor, Website,
+};
 use super::{DEFAULT_MIN_INTERVAL, Throttle};
 use crate::config::Secret;
 use crate::error::{AppError, AppResult, ErrorKind, TransferError};
@@ -29,6 +32,14 @@ const KEY_PASSWORD: &str = "onefichier.password";
 const KEY_SESSION: &str = "onefichier.session";
 const KEY_TWO_FACTOR: &str = "onefichier.two_factor";
 const KEY_PREMIUM_UNTIL: &str = "onefichier.premium_until";
+const KEY_CDN_BALANCE: &str = "onefichier.cdn.balance";
+const KEY_CDN_IN_USE: &str = "onefichier.cdn.in_use";
+const KEY_CDN_SOURCE: &str = "onefichier.cdn.source";
+const KEY_CDN_CHECKED_AT: &str = "onefichier.cdn.checked_at";
+
+/// Minimum spacing of manual CDN refreshes: `user/info.cgi` allows one call
+/// per 5 minutes per account.
+const CDN_REFRESH_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
 /// How long a started two-factor sign-in waits for its code.
 const TWO_FACTOR_TIMEOUT: Duration = Duration::from_secs(10 * 60);
@@ -39,6 +50,8 @@ const MAX_PASSWORD_CHARS: usize = 128;
 pub struct OneFichierAccount {
     store: Store,
     website: Website,
+    api: ApiClient,
+    cdn: RwLock<Option<Cdn>>,
     state: RwLock<Option<Account>>,
     /// Serializes sign-ins.
     sign_in_lock: tokio::sync::Mutex<()>,
@@ -63,6 +76,44 @@ struct Pending {
     password: Secret,
     step: PendingTwoFactor,
     started: Instant,
+}
+
+/// Where CDN credit figures were read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CdnSource {
+    /// The signed-in account's settings page.
+    Account,
+    /// `user/info.cgi` with the API key.
+    ApiKey,
+}
+
+impl CdnSource {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Account => "account",
+            Self::ApiKey => "api_key",
+        }
+    }
+}
+
+#[derive(Clone)]
+struct Cdn {
+    credits: CdnCredits,
+    source: CdnSource,
+    checked_at: chrono::DateTime<Utc>,
+}
+
+/// CDN credits as shown to users.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+pub struct CdnView {
+    /// Balance as reported by 1fichier (e.g. "12.35 GB"); absent when the
+    /// account has no CDN credits.
+    pub balance: Option<String>,
+    /// Whether the account is set to spend CDN credits on its downloads.
+    pub in_use: Option<bool>,
+    pub source: CdnSource,
+    pub checked_at: chrono::DateTime<Utc>,
 }
 
 /// The account as shown to users. The password is never included.
@@ -97,10 +148,18 @@ impl OneFichierAccount {
     ) -> anyhow::Result<Arc<Self>> {
         let client = crate::http_client::build_no_redirect_client(policy, BROWSER_USER_AGENT)?;
         let website = Website::new(client, Throttle::new(DEFAULT_MIN_INTERVAL));
-        Ok(Arc::new(Self::load(store, website).await?))
+        let api_base = Url::parse(API_BASE).expect("constant URL");
+        Ok(Arc::new(Self::load(store, website, api_base).await?))
     }
 
-    pub(crate) async fn load(store: Store, website: Website) -> AppResult<Self> {
+    /// `api_base` is used for reading CDN credits with an API key.
+    pub(crate) async fn load(store: Store, website: Website, api_base: Url) -> AppResult<Self> {
+        let cdn = load_cdn(&store).await?;
+        let api = ApiClient {
+            client: website.client(),
+            base: api_base,
+            throttle: website.throttle(),
+        };
         let email = store.get_setting(KEY_EMAIL).await?;
         let password = store.get_setting(KEY_PASSWORD).await?;
         let state = match (email, password) {
@@ -118,6 +177,8 @@ impl OneFichierAccount {
         Ok(Self {
             store,
             website,
+            api,
+            cdn: RwLock::new(cdn),
             state: RwLock::new(state),
             sign_in_lock: tokio::sync::Mutex::new(()),
             pending: Mutex::new(None),
@@ -237,7 +298,125 @@ impl OneFichierAccount {
         }
         *self.state_slot() = None;
         *self.pending_slot() = None;
+        self.clear_cdn(CdnSource::Account).await?;
         tracing::info!("signed out of 1fichier");
+        Ok(())
+    }
+
+    /// CDN credits as last read, if any.
+    pub fn cdn_view(&self) -> Option<CdnView> {
+        self.cdn
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|c| CdnView {
+                balance: c.credits.balance.clone(),
+                in_use: c.credits.in_use,
+                source: c.source,
+                checked_at: c.checked_at,
+            })
+    }
+
+    /// Read CDN credits again: from the signed-in account, or else with
+    /// `api_key`. Refused within 5 minutes of the last check, which is
+    /// 1fichier's limit for `user/info.cgi`.
+    pub async fn refresh_cdn(&self, api_key: Option<Secret>) -> AppResult<()> {
+        if let Some(previous) = self.cdn_view() {
+            let elapsed = (Utc::now() - previous.checked_at)
+                .to_std()
+                .unwrap_or_default();
+            if elapsed < CDN_REFRESH_INTERVAL {
+                let wait = CDN_REFRESH_INTERVAL - elapsed;
+                return Err(AppError::new(
+                    ErrorKind::RateLimited,
+                    format!(
+                        "1fichier allows checking credits every 5 minutes; try again in {} min",
+                        wait.as_secs().div_ceil(60)
+                    ),
+                ));
+            }
+        }
+        if self.is_signed_in() {
+            return self
+                .refresh_cdn_from_account()
+                .await
+                .map_err(AppError::from);
+        }
+        let api_key = api_key.ok_or_else(|| {
+            AppError::conflict("sign in to 1fichier or add an API key to see CDN credits")
+        })?;
+        self.refresh_cdn_with_key(&api_key).await
+    }
+
+    /// Read CDN credits with an API key (after the key is saved).
+    pub async fn refresh_cdn_with_key(&self, api_key: &Secret) -> AppResult<()> {
+        let credits = self
+            .api
+            .cdn_credits(api_key)
+            .await
+            .map_err(AppError::from)?;
+        self.store_cdn(credits, CdnSource::ApiKey).await
+    }
+
+    async fn refresh_cdn_from_account(&self) -> Result<(), TransferError> {
+        let account = self.current().ok_or_else(not_signed_in)?;
+        let session = match account.session {
+            Some(session) => session,
+            None => self.renew_session(account.generation).await?.0,
+        };
+        let credits = self.website.cdn_credits(&session).await?;
+        self.store_cdn(credits, CdnSource::Account).await?;
+        Ok(())
+    }
+
+    async fn store_cdn(&self, credits: CdnCredits, source: CdnSource) -> AppResult<()> {
+        // Millisecond precision, as stored, so the time is the same after a restart.
+        let now = chrono::DateTime::from_timestamp_millis(Utc::now().timestamp_millis())
+            .expect("current time is in range");
+        match &credits.balance {
+            Some(balance) => {
+                self.store
+                    .set_setting(KEY_CDN_BALANCE, balance, now)
+                    .await?
+            }
+            None => self.store.delete_setting(KEY_CDN_BALANCE).await?,
+        }
+        match credits.in_use {
+            Some(in_use) => {
+                self.store
+                    .set_setting(KEY_CDN_IN_USE, if in_use { "1" } else { "0" }, now)
+                    .await?
+            }
+            None => self.store.delete_setting(KEY_CDN_IN_USE).await?,
+        }
+        self.store
+            .set_setting(KEY_CDN_SOURCE, source.as_str(), now)
+            .await?;
+        self.store
+            .set_setting(KEY_CDN_CHECKED_AT, &now.timestamp_millis().to_string(), now)
+            .await?;
+        *self.cdn.write().unwrap_or_else(|e| e.into_inner()) = Some(Cdn {
+            credits,
+            source,
+            checked_at: now,
+        });
+        Ok(())
+    }
+
+    /// Forget CDN figures that came from `source`.
+    pub async fn clear_cdn(&self, source: CdnSource) -> AppResult<()> {
+        if self.cdn_view().is_none_or(|c| c.source != source) {
+            return Ok(());
+        }
+        for key in [
+            KEY_CDN_BALANCE,
+            KEY_CDN_IN_USE,
+            KEY_CDN_SOURCE,
+            KEY_CDN_CHECKED_AT,
+        ] {
+            self.store.delete_setting(key).await?;
+        }
+        *self.cdn.write().unwrap_or_else(|e| e.into_inner()) = None;
         Ok(())
     }
 
@@ -375,20 +554,27 @@ impl OneFichierAccount {
             Some(date) => self.store.set_setting(KEY_PREMIUM_UNTIL, date, now).await?,
             None => self.store.delete_setting(KEY_PREMIUM_UNTIL).await?,
         }
-        let mut slot = self.state_slot();
-        let generation = slot.as_ref().map_or(0, |a| a.generation + 1);
-        *slot = Some(Account {
-            email: email.to_owned(),
-            password,
-            session: Some(session),
-            two_factor,
-            premium_until,
-            attention: None,
-            generation,
-        });
-        drop(slot);
+        let session_for_cdn = session.clone();
+        {
+            let mut slot = self.state_slot();
+            let generation = slot.as_ref().map_or(0, |a| a.generation + 1);
+            *slot = Some(Account {
+                email: email.to_owned(),
+                password,
+                session: Some(session),
+                two_factor,
+                premium_until,
+                attention: None,
+                generation,
+            });
+        }
         *self.pending_slot() = None;
         tracing::info!(two_factor, "signed in to 1fichier");
+        // Informative, like the subscription end: don't fail the sign-in.
+        match self.website.cdn_credits(&session_for_cdn).await {
+            Ok(credits) => self.store_cdn(credits, CdnSource::Account).await?,
+            Err(e) => tracing::warn!(error = %e, "could not read 1fichier CDN credits"),
+        }
         Ok(())
     }
 
@@ -444,6 +630,30 @@ impl OneFichierAccount {
     fn pending_slot(&self) -> std::sync::MutexGuard<'_, Option<Pending>> {
         self.pending.lock().unwrap_or_else(|e| e.into_inner())
     }
+}
+
+async fn load_cdn(store: &Store) -> AppResult<Option<Cdn>> {
+    let source = match store.get_setting(KEY_CDN_SOURCE).await?.as_deref() {
+        Some("account") => CdnSource::Account,
+        Some("api_key") => CdnSource::ApiKey,
+        _ => return Ok(None),
+    };
+    let checked_at = store
+        .get_setting(KEY_CDN_CHECKED_AT)
+        .await?
+        .and_then(|ms| ms.parse::<i64>().ok())
+        .and_then(chrono::DateTime::from_timestamp_millis);
+    let Some(checked_at) = checked_at else {
+        return Ok(None);
+    };
+    Ok(Some(Cdn {
+        credits: CdnCredits {
+            balance: store.get_setting(KEY_CDN_BALANCE).await?,
+            in_use: store.get_setting(KEY_CDN_IN_USE).await?.map(|v| v == "1"),
+        },
+        source,
+        checked_at,
+    }))
 }
 
 fn not_signed_in() -> TransferError {
