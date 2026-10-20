@@ -202,6 +202,42 @@ pub fn create_private_file(path: &Path, companions: &[&str]) -> io::Result<()> {
     Ok(())
 }
 
+/// Delete `path` if it is a regular file directly inside `dir`. Symlinks,
+/// directories and anything elsewhere are refused with `PermissionDenied`, so
+/// a stale or tampered path can never remove files outside `dir`. Returns
+/// `false` if the file was already gone.
+pub fn remove_file_in(dir: &Path, path: &Path) -> io::Result<bool> {
+    let refuse = |why: &str| {
+        Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            why.to_owned(),
+        ))
+    };
+    let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+        return refuse("not a file path");
+    };
+    let parent = match parent.canonicalize() {
+        Ok(parent) => parent,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e),
+    };
+    if parent != dir.canonicalize()? {
+        return refuse("outside the download directory");
+    }
+    let path = parent.join(name);
+    match fs::symlink_metadata(&path) {
+        Ok(meta) if meta.file_type().is_file() => {}
+        Ok(_) => return refuse("not a regular file"),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e),
+    }
+    match fs::remove_file(&path) {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
 /// Bytes available to unprivileged users on the filesystem containing `path`.
 pub fn available_space(path: &Path) -> io::Result<u64> {
     fs4::available_space(path)
@@ -210,6 +246,43 @@ pub fn available_space(path: &Path) -> io::Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn removes_only_regular_files_inside_the_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("downloads");
+        fs::create_dir(&dir).unwrap();
+        let outside = root.path().join("outside.txt");
+        fs::write(&outside, "keep").unwrap();
+        let inside = dir.join("movie.mkv");
+        fs::write(&inside, "data").unwrap();
+        fs::create_dir(dir.join("sub")).unwrap();
+        fs::write(dir.join("sub/nested.mkv"), "data").unwrap();
+
+        let denied = |p: &Path| remove_file_in(&dir, p).unwrap_err().kind();
+        assert_eq!(denied(&outside), io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            denied(&dir.join("../outside.txt")),
+            io::ErrorKind::PermissionDenied
+        );
+        assert_eq!(
+            denied(&dir.join("sub/nested.mkv")),
+            io::ErrorKind::PermissionDenied
+        );
+        assert_eq!(denied(&dir.join("sub")), io::ErrorKind::PermissionDenied);
+        #[cfg(unix)]
+        {
+            let link = dir.join("link.mkv");
+            std::os::unix::fs::symlink(&outside, &link).unwrap();
+            assert_eq!(denied(&link), io::ErrorKind::PermissionDenied);
+            assert!(link.exists());
+        }
+        assert!(outside.exists());
+
+        assert!(remove_file_in(&dir, &inside).unwrap());
+        assert!(!inside.exists());
+        assert!(!remove_file_in(&dir, &inside).unwrap(), "already gone");
+    }
 
     #[test]
     fn sanitizes_hostile_names() {

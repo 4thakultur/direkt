@@ -417,23 +417,29 @@ impl Store {
         Ok(result.rows_affected() == 1)
     }
 
-    /// Delete a cancelled download and its event history. Returns whether a
-    /// row was deleted; downloads in any other state are left alone.
-    pub async fn delete_cancelled(&self, id: Uuid) -> AppResult<bool> {
-        let result = sqlx::query("DELETE FROM downloads WHERE id = ?1 AND state = 'cancelled'")
-            .bind(id.to_string())
-            .execute(&self.pool)
-            .await?;
+    /// Delete a download and its event history if it is still in `state` and
+    /// not being post-processed. Returns whether a row was deleted.
+    pub async fn delete_download(&self, id: Uuid, state: TransferState) -> AppResult<bool> {
+        let result = sqlx::query(
+            "DELETE FROM downloads
+             WHERE id = ?1 AND state = ?2 AND post_state != 'processing'",
+        )
+        .bind(id.to_string())
+        .bind(state.as_str())
+        .execute(&self.pool)
+        .await?;
         Ok(result.rows_affected() == 1)
     }
 
-    /// Delete every cancelled download and its event history. Returns the
-    /// deleted ids.
-    pub async fn delete_all_cancelled(&self) -> AppResult<Vec<Uuid>> {
-        let ids: Vec<String> =
-            sqlx::query_scalar("DELETE FROM downloads WHERE state = 'cancelled' RETURNING id")
-                .fetch_all(&self.pool)
-                .await?;
+    /// Delete every download in `state` that is not being post-processed, and
+    /// their event history. Returns the deleted ids.
+    pub async fn delete_all_in(&self, state: TransferState) -> AppResult<Vec<Uuid>> {
+        let ids: Vec<String> = sqlx::query_scalar(
+            "DELETE FROM downloads WHERE state = ?1 AND post_state != 'processing' RETURNING id",
+        )
+        .bind(state.as_str())
+        .fetch_all(&self.pool)
+        .await?;
         ids.iter()
             .map(|id| Uuid::parse_str(id).map_err(|_| corrupt("invalid download id")))
             .collect()
@@ -1050,7 +1056,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn only_cancelled_downloads_are_deleted() {
+    async fn deletes_only_downloads_in_the_given_state() {
         let s = store().await;
         let a = s.insert_download(new_dl("a"), t(0)).await.unwrap();
         let b = s.insert_download(new_dl("b"), t(0)).await.unwrap();
@@ -1061,14 +1067,17 @@ mod tests {
                 .unwrap();
         }
 
-        assert!(!s.delete_cancelled(c.id).await.unwrap(), "queued is kept");
-        assert!(s.delete_cancelled(a.id).await.unwrap());
-        assert!(!s.delete_cancelled(a.id).await.unwrap());
+        assert!(
+            !s.delete_download(c.id, Cancelled).await.unwrap(),
+            "queued is kept"
+        );
+        assert!(s.delete_download(a.id, Cancelled).await.unwrap());
+        assert!(!s.delete_download(a.id, Cancelled).await.unwrap());
         assert!(s.get_download(a.id).await.unwrap().is_none());
         assert!(s.list_events(a.id).await.unwrap().is_empty());
 
-        assert_eq!(s.delete_all_cancelled().await.unwrap(), [b.id]);
-        assert!(s.delete_all_cancelled().await.unwrap().is_empty());
+        assert_eq!(s.delete_all_in(Cancelled).await.unwrap(), [b.id]);
+        assert!(s.delete_all_in(Cancelled).await.unwrap().is_empty());
         let left = s.list_downloads(&[], 50, 0).await.unwrap();
         assert_eq!(left.iter().map(|d| d.id).collect::<Vec<_>>(), [c.id]);
     }

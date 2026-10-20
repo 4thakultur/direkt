@@ -51,8 +51,9 @@ Every error uses the same body:
 | POST | `/api/v1/downloads/{id}/resume` | Resume a paused download |
 | POST | `/api/v1/downloads/{id}/cancel` | Cancel and delete partial data |
 | POST | `/api/v1/downloads/{id}/retry` | Re-queue a failed, blocked, or cancelled download. Optional body `{"password": "…"}` replaces the download password. |
-| DELETE | `/api/v1/downloads/{id}` | Delete a cancelled download and its history. `204`; `409` if it is not cancelled. |
+| DELETE | `/api/v1/downloads/{id}?delete_file=true` | Delete a cancelled or completed download and its history. For a completed download the file stays on disk unless `delete_file=true`; Direkt only deletes a regular file directly inside the download directory. `204`; `409` if it is in another state or being organized. If the file can't be deleted, the download is kept and the error says why. |
 | DELETE | `/api/v1/downloads/cancelled` | Delete every cancelled download. Returns `{"deleted": n}`. |
+| DELETE | `/api/v1/downloads/completed` | Remove every completed download from the list. Files stay on disk. Returns `{"deleted": n}`. |
 | GET | `/api/v1/stats` | Transfer throughput since start: current, peak and total bytes, free space in the download directory, and a per-second speed history of up to 5 minutes (the web UI's graph). Counters reset when Direkt restarts. |
 | GET | `/api/v1/tokens` | List API tokens (no secrets) |
 | POST | `/api/v1/tokens` | Create `{"name": "…"}`. The secret is in this response only. |

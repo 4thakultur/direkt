@@ -9,7 +9,7 @@
 //! [`DownloadService::confirm`] then queues it with the type the user chose.
 //! The password never leaves the server in between.
 
-use crate::domain::{Download, DownloadEvent, MediaType, TransferState};
+use crate::domain::{Download, DownloadEvent, MediaType, PostState, TransferState};
 use crate::engine::{Engine, LiveSnapshot, StopReason, ThroughputSnapshot, filename_from_url};
 use crate::error::{AppError, AppResult, Disposition, ErrorKind};
 use crate::media::parse::{detect, guess_as};
@@ -380,34 +380,87 @@ impl DownloadService {
             .await
     }
 
-    /// Delete a cancelled download and its history. Other states are refused,
-    /// so a running or finished download can't be dropped by accident.
-    pub async fn delete(&self, id: Uuid) -> AppResult<()> {
+    /// Delete a cancelled or completed download and its history. With
+    /// `delete_file`, a completed download's file is deleted from disk first;
+    /// otherwise it stays. Other states are refused, so a running download
+    /// can't be dropped by accident.
+    pub async fn delete(&self, id: Uuid, delete_file: bool) -> AppResult<()> {
         let download = self.get(id).await?;
-        if download.state != TransferState::Cancelled {
-            return Err(AppError::conflict(format!(
-                "only cancelled downloads can be deleted; this one is {}",
-                download.state.as_str()
-            )));
+        match download.state {
+            TransferState::Cancelled => {}
+            TransferState::Completed if download.post_state == PostState::Processing => {
+                return Err(AppError::conflict(
+                    "this download is being organized; try again when it is done",
+                ));
+            }
+            TransferState::Completed => {
+                if delete_file && let Some(path) = &download.file_path {
+                    self.remove_file(id, path).await?;
+                }
+            }
+            state => {
+                return Err(AppError::conflict(format!(
+                    "only cancelled or completed downloads can be deleted; this one is {}",
+                    state.as_str()
+                )));
+            }
         }
-        if !self.store.delete_cancelled(id).await? {
+        if !self.store.delete_download(id, download.state).await? {
             return Err(AppError::conflict(
                 "the download changed state; refresh and try again",
             ));
         }
-        self.forget_partial(id).await;
-        tracing::info!(%id, "cancelled download deleted by user");
+        if download.state == TransferState::Cancelled {
+            self.forget_partial(id).await;
+        }
+        tracing::info!(%id, delete_file, "download deleted by user");
         Ok(())
     }
 
-    /// Delete every cancelled download. Returns how many were deleted.
-    pub async fn delete_cancelled(&self) -> AppResult<usize> {
-        let ids = self.store.delete_all_cancelled().await?;
-        for &id in &ids {
-            self.forget_partial(id).await;
+    /// Delete every download in `state` (cancelled or completed) from the
+    /// list. Files stay on disk. Returns how many were deleted.
+    pub async fn delete_all(&self, state: TransferState) -> AppResult<usize> {
+        if !matches!(state, TransferState::Cancelled | TransferState::Completed) {
+            return Err(AppError::invalid(
+                "only cancelled or completed downloads can be deleted",
+            ));
         }
-        tracing::info!(count = ids.len(), "cancelled downloads deleted by user");
+        let ids = self.store.delete_all_in(state).await?;
+        if state == TransferState::Cancelled {
+            for &id in &ids {
+                self.forget_partial(id).await;
+            }
+        }
+        tracing::info!(
+            count = ids.len(),
+            state = state.as_str(),
+            "downloads deleted by user"
+        );
         Ok(ids.len())
+    }
+
+    async fn remove_file(&self, id: Uuid, path: &str) -> AppResult<()> {
+        match self.engine.remove_completed_file(path.into()).await {
+            Ok(removed) => {
+                tracing::info!(%id, removed, "downloaded file deleted by user");
+                Ok(())
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                tracing::warn!(%id, error = %e, "refused to delete downloaded file");
+                Err(AppError::new(
+                    ErrorKind::Filesystem,
+                    "the file is not in the download directory, so Direkt won't delete it; \
+                     remove it from the list instead",
+                ))
+            }
+            Err(e) => {
+                tracing::warn!(%id, error = %e, "could not delete downloaded file");
+                Err(AppError::new(
+                    ErrorKind::Filesystem,
+                    format!("could not delete the file: {e}"),
+                ))
+            }
+        }
     }
 
     /// Cancelling already removes partial data; this catches a leftover from

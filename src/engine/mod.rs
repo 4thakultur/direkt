@@ -269,6 +269,15 @@ impl Engine {
     pub async fn remove_partial(&self, id: Uuid) -> Result<(), TransferError> {
         remove_if_exists(&self.inner.part_path(id)).await
     }
+
+    /// Delete a completed download's file, which must be directly inside the
+    /// download directory. Returns `false` if it was already gone.
+    pub async fn remove_completed_file(&self, path: PathBuf) -> std::io::Result<bool> {
+        let dir = self.inner.settings.download_dir.clone();
+        tokio::task::spawn_blocking(move || fsutil::remove_file_in(&dir, &path))
+            .await
+            .map_err(std::io::Error::other)?
+    }
 }
 
 /// Sample aggregate throughput once per second until shutdown.

@@ -27,6 +27,7 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/downloads", get(list_downloads).post(create_download))
         .route("/downloads/cancelled", delete(delete_cancelled_downloads))
+        .route("/downloads/completed", delete(delete_completed_downloads))
         .route("/downloads/{id}", get(get_download).delete(delete_download))
         .route("/downloads/{id}/events", get(download_events))
         .route("/downloads/{id}/pause", post(pause_download))
@@ -458,21 +459,32 @@ async fn cancel_download(
     )))
 }
 
-/// Delete a cancelled download and its event history.
+#[derive(Debug, Default, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct DeleteQuery {
+    /// Also delete a completed download's file from disk. Without it the file
+    /// stays and only the entry is removed.
+    #[serde(default)]
+    pub delete_file: bool,
+}
+
+/// Delete a cancelled or completed download and its event history.
 #[utoipa::path(
     delete, path = "/api/v1/downloads/{id}", tag = "downloads",
-    params(("id" = Uuid, Path, description = "Download ID")),
+    params(("id" = Uuid, Path, description = "Download ID"), DeleteQuery),
     responses(
         (status = 204, description = "Deleted"),
         (status = 404, body = ErrorBody),
-        (status = 409, description = "Not cancelled", body = ErrorBody),
+        (status = 409, description = "Not cancelled or completed, or being organized", body = ErrorBody),
+        (status = 500, description = "The file could not be deleted; the download is kept", body = ErrorBody),
     )
 )]
 async fn delete_download(
     State(state): State<AppState>,
     ApiPath(id): ApiPath<Uuid>,
+    ApiQuery(query): ApiQuery<DeleteQuery>,
 ) -> ApiResult<StatusCode> {
-    state.downloads.delete(id).await?;
+    state.downloads.delete(id, query.delete_file).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -487,7 +499,17 @@ struct Deleted {
     responses((status = 200, body = Deleted))
 )]
 async fn delete_cancelled_downloads(State(state): State<AppState>) -> ApiResult<Json<Deleted>> {
-    let deleted = state.downloads.delete_cancelled().await?;
+    let deleted = state.downloads.delete_all(TransferState::Cancelled).await?;
+    Ok(Json(Deleted { deleted }))
+}
+
+/// Remove every completed download from the list. Files stay on disk.
+#[utoipa::path(
+    delete, path = "/api/v1/downloads/completed", tag = "downloads",
+    responses((status = 200, body = Deleted))
+)]
+async fn delete_completed_downloads(State(state): State<AppState>) -> ApiResult<Json<Deleted>> {
+    let deleted = state.downloads.delete_all(TransferState::Completed).await?;
     Ok(Json(Deleted { deleted }))
 }
 
@@ -749,7 +771,7 @@ async fn sign_out_onefichier(State(state): State<AppState>) -> ApiResult<Json<On
     paths(
         create_download, create_preview, retype_preview, list_downloads, get_download, download_events,
         pause_download, resume_download, cancel_download, retry_download,
-        delete_download, delete_cancelled_downloads, get_stats,
+        delete_download, delete_cancelled_downloads, delete_completed_downloads, get_stats,
         list_tokens, create_token, revoke_token,
         get_onefichier, put_onefichier, delete_onefichier,
         sign_in_onefichier, sign_out_onefichier, refresh_onefichier_cdn,

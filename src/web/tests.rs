@@ -18,6 +18,7 @@ const PASSWORD: &str = "correct horse battery";
 struct TestApp {
     router: Router,
     auth: AuthService,
+    store: Store,
     _dir: tempfile::TempDir,
     /// Base URL of a local file server, for apps built with `local_files`.
     files: String,
@@ -115,12 +116,13 @@ impl TestApp {
             auth: auth.clone(),
             settings,
             artwork,
-            store,
+            store: store.clone(),
             secure_cookies: false,
         });
         Self {
             router,
             auth,
+            store,
             _dir: dir,
             files,
         }
@@ -303,6 +305,7 @@ async fn openapi_document_is_valid() {
         "/api/v1/downloads/{id}/cancel",
         "/api/v1/downloads/{id}/retry",
         "/api/v1/downloads/cancelled",
+        "/api/v1/downloads/completed",
         "/api/v1/stats",
         "/api/v1/tokens",
         "/api/v1/tokens/{id}",
@@ -824,7 +827,8 @@ async fn only_cancelled_downloads_can_be_deleted() {
     let r = app.post_form("/ui/cancelled/delete", &auth, "").await;
     assert_eq!(r.status, StatusCode::OK);
     assert!(
-        r.body.contains("Deleted 1 cancelled download<"),
+        r.body
+            .contains("Removed 1 cancelled download from the list<"),
         "{}",
         r.body
     );
@@ -841,6 +845,141 @@ async fn only_cancelled_downloads_can_be_deleted() {
         .map(|d| d["id"].clone())
         .collect();
     assert_eq!(left, [Value::from(ids[2].clone())]);
+}
+
+impl TestApp {
+    /// A completed download whose file is `path`, written with some content.
+    async fn completed_download(&self, path: &std::path::Path) -> String {
+        use crate::domain::TransferState::{Completed, Downloading};
+        use crate::store::{NewDownload, TransitionDetails};
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, "data").unwrap();
+        let now = chrono::Utc::now();
+        self.store
+            .insert_download(
+                NewDownload {
+                    url: "https://example.com/movie.mkv".into(),
+                    display_url: "https://example.com/movie.mkv".into(),
+                    provider: "http".into(),
+                    ..Default::default()
+                },
+                now,
+            )
+            .await
+            .unwrap();
+        let d = self.store.claim_next(now).await.unwrap().unwrap();
+        assert_eq!(d.state, Downloading);
+        self.store
+            .set_file_path(d.id, &path.to_string_lossy(), now)
+            .await
+            .unwrap();
+        self.store
+            .transition(
+                d.id,
+                Downloading,
+                Completed,
+                TransitionDetails::default(),
+                now,
+            )
+            .await
+            .unwrap();
+        d.id.to_string()
+    }
+
+    fn download_dir(&self) -> std::path::PathBuf {
+        self._dir.path().join("dl")
+    }
+}
+
+#[tokio::test]
+async fn completed_downloads_can_be_removed_with_or_without_their_file() {
+    let (app, cookie) = TestApp::with_admin().await;
+    let auth = cookie_header(&cookie);
+    let dl = app.download_dir();
+    let kept = dl.join("kept.mkv");
+    let gone = dl.join("gone.mkv");
+    let outside = app._dir.path().join("outside.mkv");
+    let keep_id = app.completed_download(&kept).await;
+    let gone_id = app.completed_download(&gone).await;
+    let outside_id = app.completed_download(&outside).await;
+
+    let dash = app.get("/ui/dashboard", &auth).await;
+    assert!(
+        dash.body
+            .contains(&format!("/ui/downloads/{keep_id}/delete\""))
+    );
+    assert!(
+        dash.body
+            .contains(&format!("/ui/downloads/{keep_id}/delete-file"))
+    );
+    assert!(dash.body.contains("/ui/completed/delete"));
+    let detail = app.get(&format!("/downloads/{keep_id}"), &auth).await;
+    assert!(!detail.body.contains("/delete"), "not on the detail page");
+
+    let r = app
+        .post_form(&format!("/ui/downloads/{keep_id}/delete"), &auth, "")
+        .await;
+    assert_eq!(r.status, StatusCode::OK);
+    assert!(r.body.contains("Removed from the list"), "{}", r.body);
+    assert!(kept.exists(), "removing from the list keeps the file");
+
+    let r = app
+        .post_form(&format!("/ui/downloads/{gone_id}/delete-file"), &auth, "")
+        .await;
+    assert_eq!(r.status, StatusCode::OK);
+    assert!(r.body.contains("File deleted"), "{}", r.body);
+    assert!(!gone.exists());
+    let r = app
+        .get(&format!("/api/v1/downloads/{gone_id}"), &auth)
+        .await;
+    assert_eq!(r.status, StatusCode::NOT_FOUND);
+
+    // A recorded path outside the download directory is never deleted, and
+    // the download stays listed.
+    let r = app
+        .post_form(
+            &format!("/ui/downloads/{outside_id}/delete-file"),
+            &auth,
+            "",
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(
+        r.body.contains("not in the download directory"),
+        "{}",
+        r.body
+    );
+    assert!(outside.exists());
+    let r = app
+        .get(&format!("/api/v1/downloads/{outside_id}"), &auth)
+        .await;
+    assert_eq!(r.status, StatusCode::OK);
+
+    let r = app.post_form("/ui/completed/delete", &auth, "").await;
+    assert!(
+        r.body
+            .contains("Removed 1 completed download from the list"),
+        "{}",
+        r.body
+    );
+    assert!(outside.exists(), "clearing the list keeps files");
+    let r = app.get("/api/v1/downloads", &auth).await;
+    assert_eq!(r.json()["items"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn delete_file_via_api() {
+    let (app, cookie) = TestApp::with_admin().await;
+    let auth = cookie_header(&cookie);
+    let file = app.download_dir().join("movie.mkv");
+    let id = app.completed_download(&file).await;
+    let mut builder = HttpRequest::delete(format!("/api/v1/downloads/{id}?delete_file=true"));
+    for (k, v) in &auth {
+        builder = builder.header(*k, *v);
+    }
+    let r = app.send(builder.body(Body::empty()).unwrap()).await;
+    assert_eq!(r.status, StatusCode::NO_CONTENT, "{}", r.body);
+    assert!(!file.exists());
 }
 
 #[tokio::test]

@@ -64,7 +64,14 @@ pub fn protected_routes() -> Router<AppState> {
         .route("/ui/previews/{id}/type", post(retype_preview))
         .route("/ui/downloads", post(confirm_download))
         .route("/ui/downloads/{id}/detail", get(detail_fragment))
-        .route("/ui/cancelled/delete", post(delete_cancelled))
+        .route(
+            "/ui/cancelled/delete",
+            post(|state| delete_all(state, TransferState::Cancelled)),
+        )
+        .route(
+            "/ui/completed/delete",
+            post(|state| delete_all(state, TransferState::Completed)),
+        )
         .route("/ui/downloads/{id}/{action}", post(download_action))
 }
 
@@ -182,8 +189,11 @@ struct DownloadView {
     can_resume: bool,
     can_retry: bool,
     can_cancel: bool,
-    /// Offered on the dashboard only: the detail page would outlive the row.
+    /// Remove from the list (cancelled or completed). Offered on the
+    /// dashboard only: the detail page would outlive the row.
     can_delete: bool,
+    /// Delete a completed download's file as well. Dashboard only.
+    can_delete_file: bool,
     /// Downloading without a known size: show an indeterminate bar.
     indeterminate: bool,
     /// Short label on the cover tile, e.g. the file extension.
@@ -222,6 +232,8 @@ fn url_file_name(display_url: &str) -> Option<String> {
 impl DownloadView {
     fn new(d: Download, live: Option<LiveSnapshot>) -> Self {
         use TransferState::*;
+        let deletable_completed = d.state == Completed && d.post_state != PostState::Processing;
+        let can_delete_file = deletable_completed && d.file_path.is_some();
         let downloaded = live
             .map(|l| l.downloaded_bytes)
             .unwrap_or(u64::try_from(d.downloaded_bytes).unwrap_or(0));
@@ -288,7 +300,8 @@ impl DownloadView {
             can_resume: d.state == Paused,
             can_retry: matches!(d.state, Failed | Blocked | Cancelled),
             can_cancel: matches!(d.state, Queued | Downloading | Retrying | Paused | Blocked),
-            can_delete: d.state == Cancelled,
+            can_delete: d.state == Cancelled || deletable_completed,
+            can_delete_file,
         }
     }
 }
@@ -562,8 +575,14 @@ struct Group {
     rows: Vec<DownloadView>,
     /// The list was cut at its limit; older entries exist.
     truncated: bool,
-    /// Offers "Delete all" (the cancelled list).
-    clearable: bool,
+    /// A button that empties the list.
+    clear: Option<ClearAction>,
+}
+
+struct ClearAction {
+    url: &'static str,
+    label: &'static str,
+    confirm: &'static str,
 }
 
 #[derive(Template)]
@@ -722,7 +741,19 @@ async fn load_dashboard(state: &AppState) -> Dashboard {
     .into_iter()
     .filter(|(_, rows, _)| !rows.is_empty())
     .map(|(title, rows, truncated)| Group {
-        clearable: title == "Cancelled",
+        clear: match title {
+            "Cancelled" => Some(ClearAction {
+                url: "/ui/cancelled/delete",
+                label: "Delete all",
+                confirm: "Delete all cancelled downloads from the list?",
+            }),
+            "Completed" => Some(ClearAction {
+                url: "/ui/completed/delete",
+                label: "Clear list",
+                confirm: "Remove all completed downloads from the list? Their files stay on disk.",
+            }),
+            _ => None,
+        },
         title,
         rows,
         truncated,
@@ -862,7 +893,11 @@ async fn download_action(
         "resume" => service.resume(id).await.map(|_| "Resumed"),
         "retry" => service.retry(id, None).await.map(|_| "Queued for retry"),
         "cancel" => service.cancel(id).await.map(|_| "Cancelled"),
-        "delete" => service.delete(id).await.map(|()| "Deleted"),
+        "delete" => service
+            .delete(id, false)
+            .await
+            .map(|()| "Removed from the list"),
+        "delete-file" => service.delete(id, true).await.map(|()| "File deleted"),
         _ => Err(AppError::not_found("unknown action")),
     };
     match result {
@@ -880,14 +915,15 @@ async fn download_action(
     }
 }
 
-async fn delete_cancelled(State(state): State<AppState>) -> Response {
-    let (status, flash) = match state.downloads.delete_cancelled().await {
+async fn delete_all(State(state): State<AppState>, which: TransferState) -> Response {
+    let (status, flash) = match state.downloads.delete_all(which).await {
         Ok(n) => (
             StatusCode::OK,
             Flash {
                 ok: true,
                 message: format!(
-                    "Deleted {n} cancelled download{}",
+                    "Removed {n} {} download{} from the list",
+                    which.as_str(),
                     if n == 1 { "" } else { "s" }
                 ),
             },
@@ -926,6 +962,7 @@ async fn load_detail(
     let live = state.downloads.live(id);
     let mut view = DownloadView::new(download, live);
     view.can_delete = false;
+    view.can_delete_file = false;
     Ok((
         view,
         events.into_iter().rev().map(EventView::from).collect(),
