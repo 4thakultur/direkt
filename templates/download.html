@@ -1,7 +1,6 @@
 {% extends "app.html" %}
 {% block title %}{{ d.name }} · Direkt{% endblock %}
 {% block nav_downloads %} active{% endblock %}
-{% block tab_downloads %} active{% endblock %}
 {% block content %}
 <p class="back"><a href="/#activity"><svg class="icon" aria-hidden="true"><use href="#i-back"/></svg><span>All downloads</span></a></p>
 <div id="detail" hx-get="/ui/downloads/{{ d.id }}/detail" hx-trigger="every 2s, downloads-changed from:body">

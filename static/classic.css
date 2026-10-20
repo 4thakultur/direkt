@@ -722,7 +722,7 @@ th { font-size: 0.7rem; color: var(--dim); font-weight: 600; letter-spacing: 0.1
    Parts of the shared markup only the Steve theme shows
    ------------------------------------------------------------------------- */
 
-.tabbar, .pane-intro, .panel-icon, .app-icon, .hero-backdrop { display: none; }
+.corner-btn, .logout-row, .pane-intro, .panel-icon, .app-icon, .hero-backdrop { display: none; }
 .page-title {
   position: absolute;
   width: 1px;

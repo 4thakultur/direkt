@@ -1,6 +1,6 @@
 /* Direkt, theme "Steve": after Apple's iOS, macOS and apple.com.
    Light and dark (follows the system), translucent bars, inset grouped
-   lists, pill buttons, a segmented control and a tab bar on phones.
+   lists, pill buttons and a Liquid Glass corner button on phones.
    No external assets: the system font (SF Pro on Apple devices), inline SVG
    icons. Shares its markup with the Classic theme. */
 
@@ -43,7 +43,6 @@
   --rounded: ui-rounded, "SF Pro Rounded", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
   --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
   --topbar-h: 52px;
-  --tabbar-h: 0px;
   --ease: cubic-bezier(0.25, 0.1, 0.25, 1);
   --spring: cubic-bezier(0.32, 0.72, 0, 1);
 }
@@ -188,7 +187,7 @@ p { margin: 0 0 0.5rem; }
 main {
   max-width: 1024px;
   margin: 0 auto;
-  padding: 1.75rem max(1.25rem, env(safe-area-inset-right)) calc(4rem + var(--tabbar-h) + env(safe-area-inset-bottom)) max(1.25rem, env(safe-area-inset-left));
+  padding: 1.75rem max(1.25rem, env(safe-area-inset-right)) calc(4rem + env(safe-area-inset-bottom)) max(1.25rem, env(safe-area-inset-left));
 }
 main.narrow { max-width: 420px; padding-top: 12vh; }
 
@@ -634,7 +633,7 @@ progress.bar:indeterminate::-moz-progress-bar { background: transparent; }
 .toasts {
   position: fixed;
   left: 50%;
-  bottom: calc(1.5rem + var(--tabbar-h) + env(safe-area-inset-bottom));
+  bottom: calc(1.5rem + env(safe-area-inset-bottom));
   z-index: 40;
   width: max-content;
   max-width: min(26rem, calc(100vw - 2rem));
@@ -970,64 +969,90 @@ td button { padding: 0.3rem 0.85rem; font-size: 0.82rem; }
 .swatch-steve .sw-lines { background: linear-gradient(90deg, #0071e3 60%, rgba(120, 120, 128, 0.25) 60%); border-radius: 3px; }
 
 /* ---------------------------------------------------------------------------
-   Tab bar (phones)
+   Phones: the top-right corner holds one round Liquid Glass button (iOS 26)
+   that switches between Downloads and Settings, in place of a tab bar. The
+   downloads page splits into two panes, New and Activity, that the user
+   swipes between; there is no segmented control.
    ------------------------------------------------------------------------- */
 
-.tabbar { display: none; }
-
-/* ---------------------------------------------------------------------------
-   Segmented control. On phones the downloads page splits into two panes,
-   New and Activity; app.js moves the thumb (.pager-ink) as the track
-   scrolls, so it follows the finger.
-   ------------------------------------------------------------------------- */
-
-.pager-tabs, .pager-hint { display: none; }
+.corner-btn, .logout-row, .pager-tabs, .pager-hint { display: none; }
 
 @media (max-width: 760px) {
-  :root { --topbar-h: 44px; --tabbar-h: 50px; }
+  :root { --topbar-h: 56px; }
 
   body { font-size: 16px; }
   .topbar-inner { gap: 1rem; }
   .nav { display: none; }
   .brand { font-size: 1rem; }
   .brand-mark { width: 26px; height: 26px; }
-  .logout .link { font-size: 1rem; }
+  .logout { display: none; }
+
+  /* Liquid Glass: a translucent, blurred lens with a bright rim on its top
+     edge and a soft fade at the bottom, floating on a faint shadow. A press
+     swells and brightens it, like the iOS 26 controls. */
+  .corner-btn {
+    --glass: rgba(255, 255, 255, 0.55);
+    --glass-press: rgba(255, 255, 255, 0.8);
+    --rim: rgba(255, 255, 255, 0.9);
+    --rim-low: rgba(255, 255, 255, 0.25);
+    --edge: rgba(0, 0, 0, 0.06);
+    position: relative;
+    margin-left: auto;
+    width: 40px;
+    height: 40px;
+    display: grid;
+    place-items: center;
+    border-radius: 50%;
+    color: var(--text);
+    background:
+      radial-gradient(120% 90% at 50% 0%, rgba(255, 255, 255, 0.35), transparent 60%),
+      var(--glass);
+    -webkit-backdrop-filter: blur(14px) saturate(190%);
+    backdrop-filter: blur(14px) saturate(190%);
+    box-shadow:
+      inset 0 1px 0.5px var(--rim),
+      inset 0 -1px 1px var(--rim-low),
+      inset 0 0 0 0.5px var(--edge),
+      0 4px 14px rgba(0, 0, 0, 0.12),
+      0 1px 2px rgba(0, 0, 0, 0.08);
+    transition: transform 0.45s var(--spring), background-color 0.2s var(--ease);
+  }
+  .corner-btn .icon { width: 21px; height: 21px; }
+  .corner-btn:hover { text-decoration: none; }
+  .corner-btn:active {
+    transform: scale(1.14);
+    background-color: var(--glass-press);
+    transition-duration: 0.18s;
+  }
+  @media (prefers-color-scheme: dark) {
+    .corner-btn {
+      --glass: rgba(120, 120, 128, 0.26);
+      --glass-press: rgba(120, 120, 128, 0.42);
+      --rim: rgba(255, 255, 255, 0.32);
+      --rim-low: rgba(255, 255, 255, 0.08);
+      --edge: rgba(255, 255, 255, 0.06);
+      background:
+        radial-gradient(120% 90% at 50% 0%, rgba(255, 255, 255, 0.12), transparent 60%),
+        var(--glass);
+    }
+  }
+
+  /* Log out moves to the end of Settings, like Sign Out on iOS. */
+  .logout-row { display: block; margin-top: 2rem; }
+  .logout-row button {
+    width: 100%;
+    padding: 0.85rem;
+    border-radius: var(--radius);
+    background: var(--surface);
+    color: var(--red);
+    font-size: 1.05rem;
+    font-weight: 400;
+    box-shadow: var(--shadow);
+  }
+  .logout-row button:hover { background: var(--surface-2); }
 
   main { padding-top: 0.5rem; }
   .page-title { margin: 0.35rem 0 0.9rem; font-size: 2.125rem; }
-
-  .tabbar {
-    position: fixed;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    z-index: 10;
-    display: flex;
-    justify-content: space-around;
-    height: calc(var(--tabbar-h) + env(safe-area-inset-bottom));
-    padding: 0 env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
-    background: var(--bar);
-    -webkit-backdrop-filter: saturate(180%) blur(20px);
-    backdrop-filter: saturate(180%) blur(20px);
-    box-shadow: 0 -1px 0 var(--separator);
-  }
-  .tab {
-    flex: 1;
-    max-width: 10rem;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: 2px;
-    color: var(--dim);
-    font-size: 0.66rem;
-    font-weight: 500;
-    letter-spacing: 0;
-  }
-  .tab .icon { width: 25px; height: 25px; }
-  .tab:hover { text-decoration: none; }
-  .tab.active { color: var(--accent); }
-  .tab:active .icon { transform: scale(0.9); }
 
   .network { grid-template-columns: 1fr; gap: 1.75rem; padding: 1rem 1.1rem 1.25rem; }
   .graph { height: 100px; }
@@ -1054,71 +1079,17 @@ td button { padding: 0.3rem 0.85rem; font-size: 0.82rem; }
 
   .toasts .flash { padding: 0.65rem 1.1rem; }
 
-  /* The pager fills the space between the title and the tab bar; each pane
-     scrolls on its own. */
+  /* The pager fills the space below the title; each pane scrolls on its
+     own. */
   main:has(.pager) {
     display: flex;
     flex-direction: column;
     height: calc(100vh - var(--topbar-h) - env(safe-area-inset-top));
     height: calc(100dvh - var(--topbar-h) - env(safe-area-inset-top));
-    padding: 0.5rem 0 calc(var(--tabbar-h) + env(safe-area-inset-bottom));
+    padding: 0.5rem 0 env(safe-area-inset-bottom);
   }
   main:has(.pager) .page-title { flex: none; padding: 0 1rem; }
   .pager { flex: 1; min-height: 0; display: flex; flex-direction: column; }
-  .pager-tabs {
-    position: relative;
-    flex: none;
-    display: flex;
-    margin: 0 1rem 0.25rem;
-    padding: 2px;
-    border-radius: var(--radius-sm);
-    background: var(--fill);
-  }
-  .pager-tab {
-    position: relative;
-    z-index: 1;
-    flex: 1;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 0.4rem;
-    height: 28px;
-    padding: 0;
-    border-radius: calc(var(--radius-sm) - 2px);
-    background: none;
-    color: var(--text);
-    font-size: 0.82rem;
-    font-weight: 500;
-  }
-  .pager-tab:hover { background: none; }
-  .pager-tab:active { transform: none; }
-  .pager-tab[aria-selected="true"] { font-weight: 600; }
-  .pager-ink {
-    position: absolute;
-    top: 2px;
-    left: 0;
-    width: 50%;
-    height: 28px;
-    border-radius: calc(var(--radius-sm) - 2px);
-    background: var(--thumb);
-    box-shadow: 0 3px 8px rgba(0, 0, 0, 0.12), 0 3px 1px rgba(0, 0, 0, 0.04), 0 0 0 0.5px rgba(0, 0, 0, 0.04);
-    will-change: transform, width;
-  }
-  .pager-count {
-    min-width: 1.15rem;
-    padding: 0 0.32rem;
-    border-radius: 999px;
-    background: var(--red-solid);
-    color: #fff;
-    font-family: var(--rounded);
-    font-size: 0.68rem;
-    font-weight: 600;
-    line-height: 1.15rem;
-    text-align: center;
-  }
-  .pager-count[hidden] { display: none; }
-  .pager-count.bump { animation: bump 0.4s var(--spring); }
-
   .pager-track {
     flex: 1;
     min-height: 0;
@@ -1203,11 +1174,10 @@ td button { padding: 0.3rem 0.85rem; font-size: 0.82rem; }
   0%, 100% { opacity: 0.4; transform: scale(0.96); }
   50% { opacity: 1; transform: none; }
 }
-@keyframes bump { 40% { transform: scale(1.3); } }
 @keyframes nudge { 50% { transform: rotate(180deg) translateX(-4px); } }
 
 @media (prefers-reduced-transparency: reduce) {
-  .topbar, .tabbar, .dialog, .toasts .flash {
+  .topbar, .dialog, .toasts .flash {
     background: var(--bar-solid);
     -webkit-backdrop-filter: none;
     backdrop-filter: none;

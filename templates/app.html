@@ -29,16 +29,13 @@
     <form method="post" action="/logout" class="inline logout">
       <button type="submit" class="link">Log out</button>
     </form>
+    {% block corner %}<a href="/settings" class="corner-btn" aria-label="Settings" title="Settings"><svg class="icon" aria-hidden="true"><use href="#i-gear"/></svg></a>{% endblock %}
   </div>
 </header>
 <main>
 {% block heading %}{% endblock %}
 {% block content %}{% endblock %}
 </main>
-<nav class="tabbar" aria-label="Sections">
-  <a href="/" class="tab{% block tab_downloads %}{% endblock %}"><svg class="icon" aria-hidden="true"><use href="#i-downloads"/></svg><span>Downloads</span></a>
-  <a href="/settings" class="tab{% block tab_settings %}{% endblock %}"><svg class="icon" aria-hidden="true"><use href="#i-gear"/></svg><span>Settings</span></a>
-</nav>
 <div id="flash" class="toasts" aria-live="polite"></div>
 <div id="modal"></div>
 {% endblock %}

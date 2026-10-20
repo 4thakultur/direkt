@@ -1,7 +1,7 @@
 {% extends "app.html" %}
 {% block title %}Settings · Direkt{% endblock %}
 {% block nav_settings %} active{% endblock %}
-{% block tab_settings %} active{% endblock %}
+{% block corner %}<a href="/" class="corner-btn" aria-label="Downloads" title="Downloads"><svg class="icon" aria-hidden="true"><use href="#i-logo"/></svg></a>{% endblock %}
 {% block heading %}<h1 class="page-title">Settings</h1>{% endblock %}
 {% block content %}
 {% if let Some(message) = message %}<p class="flash ok">{{ message }}</p>{% endif %}
@@ -291,4 +291,7 @@
     </form>
   </div>
 </details>
+<form method="post" action="/logout" class="logout-row">
+  <button type="submit">Log out</button>
+</form>
 {% endblock %}
