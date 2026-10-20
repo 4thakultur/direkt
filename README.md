@@ -8,7 +8,7 @@ A self-hostable direct download manager for homelabs, written in Rust.
 
 ## First run
 
-1. Start Direkt and open `http://<host>:8080`.
+1. Start Direkt and open `http://<host>:9877`.
 2. Enter the one-time setup token from `<data_dir>/setup-token` (the log
    shows the path) and create the administrator account.
 3. Paste a URL and download.

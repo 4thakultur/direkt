@@ -6,7 +6,7 @@
 
 [server]
 # Address and port the web UI and API listen on.
-listen = "0.0.0.0:8080"
+listen = "0.0.0.0:9877"
 # Send the login cookie only over HTTPS. Turn this on when Direkt is reached
 # through HTTPS (for example behind a TLS-terminating reverse proxy). Leave it
 # off for plain-HTTP access on your LAN, or logging in will not work.

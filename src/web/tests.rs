@@ -438,8 +438,8 @@ async fn cross_site_cookie_requests_are_rejected() {
     for headers in [
         vec![
             ("cookie", cookie.as_str()),
-            ("origin", "http://direkt.lan:8080"),
-            ("host", "direkt.lan:8080"),
+            ("origin", "http://direkt.lan:9877"),
+            ("host", "direkt.lan:9877"),
         ],
         vec![
             ("cookie", cookie.as_str()),

@@ -51,7 +51,7 @@ pub struct ServerConfig {
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
-            listen: SocketAddr::from(([0, 0, 0, 0], 8080)),
+            listen: SocketAddr::from(([0, 0, 0, 0], 9877)),
             secure_cookies: false,
         }
     }
@@ -237,7 +237,7 @@ mod tests {
     fn empty_file_gives_defaults() {
         let config = Config::parse("").unwrap();
         assert_eq!(config.downloads.max_concurrent, 3);
-        assert_eq!(config.server.listen.port(), 8080);
+        assert_eq!(config.server.listen.port(), 9877);
     }
 
     #[test]

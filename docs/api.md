@@ -64,5 +64,5 @@ tokens.
 TOKEN=dkt_...
 curl -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
      -d '{"url": "https://example.com/file.iso"}' \
-     http://direkt.lan:8080/api/v1/downloads
+     http://direkt.lan:9877/api/v1/downloads
 ```
