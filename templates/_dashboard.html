@@ -1,4 +1,5 @@
 {% if let Some(error) = error %}<p class="flash error">{{ error }}</p>{% endif %}
+<span class="dash-count" data-count="{{ downloading.len() + queued }}" hidden></span>
 <section class="network" aria-label="Download speed">
   <div class="graph">
     <svg viewBox="0 0 299 100" preserveAspectRatio="none" role="img" aria-label="Download speed over the last 5 minutes, currently {{ stats.current }}">

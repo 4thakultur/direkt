@@ -25,6 +25,7 @@ use uuid::Uuid;
 
 const HTMX_JS: &str = include_str!("../../static/htmx-2.0.4.min.js");
 const APP_CSS: &str = include_str!("../../static/app.css");
+const APP_JS: &str = include_str!("../../static/app.js");
 /// Most downloads shown in the queue sections (everything not finished).
 const QUEUE_LIMIT: i64 = 500;
 /// Most finished downloads shown per history section.
@@ -36,6 +37,7 @@ pub fn public_routes() -> Router<AppState> {
         .route("/setup", get(setup_page).post(setup_submit))
         .route("/static/htmx-2.0.4.min.js", get(htmx_js))
         .route("/static/app.css", get(app_css))
+        .route("/static/app.js", get(app_js))
 }
 
 pub fn protected_routes() -> Router<AppState> {
@@ -366,6 +368,16 @@ async fn app_css() -> impl IntoResponse {
             (header::CACHE_CONTROL, "no-cache"),
         ],
         APP_CSS,
+    )
+}
+
+async fn app_js() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "text/javascript; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        APP_JS,
     )
 }
 

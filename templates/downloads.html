@@ -2,8 +2,22 @@
 {% block title %}Downloads · Direkt{% endblock %}
 {% block nav_downloads %} active{% endblock %}
 {% block content %}
-{{ submit|safe }}
-<div id="dashboard" hx-get="/ui/dashboard" hx-trigger="every 2s, downloads-changed from:body">
-{{ dash|safe }}
+<div class="pager" data-pager>
+  <div class="pager-tabs" role="tablist" aria-label="Downloads page">
+    <button type="button" class="pager-tab" role="tab" data-pane="0" aria-selected="true">New</button>
+    <button type="button" class="pager-tab" role="tab" data-pane="1" aria-selected="false">Activity<span class="pager-count" data-pager-count hidden></span></button>
+    <span class="pager-ink" aria-hidden="true"></span>
+  </div>
+  <div class="pager-track" data-pager-track>
+    <section class="pane pane-new" aria-label="New download">
+      {{ submit|safe }}
+      <button type="button" class="pager-hint" data-pane="1">Swipe for activity<svg class="icon" aria-hidden="true"><use href="#i-back"/></svg></button>
+    </section>
+    <section class="pane pane-activity" aria-label="Activity">
+      <div id="dashboard" hx-get="/ui/dashboard" hx-trigger="every 2s, downloads-changed from:body">
+      {{ dash|safe }}
+      </div>
+    </section>
+  </div>
 </div>
 {% endblock %}

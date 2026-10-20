@@ -287,6 +287,9 @@ async fn static_assets() {
     assert!(js.header("cache-control").contains("immutable"));
     let css = app.get("/static/app.css", &[]).await;
     assert!(css.header("content-type").starts_with("text/css"));
+    let app_js = app.get("/static/app.js", &[]).await;
+    assert_eq!(app_js.status, StatusCode::OK);
+    assert!(app_js.header("content-type").starts_with("text/javascript"));
 }
 
 #[tokio::test]
