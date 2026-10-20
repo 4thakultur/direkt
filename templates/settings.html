@@ -257,6 +257,103 @@
     </form>
   </div>
 </details>
+<details class="panel" id="two-factor"{% if open == "two-factor" || two_factor.enrollment.is_some() %} open{% endif %}>
+  <summary>
+    <span class="panel-icon tint-red" aria-hidden="true"><svg class="icon"><use href="#i-shield"/></svg></span>
+    <span class="panel-title">
+      <span class="panel-name">Two-factor authentication</span>
+      <span class="panel-desc">A code from an authenticator app at every new sign-in</span>
+    </span>
+    {% if two_factor.enabled %}<span class="pill{% if two_factor.recovery_codes_left > 0 %} ok{% else %} warn{% endif %}">On</span>
+    {% else if two_factor.enrollment.is_some() %}<span class="pill warn">Setting up</span>
+    {% else %}<span class="pill">Off</span>{% endif %}
+    <svg class="icon chevron" aria-hidden="true"><use href="#i-chevron"/></svg>
+  </summary>
+  <div class="panel-body stack">
+    {% if !recovery_codes.is_empty() %}
+    <h3>Recovery codes</h3>
+    <p>
+      Save these somewhere safe, such as a password manager. Each one signs
+      you in once if you lose your phone. They will not be shown again.
+    </p>
+    <ol class="secret recovery-codes">
+      {% for code in recovery_codes %}<li><code>{{ code }}</code></li>{% endfor %}
+    </ol>
+    {% endif %}
+
+    {% if two_factor.enabled %}
+    <p class="muted">
+      Signing in from a new browser needs your password and a code from your
+      authenticator app. Sessions that are already signed in are not asked
+      again. API tokens are not affected.
+    </p>
+    <p>
+      {% if two_factor.recovery_codes_left == 0 %}<span class="note">No recovery codes left.</span> Make new ones below.
+      {% else %}{{ two_factor.recovery_codes_left }} unused recovery code{% if two_factor.recovery_codes_left != 1 %}s{% endif %} left.{% endif %}
+    </p>
+
+    <h3>New recovery codes</h3>
+    <form method="post" action="/settings/two-factor/recovery-codes" class="submit">
+      <input name="password" type="password" autocomplete="current-password" required
+             placeholder="Password" aria-label="Password">
+      <button type="submit">Make new codes</button>
+    </form>
+
+    <h3>Turn off</h3>
+    <form method="post" action="/settings/two-factor/disable" class="stack">
+      <label>Password
+        <input name="password" type="password" autocomplete="current-password" required>
+      </label>
+      <label>Code from the app, or a recovery code
+        <input name="code" autocomplete="one-time-code" maxlength="32" required spellcheck="false" autocapitalize="off" class="code-input">
+      </label>
+      <button type="submit" class="danger">Turn off two-factor authentication</button>
+    </form>
+
+    {% else if let Some(e) = two_factor.enrollment %}
+    <ol class="steps">
+      <li>Open an authenticator app on your phone, such as Google Authenticator or Microsoft Authenticator, and add an account.</li>
+      <li>Scan this QR code. On the phone itself, <a href="{{ e.uri }}">open the setup link</a> instead.</li>
+    </ol>
+    {% if e.qr_size > 0 %}
+    <svg class="qr" viewBox="0 0 {{ e.qr_size }} {{ e.qr_size }}" role="img" aria-label="QR code for your authenticator app" shape-rendering="crispEdges">
+      <rect width="{{ e.qr_size }}" height="{{ e.qr_size }}" fill="#fff"/>
+      <path d="{{ e.qr_path }}" fill="#000"/>
+    </svg>
+    {% endif %}
+    <p class="muted small">Can't scan it? Choose to enter a setup key, and type this time-based key:</p>
+    <div class="secret"><code class="totp-key">{{ e.secret }}</code></div>
+    <form method="post" action="/settings/two-factor/enable" class="stack">
+      <label>Enter the 6-digit code the app shows
+        <input name="code" inputmode="numeric" pattern="[0-9 ]{6,7}" maxlength="7" autocomplete="one-time-code" required autofocus class="code-input">
+      </label>
+      <div class="actions">
+        <button type="submit" class="primary">Turn on</button>
+        <button type="submit" form="two-factor-cancel">Cancel</button>
+      </div>
+    </form>
+    <form method="post" action="/settings/two-factor/cancel" id="two-factor-cancel" hidden></form>
+
+    {% else %}
+    <p class="muted">
+      Protect the administrator account with a second step: after your
+      password, a new sign-in also asks for a 6-digit code from an
+      authenticator app on your phone, such as Google Authenticator, Microsoft
+      Authenticator, Aegis or 1Password. Browsers that are already signed in
+      are not asked.
+    </p>
+    <form method="post" action="/settings/two-factor/setup" class="submit">
+      <input name="password" type="password" autocomplete="current-password" required
+             placeholder="Password" aria-label="Password">
+      <button type="submit" class="primary">Set up</button>
+    </form>
+    {% endif %}
+    <p class="muted small">
+      Lost your phone and your recovery codes? Run <code>direkt reset-2fa</code>
+      on the server to turn two-factor authentication off.
+    </p>
+  </div>
+</details>
 <details class="panel" id="appearance"{% if open == "appearance" %} open{% endif %}>
   <summary>
     <span class="panel-icon tint-indigo" aria-hidden="true"><svg class="icon"><use href="#i-appearance"/></svg></span>

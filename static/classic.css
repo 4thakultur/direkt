@@ -653,6 +653,25 @@ th { font-size: 0.7rem; color: var(--dim); font-weight: 600; letter-spacing: 0.1
   user-select: all;
 }
 
+/* Two-factor setup: the QR code stays black on white for scanners. */
+.qr {
+  display: block;
+  width: 200px;
+  max-width: 100%;
+  height: auto;
+  border-radius: var(--radius);
+}
+.steps { margin: 0; padding-left: 1.25rem; display: grid; gap: 0.35rem; }
+.recovery-codes {
+  margin: 0;
+  padding: 0.75rem 1rem;
+  list-style: none;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(9rem, 1fr));
+  gap: 0.35rem 1rem;
+}
+.code-input { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; letter-spacing: 0.12em; }
+
 .brand-large {
   text-align: center;
   margin: 0 0 1.5rem;

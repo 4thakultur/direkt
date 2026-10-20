@@ -8,7 +8,7 @@ mod ui;
 
 pub use error::{ApiError, ErrorBody};
 
-use crate::auth::{AuthService, SESSION_TTL, Session};
+use crate::auth::{AuthService, PENDING_LOGIN_TTL, SESSION_TTL, Session};
 use crate::error::{AppError, ErrorKind};
 use crate::media::ArtworkService;
 use crate::service::DownloadService;
@@ -24,6 +24,9 @@ use serde_json::json;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 pub const SESSION_COOKIE: &str = "direkt_session";
+/// Holds a sign-in that passed the password check and waits for its
+/// two-factor code. Only sent to the sign-in pages.
+pub const PENDING_LOGIN_COOKIE: &str = "direkt_2fa";
 
 #[derive(Clone)]
 pub struct AppState {
@@ -173,6 +176,23 @@ pub(crate) fn session_cookie(session: &Session, secure: bool) -> HeaderValue {
 pub(crate) fn clear_session_cookie(secure: bool) -> HeaderValue {
     let cookie = format!(
         "{SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0{}",
+        if secure { "; Secure" } else { "" }
+    );
+    HeaderValue::from_str(&cookie).expect("static cookie")
+}
+
+pub(crate) fn pending_login_cookie(token: &str, secure: bool) -> HeaderValue {
+    let cookie = format!(
+        "{PENDING_LOGIN_COOKIE}={token}; Path=/login; HttpOnly; SameSite=Strict; Max-Age={}{}",
+        PENDING_LOGIN_TTL.as_secs(),
+        if secure { "; Secure" } else { "" }
+    );
+    HeaderValue::from_str(&cookie).expect("pending login token is hex")
+}
+
+pub(crate) fn clear_pending_login_cookie(secure: bool) -> HeaderValue {
+    let cookie = format!(
+        "{PENDING_LOGIN_COOKIE}=; Path=/login; HttpOnly; SameSite=Strict; Max-Age=0{}",
         if secure { "; Secure" } else { "" }
     );
     HeaderValue::from_str(&cookie).expect("static cookie")

@@ -14,7 +14,12 @@ A self-hostable direct download manager for homelabs, written in Rust.
    shows the path) and create the administrator account.
 3. Paste a URL and download.
 
-Forgot the password? Run `direkt reset-admin` and set up again. See
+To require a code from an authenticator app (Google Authenticator,
+Microsoft Authenticator, …) at sign-in, turn on two-factor authentication
+under Settings.
+
+Forgot the password? Run `direkt reset-admin` and set up again. Lost the
+authenticator app and its recovery codes? Run `direkt reset-2fa`. See
 [`docs/security.md`](docs/security.md).
 
 ## Development

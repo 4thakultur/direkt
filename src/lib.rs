@@ -15,4 +15,5 @@ pub mod providers;
 pub mod service;
 pub mod settings;
 pub mod store;
+pub mod totp;
 pub mod web;

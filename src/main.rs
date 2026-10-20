@@ -13,17 +13,20 @@ use direkt::web::{self, AppState};
 use std::path::Path;
 use tracing_subscriber::EnvFilter;
 
-const USAGE: &str = "usage: direkt [serve | reset-admin]
+const USAGE: &str = "usage: direkt [serve | reset-admin | reset-2fa]
 
   serve        run the server (default)
   reset-admin  delete the administrator account, all sessions, and all API
                tokens; the next start offers first-run setup again
+  reset-2fa    turn off two-factor authentication, for a lost authenticator
+               app; the account, sessions and API tokens stay
 
 Configuration is read from $DIREKT_CONFIG (default ./direkt.toml).";
 
 enum Command {
     Serve,
     ResetAdmin,
+    ResetTwoFactor,
 }
 
 #[tokio::main]
@@ -37,6 +40,7 @@ async fn main() -> anyhow::Result<()> {
     {
         [] | ["serve"] => Command::Serve,
         ["reset-admin"] => Command::ResetAdmin,
+        ["reset-2fa"] => Command::ResetTwoFactor,
         ["-h" | "--help" | "help"] => {
             println!("{USAGE}");
             return Ok(());
@@ -60,6 +64,7 @@ async fn main() -> anyhow::Result<()> {
     match command {
         Command::Serve => serve(config, &config_path).await,
         Command::ResetAdmin => reset_admin(&config).await,
+        Command::ResetTwoFactor => reset_two_factor(&config).await,
     }
 }
 
@@ -87,6 +92,25 @@ async fn reset_admin(config: &Config) -> anyhow::Result<()> {
         "Administrator account, sessions, and API tokens removed. \
          Restart Direkt and open the web UI to run setup again."
     );
+    Ok(())
+}
+
+async fn reset_two_factor(config: &Config) -> anyhow::Result<()> {
+    let store = open_store(config).await?;
+    let was_on = store
+        .disable_two_factor()
+        .await
+        .map_err(|e| anyhow::anyhow!("turning off two-factor authentication: {e}"))?;
+    store.close().await;
+    if was_on {
+        tracing::warn!("two-factor authentication turned off from the command line");
+        println!(
+            "Two-factor authentication is off. Sign in with the password, then \
+             set it up again under Settings."
+        );
+    } else {
+        println!("Two-factor authentication was already off.");
+    }
     Ok(())
 }
 

@@ -1,5 +1,10 @@
-//! Authentication: one administrator account, browser sessions, and
-//! revocable API tokens.
+//! Authentication: one administrator account, browser sessions, optional
+//! two-factor sign-in with an authenticator app, and revocable API tokens.
+//!
+//! Two-factor sign-in: with it on, a correct password does not start a
+//! session. It starts a short-lived pending sign-in, which a code from the
+//! authenticator app (or a single-use recovery code) completes. API tokens
+//! are not affected: they are created from a signed-in session.
 //!
 //! First-run setup: while no administrator exists, a random one-time setup
 //! token is written to `<data_dir>/setup-token` (mode 0600). Creating the
@@ -9,6 +14,7 @@
 
 use crate::error::{AppError, AppResult, ErrorKind};
 use crate::store::{AdminAccount, ApiToken, Store};
+use crate::totp;
 use argon2::Argon2;
 use argon2::password_hash::phc::PasswordHash;
 use argon2::password_hash::{PasswordHasher, PasswordVerifier};
@@ -34,6 +40,21 @@ const LOGIN_MAX_ATTEMPTS: u32 = 5;
 const LOGIN_WINDOW: Duration = Duration::from_secs(15 * 60);
 const LIMITER_MAX_ENTRIES: usize = 10_000;
 
+/// How long a password-checked sign-in waits for its two-factor code.
+pub const PENDING_LOGIN_TTL: Duration = Duration::from_secs(5 * 60);
+/// Codes tried against one pending sign-in before it is dropped.
+const PENDING_LOGIN_MAX_ATTEMPTS: u32 = 5;
+const PENDING_LOGINS_MAX: usize = 64;
+/// Wrong two-factor codes allowed from all clients together per window, so
+/// someone who has the password cannot spread guesses over many addresses.
+const CODE_GLOBAL_MAX_ATTEMPTS: u32 = 20;
+/// How long a started authenticator setup stays valid.
+const ENROLLMENT_TTL: Duration = Duration::from_secs(15 * 60);
+const RECOVERY_CODES: usize = 10;
+/// Base32 characters per recovery code (48 random bits).
+const RECOVERY_CODE_CHARS: usize = 10;
+const TOTP_ISSUER: &str = "Direkt";
+
 #[derive(Clone)]
 pub struct AuthService {
     inner: Arc<Inner>,
@@ -47,6 +68,53 @@ struct Inner {
     /// Hash verified when the username is wrong, so timing does not reveal it.
     dummy_hash: String,
     limiter: LoginLimiter,
+    /// Wrong two-factor codes from every client together.
+    code_limiter: LoginLimiter,
+    /// Sign-ins waiting for a two-factor code, by token hash.
+    pending_logins: Mutex<HashMap<String, PendingLogin>>,
+    /// An authenticator setup waiting for its first code.
+    enrollment: Mutex<Option<(String, Instant)>>,
+}
+
+struct PendingLogin {
+    started: Instant,
+    attempts: u32,
+}
+
+/// The result of a correct username and password.
+#[derive(Debug)]
+pub enum LoginOutcome {
+    Session(Session),
+    /// Two-factor authentication is on: complete the sign-in with
+    /// [`AuthService::complete_login`] and this token.
+    CodeRequired(String),
+}
+
+impl LoginOutcome {
+    #[cfg(test)]
+    pub(crate) fn expect_session(self) -> Session {
+        match self {
+            Self::Session(session) => session,
+            Self::CodeRequired(_) => panic!("a two-factor code is required"),
+        }
+    }
+}
+
+/// Two-factor authentication as the settings page shows it.
+#[derive(Debug, Clone, Default)]
+pub struct TwoFactorStatus {
+    pub enabled: bool,
+    pub recovery_codes_left: u32,
+    /// A started setup, waiting for the first code.
+    pub enrollment: Option<Enrollment>,
+}
+
+/// What the authenticator app needs: the QR code's link, and the secret for
+/// typing in by hand.
+#[derive(Debug, Clone)]
+pub struct Enrollment {
+    pub secret: String,
+    pub uri: String,
 }
 
 /// A newly issued browser session.
@@ -68,6 +136,9 @@ impl AuthService {
                 setup_token_hash: Mutex::new(None),
                 dummy_hash,
                 limiter: LoginLimiter::default(),
+                code_limiter: LoginLimiter::new(CODE_GLOBAL_MAX_ATTEMPTS),
+                pending_logins: Mutex::new(HashMap::new()),
+                enrollment: Mutex::new(None),
             }),
         };
         if service.needs_setup().await? {
@@ -131,7 +202,7 @@ impl AuthService {
         client: IpAddr,
         username: &str,
         password: &str,
-    ) -> AppResult<Session> {
+    ) -> AppResult<LoginOutcome> {
         // Counted before verifying, so parallel guesses cannot all slip in
         // before the first failure is recorded.
         self.inner.limiter.attempt(client)?;
@@ -150,10 +221,291 @@ impl AuthService {
             tracing::warn!(%client, "failed login attempt");
             return Err(invalid_credentials());
         }
+        if self.inner.store.totp_secret().await?.is_some() {
+            // The attempt budget stays spent until the code is right too, so
+            // a known password does not buy fresh code guesses.
+            tracing::info!(%client, "password accepted; waiting for two-factor code");
+            return Ok(LoginOutcome::CodeRequired(self.start_pending_login()?));
+        }
         self.inner.limiter.succeeded(client);
         let _ = self.inner.store.prune_sessions(Utc::now()).await;
         tracing::info!(%client, "administrator logged in");
+        Ok(LoginOutcome::Session(self.new_session().await?))
+    }
+
+    /// Whether a pending sign-in can still be completed.
+    pub fn login_pending(&self, pending_token: &str) -> bool {
+        self.pending()
+            .get(&sha256_hex(pending_token))
+            .is_some_and(|p| p.started.elapsed() < PENDING_LOGIN_TTL)
+    }
+
+    /// Complete a sign-in with an authenticator or recovery code.
+    pub async fn complete_login(
+        &self,
+        client: IpAddr,
+        pending_token: &str,
+        code: &str,
+    ) -> AppResult<Session> {
+        self.inner.limiter.attempt(client)?;
+        let key = sha256_hex(pending_token);
+        {
+            let mut pending = self.pending();
+            let Some(login) = pending.get_mut(&key) else {
+                return Err(login_expired());
+            };
+            if login.started.elapsed() >= PENDING_LOGIN_TTL
+                || login.attempts >= PENDING_LOGIN_MAX_ATTEMPTS
+            {
+                pending.remove(&key);
+                return Err(login_expired());
+            }
+            login.attempts += 1;
+        }
+        self.inner.code_limiter.attempt(GLOBAL)?;
+        let Some(secret) = self.inner.store.totp_secret().await? else {
+            // Turned off meanwhile; start over rather than skip the check.
+            self.pending().remove(&key);
+            return Err(login_expired());
+        };
+        if !self.check_code(&secret, code).await? {
+            tracing::warn!(%client, "wrong two-factor code");
+            let mut pending = self.pending();
+            if pending
+                .get(&key)
+                .is_some_and(|l| l.attempts >= PENDING_LOGIN_MAX_ATTEMPTS)
+            {
+                pending.remove(&key);
+                return Err(AppError::unauthorized("too many wrong codes; log in again"));
+            }
+            return Err(AppError::unauthorized("invalid code"));
+        }
+        self.pending().remove(&key);
+        self.inner.limiter.succeeded(client);
+        self.inner.code_limiter.succeeded(GLOBAL);
+        let _ = self.inner.store.prune_sessions(Utc::now()).await;
+        tracing::info!(%client, "administrator logged in with two-factor code");
         self.new_session().await
+    }
+
+    pub async fn two_factor_status(&self) -> AppResult<TwoFactorStatus> {
+        let enabled = self.inner.store.totp_secret().await?.is_some();
+        Ok(TwoFactorStatus {
+            enabled,
+            recovery_codes_left: if enabled {
+                self.inner.store.recovery_codes_left().await?
+            } else {
+                0
+            },
+            enrollment: if enabled {
+                None
+            } else {
+                self.enrollment().await?
+            },
+        })
+    }
+
+    /// Start setting up an authenticator app: check the password and make a
+    /// new secret. Nothing changes until [`Self::finish_two_factor_setup`].
+    pub async fn start_two_factor_setup(
+        &self,
+        client: IpAddr,
+        password: &str,
+    ) -> AppResult<Enrollment> {
+        self.confirm_password(client, password).await?;
+        if self.inner.store.totp_secret().await?.is_some() {
+            return Err(AppError::conflict(
+                "two-factor authentication is already on",
+            ));
+        }
+        *self.enrollment_slot() = Some((totp::generate_secret(), Instant::now()));
+        self.enrollment()
+            .await?
+            .ok_or_else(|| AppError::internal("two-factor setup was lost"))
+    }
+
+    pub fn cancel_two_factor_setup(&self) {
+        *self.enrollment_slot() = None;
+    }
+
+    /// Turn on two-factor authentication once the app shows a matching code.
+    /// Every session but `current_session` ends, so anyone else signed in
+    /// must sign in again with a code. Returns the recovery codes, shown once.
+    pub async fn finish_two_factor_setup(
+        &self,
+        client: IpAddr,
+        code: &str,
+        current_session: &str,
+    ) -> AppResult<Vec<String>> {
+        self.inner.limiter.attempt(client)?;
+        let secret = match &*self.enrollment_slot() {
+            Some((secret, started)) if started.elapsed() < ENROLLMENT_TTL => secret.clone(),
+            _ => {
+                return Err(AppError::conflict(
+                    "the setup expired; start again with your password",
+                ));
+            }
+        };
+        let key = totp::decode_base32(&secret).expect("generated secret is base32");
+        let Some(step) = totp::verify(&key, code, Utc::now().timestamp()) else {
+            return Err(AppError::invalid(
+                "the code doesn't match; check that the phone's clock is set automatically",
+            ));
+        };
+        self.inner.limiter.succeeded(client);
+        let (codes, hashes) = new_recovery_codes();
+        self.inner
+            .store
+            .enable_two_factor(&secret, step, &hashes, Utc::now())
+            .await?;
+        self.cancel_two_factor_setup();
+        self.pending().clear();
+        self.inner
+            .store
+            .delete_other_sessions(&sha256_hex(current_session))
+            .await?;
+        tracing::info!("two-factor authentication turned on; other sessions ended");
+        Ok(codes)
+    }
+
+    /// Turn off two-factor authentication. Needs the password and a code.
+    pub async fn disable_two_factor(
+        &self,
+        client: IpAddr,
+        password: &str,
+        code: &str,
+    ) -> AppResult<()> {
+        self.confirm_password(client, password).await?;
+        let Some(secret) = self.inner.store.totp_secret().await? else {
+            return Err(AppError::conflict("two-factor authentication is off"));
+        };
+        self.inner.limiter.attempt(client)?;
+        if !self.check_code(&secret, code).await? {
+            return Err(AppError::invalid("invalid code"));
+        }
+        self.inner.limiter.succeeded(client);
+        self.inner.store.disable_two_factor().await?;
+        self.pending().clear();
+        tracing::info!("two-factor authentication turned off");
+        Ok(())
+    }
+
+    /// Replace the recovery codes. Needs the password.
+    pub async fn new_recovery_codes(
+        &self,
+        client: IpAddr,
+        password: &str,
+    ) -> AppResult<Vec<String>> {
+        self.confirm_password(client, password).await?;
+        if self.inner.store.totp_secret().await?.is_none() {
+            return Err(AppError::conflict("two-factor authentication is off"));
+        }
+        let (codes, hashes) = new_recovery_codes();
+        self.inner
+            .store
+            .set_recovery_codes(&hashes, Utc::now())
+            .await?;
+        tracing::info!("recovery codes replaced");
+        Ok(codes)
+    }
+
+    /// Check an authenticator code (each usable once) or a recovery code
+    /// (used up).
+    async fn check_code(&self, secret: &str, code: &str) -> AppResult<bool> {
+        if totp::looks_like_code(code) {
+            let key = totp::decode_base32(secret)
+                .ok_or_else(|| AppError::internal("stored two-factor secret is invalid"))?;
+            return match totp::verify(&key, code, Utc::now().timestamp()) {
+                Some(step) if self.inner.store.use_totp_step(step).await? => Ok(true),
+                Some(_) => Err(AppError::unauthorized(
+                    "this code was already used; wait for the next one",
+                )),
+                None => Ok(false),
+            };
+        }
+        let normalized = normalize_recovery_code(code);
+        if normalized.len() != RECOVERY_CODE_CHARS {
+            return Ok(false);
+        }
+        let used = self
+            .inner
+            .store
+            .use_recovery_code(&sha256_hex(&normalized))
+            .await?;
+        if used {
+            tracing::warn!("recovery code used");
+        }
+        Ok(used)
+    }
+
+    /// Check the administrator password, counting the attempt.
+    async fn confirm_password(&self, client: IpAddr, password: &str) -> AppResult<()> {
+        self.inner.limiter.attempt(client)?;
+        let admin = self
+            .inner
+            .store
+            .admin()
+            .await?
+            .ok_or_else(|| AppError::conflict("no administrator account exists"))?;
+        if password.len() > MAX_PASSWORD_BYTES
+            || !verify_password(password.to_owned(), admin.password_hash).await?
+        {
+            return Err(AppError::invalid("password is incorrect"));
+        }
+        self.inner.limiter.succeeded(client);
+        Ok(())
+    }
+
+    async fn enrollment(&self) -> AppResult<Option<Enrollment>> {
+        let secret = match &*self.enrollment_slot() {
+            Some((secret, started)) if started.elapsed() < ENROLLMENT_TTL => secret.clone(),
+            _ => return Ok(None),
+        };
+        let account = self
+            .inner
+            .store
+            .admin()
+            .await?
+            .map(|a| a.username)
+            .unwrap_or_default();
+        Ok(Some(Enrollment {
+            uri: totp::otpauth_uri(&secret, TOTP_ISSUER, &account),
+            secret,
+        }))
+    }
+
+    fn start_pending_login(&self) -> AppResult<String> {
+        let mut pending = self.pending();
+        pending.retain(|_, p| p.started.elapsed() < PENDING_LOGIN_TTL);
+        if pending.len() >= PENDING_LOGINS_MAX {
+            return Err(AppError::new(
+                ErrorKind::RateLimited,
+                "too many sign-ins in progress; try again later",
+            ));
+        }
+        let token = random_hex(32);
+        pending.insert(
+            sha256_hex(&token),
+            PendingLogin {
+                started: Instant::now(),
+                attempts: 0,
+            },
+        );
+        Ok(token)
+    }
+
+    fn pending(&self) -> std::sync::MutexGuard<'_, HashMap<String, PendingLogin>> {
+        self.inner
+            .pending_logins
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn enrollment_slot(&self) -> std::sync::MutexGuard<'_, Option<(String, Instant)>> {
+        self.inner
+            .enrollment
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
     }
 
     pub async fn logout(&self, session_token: &str) -> AppResult<()> {
@@ -197,6 +549,7 @@ impl AuthService {
             .update_admin_password(&hash, Utc::now())
             .await?;
         self.inner.store.delete_all_sessions().await?;
+        self.pending().clear();
         tracing::info!("administrator password changed; all sessions ended");
         self.new_session().await
     }
@@ -297,6 +650,35 @@ impl AuthService {
 
 fn invalid_credentials() -> AppError {
     AppError::unauthorized("invalid username or password")
+}
+
+fn login_expired() -> AppError {
+    AppError::unauthorized("the sign-in expired; log in again")
+}
+
+/// The key the global code limiter counts every client under.
+const GLOBAL: IpAddr = IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED);
+
+/// New recovery codes, formatted for display, with their hashes for storage.
+fn new_recovery_codes() -> (Vec<String>, Vec<String>) {
+    (0..RECOVERY_CODES)
+        .map(|_| {
+            let mut bytes = [0u8; RECOVERY_CODE_CHARS * 5 / 8];
+            getrandom::fill(&mut bytes).expect("operating system RNG is unavailable");
+            let code = totp::encode_base32(&bytes).to_ascii_lowercase();
+            let hash = sha256_hex(&code);
+            let (a, b) = code.split_at(RECOVERY_CODE_CHARS / 2);
+            (format!("{a}-{b}"), hash)
+        })
+        .unzip()
+}
+
+/// Lowercase, without the hyphen or spaces people may type.
+fn normalize_recovery_code(code: &str) -> String {
+    code.chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .map(|c| c.to_ascii_lowercase())
+        .collect()
 }
 
 fn validate_username(username: &str) -> AppResult<&str> {
@@ -415,12 +797,25 @@ fn write_secret_file(path: &Path, contents: &str) -> std::io::Result<()> {
 /// Behind a reverse proxy every client shares the proxy's address, so the
 /// limit then applies to all clients together. That still bounds
 /// brute-forcing, at the cost of locking out the real user during an attack.
-#[derive(Default)]
 struct LoginLimiter {
+    max_attempts: u32,
     entries: Mutex<HashMap<IpAddr, (u32, Instant)>>,
 }
 
+impl Default for LoginLimiter {
+    fn default() -> Self {
+        Self::new(LOGIN_MAX_ATTEMPTS)
+    }
+}
+
 impl LoginLimiter {
+    fn new(max_attempts: u32) -> Self {
+        Self {
+            max_attempts,
+            entries: Mutex::default(),
+        }
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<IpAddr, (u32, Instant)>> {
         self.entries.lock().unwrap_or_else(|e| e.into_inner())
     }
@@ -442,7 +837,7 @@ impl LoginLimiter {
         if entry.1.elapsed() >= LOGIN_WINDOW {
             *entry = (0, Instant::now());
         }
-        if entry.0 >= LOGIN_MAX_ATTEMPTS {
+        if entry.0 >= self.max_attempts {
             let wait = LOGIN_WINDOW.saturating_sub(entry.1.elapsed());
             return Err(AppError::new(
                 ErrorKind::RateLimited,
@@ -549,7 +944,8 @@ mod tests {
         let s1 = auth
             .login(IP, "admin", "correct horse battery")
             .await
-            .unwrap();
+            .unwrap()
+            .expect_session();
         assert!(auth.session_valid(&s1.token).await.unwrap());
         auth.logout(&s1.token).await.unwrap();
         assert!(!auth.session_valid(&s1.token).await.unwrap());
@@ -557,7 +953,8 @@ mod tests {
         let s2 = auth
             .login(IP, "admin", "correct horse battery")
             .await
-            .unwrap();
+            .unwrap()
+            .expect_session();
         let err = auth
             .change_password(IP, "wrong", "another long password")
             .await
@@ -659,6 +1056,254 @@ mod tests {
         // Known clients keep working.
         full.attempt(IpAddr::V4(std::net::Ipv4Addr::from(0)))
             .unwrap();
+    }
+
+    /// The authenticator app's code, `offset` steps from now.
+    fn app_code(secret: &str, offset: i64) -> String {
+        let key = totp::decode_base32(secret).unwrap();
+        totp::code_at(&key, totp::step_at(Utc::now().timestamp()) + offset)
+    }
+
+    /// An administrator with two-factor authentication on. Returns the
+    /// secret and the recovery codes.
+    async fn with_two_factor(auth: &AuthService) -> (String, Vec<String>) {
+        let token = auth.read_setup_token();
+        let session = auth
+            .setup(IP, &token, "admin", "correct horse battery")
+            .await
+            .unwrap();
+        let secret = auth
+            .start_two_factor_setup(IP, "correct horse battery")
+            .await
+            .unwrap()
+            .secret;
+        let codes = auth
+            .finish_two_factor_setup(IP, &app_code(&secret, 0), &session.token)
+            .await
+            .unwrap();
+        (secret, codes)
+    }
+
+    fn pending(outcome: LoginOutcome) -> String {
+        match outcome {
+            LoginOutcome::CodeRequired(token) => token,
+            LoginOutcome::Session(_) => panic!("signed in without a code"),
+        }
+    }
+
+    #[tokio::test]
+    async fn two_factor_setup_needs_the_password_and_a_matching_code() {
+        let (auth, _dir) = service().await;
+        let token = auth.read_setup_token();
+        let current = auth
+            .setup(IP, &token, "admin", "correct horse battery")
+            .await
+            .unwrap();
+        let other = auth
+            .login(IP, "admin", "correct horse battery")
+            .await
+            .unwrap()
+            .expect_session();
+
+        let err = auth
+            .start_two_factor_setup(IP, "wrong password!")
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind, ErrorKind::InvalidRequest);
+        let err = auth
+            .finish_two_factor_setup(IP, "123456", &current.token)
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Conflict, "not started");
+
+        let enrollment = auth
+            .start_two_factor_setup(IP, "correct horse battery")
+            .await
+            .unwrap();
+        assert!(
+            enrollment
+                .uri
+                .starts_with("otpauth://totp/Direkt:admin?secret=")
+        );
+        let status = auth.two_factor_status().await.unwrap();
+        assert!(!status.enabled && status.enrollment.is_some());
+
+        let wrong = app_code(&enrollment.secret, 5);
+        let err = auth
+            .finish_two_factor_setup(IP, &wrong, &current.token)
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind, ErrorKind::InvalidRequest);
+        assert!(!auth.two_factor_status().await.unwrap().enabled);
+
+        let codes = auth
+            .finish_two_factor_setup(IP, &app_code(&enrollment.secret, 0), &current.token)
+            .await
+            .unwrap();
+        assert_eq!(codes.len(), RECOVERY_CODES);
+        assert!(codes.iter().all(|c| c.len() == RECOVERY_CODE_CHARS + 1));
+        let status = auth.two_factor_status().await.unwrap();
+        assert!(status.enabled && status.enrollment.is_none());
+        assert_eq!(status.recovery_codes_left, RECOVERY_CODES as u32);
+        assert!(auth.session_valid(&current.token).await.unwrap());
+        assert!(
+            !auth.session_valid(&other.token).await.unwrap(),
+            "other sessions end"
+        );
+        let err = auth
+            .start_two_factor_setup(IP, "correct horse battery")
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Conflict);
+    }
+
+    #[tokio::test]
+    async fn sign_in_with_two_factor() {
+        let (auth, _dir) = service().await;
+        let (secret, recovery) = with_two_factor(&auth).await;
+
+        let token = pending(
+            auth.login(IP, "admin", "correct horse battery")
+                .await
+                .unwrap(),
+        );
+        assert!(auth.login_pending(&token));
+        let err = auth
+            .complete_login(IP, &token, &app_code(&secret, 7))
+            .await
+            .unwrap_err();
+        assert_eq!(err.message, "invalid code");
+        let err = auth
+            .complete_login(IP, "forged", &app_code(&secret, 1))
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Unauthorized);
+
+        // The setup code's step is used; the next step's code works once.
+        let code = app_code(&secret, 1);
+        let session = auth.complete_login(IP, &token, &code).await.unwrap();
+        assert!(auth.session_valid(&session.token).await.unwrap());
+        assert!(
+            !auth.login_pending(&token),
+            "a pending sign-in is single use"
+        );
+
+        let token = pending(
+            auth.login(IP, "admin", "correct horse battery")
+                .await
+                .unwrap(),
+        );
+        let err = auth.complete_login(IP, &token, &code).await.unwrap_err();
+        assert!(err.message.contains("already used"), "{}", err.message);
+
+        // A recovery code works once, typed loosely.
+        let loose = recovery[0].to_uppercase().replace('-', " ");
+        auth.complete_login(IP, &token, &loose).await.unwrap();
+        let token = pending(
+            auth.login(IP, "admin", "correct horse battery")
+                .await
+                .unwrap(),
+        );
+        let err = auth
+            .complete_login(IP, &token, &recovery[0])
+            .await
+            .unwrap_err();
+        assert_eq!(err.message, "invalid code");
+        assert_eq!(
+            auth.two_factor_status().await.unwrap().recovery_codes_left,
+            RECOVERY_CODES as u32 - 1
+        );
+    }
+
+    #[tokio::test]
+    async fn wrong_codes_end_the_pending_sign_in() {
+        let (auth, _dir) = service().await;
+        let (secret, _) = with_two_factor(&auth).await;
+        let token = pending(
+            auth.login(IP, "admin", "correct horse battery")
+                .await
+                .unwrap(),
+        );
+        // Each attempt from its own address, so only the per-sign-in limit
+        // applies.
+        for i in 0..PENDING_LOGIN_MAX_ATTEMPTS {
+            let client = IpAddr::V4(std::net::Ipv4Addr::new(198, 51, 100, i as u8));
+            auth.complete_login(client, &token, "000000x")
+                .await
+                .unwrap_err();
+        }
+        assert!(!auth.login_pending(&token));
+        let other = IpAddr::V4(std::net::Ipv4Addr::new(203, 0, 113, 1));
+        let err = auth
+            .complete_login(other, &token, &app_code(&secret, 1))
+            .await
+            .unwrap_err();
+        assert_eq!(err.message, "the sign-in expired; log in again");
+    }
+
+    #[tokio::test]
+    async fn password_and_codes_share_the_attempt_budget() {
+        let (auth, _dir) = service().await;
+        with_two_factor(&auth).await;
+        // A correct password does not refill the budget for code guesses.
+        let mut guesses = 0;
+        loop {
+            let token = match auth.login(IP, "admin", "correct horse battery").await {
+                Ok(outcome) => pending(outcome),
+                Err(e) => {
+                    assert_eq!(e.kind, ErrorKind::RateLimited);
+                    break;
+                }
+            };
+            match auth.complete_login(IP, &token, "999999x").await {
+                Err(e) if e.kind == ErrorKind::RateLimited => break,
+                Err(_) => guesses += 1,
+                Ok(_) => panic!("wrong code accepted"),
+            }
+        }
+        assert!(guesses < LOGIN_MAX_ATTEMPTS, "{guesses} guesses");
+    }
+
+    #[tokio::test]
+    async fn turning_two_factor_off_needs_password_and_code() {
+        let (auth, _dir) = service().await;
+        let (secret, _) = with_two_factor(&auth).await;
+        let err = auth
+            .disable_two_factor(IP, "correct horse battery", "123")
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind, ErrorKind::InvalidRequest);
+        let err = auth
+            .disable_two_factor(IP, "wrong password!", &app_code(&secret, 1))
+            .await
+            .unwrap_err();
+        assert_eq!(err.message, "password is incorrect");
+        auth.disable_two_factor(IP, "correct horse battery", &app_code(&secret, 1))
+            .await
+            .unwrap();
+        assert!(!auth.two_factor_status().await.unwrap().enabled);
+        auth.login(IP, "admin", "correct horse battery")
+            .await
+            .unwrap()
+            .expect_session();
+    }
+
+    #[tokio::test]
+    async fn recovery_codes_can_be_replaced() {
+        let (auth, _dir) = service().await;
+        let (_, old) = with_two_factor(&auth).await;
+        let new = auth
+            .new_recovery_codes(IP, "correct horse battery")
+            .await
+            .unwrap();
+        assert_eq!(new.len(), RECOVERY_CODES);
+        let token = pending(
+            auth.login(IP, "admin", "correct horse battery")
+                .await
+                .unwrap(),
+        );
+        assert!(auth.complete_login(IP, &token, &old[0]).await.is_err());
+        auth.complete_login(IP, &token, &new[0]).await.unwrap();
     }
 
     #[tokio::test]

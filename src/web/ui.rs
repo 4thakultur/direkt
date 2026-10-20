@@ -5,7 +5,11 @@
 //! actions respond with a flash message plus an `HX-Trigger` that refreshes
 //! them.
 
-use super::{AppState, clear_session_cookie, client_ip, read_cookie, session_cookie};
+use super::{
+    AppState, PENDING_LOGIN_COOKIE, SESSION_COOKIE, clear_pending_login_cookie,
+    clear_session_cookie, client_ip, pending_login_cookie, read_cookie, session_cookie,
+};
+use crate::auth::{LoginOutcome, TwoFactorStatus};
 use crate::domain::{Download, DownloadEvent, MediaType, PostState, TransferState};
 use crate::engine::{HISTORY_SECS, LiveSnapshot, ThroughputSnapshot};
 use crate::error::{AppError, ErrorKind};
@@ -39,6 +43,7 @@ const HISTORY_LIMIT: i64 = 50;
 pub fn public_routes() -> Router<AppState> {
     Router::new()
         .route("/login", get(login_page).post(login_submit))
+        .route("/login/code", get(login_code_page).post(login_code_submit))
         .route("/setup", get(setup_page).post(setup_submit))
         .route("/static/htmx-2.0.4.min.js", get(htmx_js))
         .route("/static/classic.css", get(|| css(CLASSIC_CSS)))
@@ -54,6 +59,14 @@ pub fn protected_routes() -> Router<AppState> {
         .route("/settings/tokens", post(create_token))
         .route("/settings/tokens/{id}/revoke", post(revoke_token))
         .route("/settings/password", post(change_password))
+        .route("/settings/two-factor/setup", post(start_two_factor))
+        .route("/settings/two-factor/enable", post(enable_two_factor))
+        .route("/settings/two-factor/cancel", post(cancel_two_factor))
+        .route("/settings/two-factor/disable", post(disable_two_factor))
+        .route(
+            "/settings/two-factor/recovery-codes",
+            post(new_recovery_codes),
+        )
         .route("/settings/theme", post(change_theme))
         .route("/settings/tmdb", post(save_tmdb))
         .route("/settings/tmdb/remove", post(remove_tmdb))
@@ -499,12 +512,20 @@ async fn login_submit(
         .login(client_ip(&extensions), &form.username, &form.password)
         .await
     {
-        Ok(session) => (
+        Ok(LoginOutcome::Session(session)) => (
             [(
                 header::SET_COOKIE,
                 session_cookie(&session, state.secure_cookies),
             )],
             Redirect::to("/"),
+        )
+            .into_response(),
+        Ok(LoginOutcome::CodeRequired(token)) => (
+            [(
+                header::SET_COOKIE,
+                pending_login_cookie(&token, state.secure_cookies),
+            )],
+            Redirect::to("/login/code"),
         )
             .into_response(),
         Err(e) => render_status(
@@ -513,6 +534,86 @@ async fn login_submit(
                 theme,
                 error: Some(e.message),
                 username: form.username,
+            },
+        ),
+    }
+}
+
+#[derive(Template)]
+#[template(path = "login_code.html")]
+struct LoginCodePage {
+    theme: Theme,
+    error: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct CodeForm {
+    code: String,
+}
+
+/// Second sign-in step: the code from the authenticator app.
+async fn login_code_page(
+    State(state): State<AppState>,
+    theme: Theme,
+    headers: HeaderMap,
+) -> Response {
+    match read_cookie(&headers, PENDING_LOGIN_COOKIE) {
+        Some(token) if state.auth.login_pending(token) => {
+            render(&LoginCodePage { theme, error: None })
+        }
+        _ => Redirect::to("/login").into_response(),
+    }
+}
+
+async fn login_code_submit(
+    State(state): State<AppState>,
+    theme: Theme,
+    extensions: Extensions,
+    headers: HeaderMap,
+    Form(form): Form<CodeForm>,
+) -> Response {
+    let Some(token) = read_cookie(&headers, PENDING_LOGIN_COOKIE) else {
+        return Redirect::to("/login").into_response();
+    };
+    match state
+        .auth
+        .complete_login(client_ip(&extensions), token, &form.code)
+        .await
+    {
+        Ok(session) => {
+            let mut response = Redirect::to("/").into_response();
+            let headers = response.headers_mut();
+            headers.append(
+                header::SET_COOKIE,
+                session_cookie(&session, state.secure_cookies),
+            );
+            headers.append(
+                header::SET_COOKIE,
+                clear_pending_login_cookie(state.secure_cookies),
+            );
+            response
+        }
+        // Expired or out of attempts: back to the password.
+        Err(e) if !state.auth.login_pending(token) => {
+            let mut response = render_status(
+                status_for(&e),
+                &LoginPage {
+                    theme,
+                    error: Some(e.message),
+                    username: String::new(),
+                },
+            );
+            response.headers_mut().append(
+                header::SET_COOKIE,
+                clear_pending_login_cookie(state.secure_cookies),
+            );
+            response
+        }
+        Err(e) => render_status(
+            status_for(&e),
+            &LoginCodePage {
+                theme,
+                error: Some(e.message),
             },
         ),
     }
@@ -597,7 +698,7 @@ async fn setup_submit(
 }
 
 async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if let Some(token) = read_cookie(&headers, super::SESSION_COOKIE) {
+    if let Some(token) = read_cookie(&headers, SESSION_COOKIE) {
         let _ = state.auth.logout(token).await;
     }
     (
@@ -1276,6 +1377,9 @@ struct SettingsPage {
     has_credits: bool,
     tokens: Vec<TokenView>,
     new_token: Option<String>,
+    two_factor: TwoFactorView,
+    /// Recovery codes just made, shown this once.
+    recovery_codes: Vec<String>,
     message: Option<String>,
     error: Option<String>,
     /// The section to show expanded: the one the last action came from.
@@ -1287,6 +1391,7 @@ const SECTION_ONEFICHIER: &str = "onefichier";
 const SECTION_TMDB: &str = "artwork";
 const SECTION_TOKENS: &str = "tokens";
 const SECTION_PASSWORD: &str = "password";
+const SECTION_TWO_FACTOR: &str = "two-factor";
 const SECTION_APPEARANCE: &str = "appearance";
 const SECTION_MISC: &str = "misc";
 
@@ -1304,6 +1409,10 @@ async fn settings_with(state: &AppState, theme: Theme, mut page: SettingsPage) -
         .is_some_and(|c| c.balance.is_some() && c.in_use != Some(false));
     match state.auth.list_api_tokens().await {
         Ok(tokens) => page.tokens = tokens.into_iter().map(TokenView::from).collect(),
+        Err(e) => page.error = page.error.or(Some(e.message)),
+    }
+    match state.auth.two_factor_status().await {
+        Ok(status) => page.two_factor = TwoFactorView::from(status),
         Err(e) => page.error = page.error.or(Some(e.message)),
     }
     page
@@ -1771,6 +1880,160 @@ async fn change_password(
             render_status(status, &settings_with(&state, theme, page).await)
         }
     }
+}
+
+/// Two-factor authentication prepared for the settings page.
+#[derive(Default)]
+struct TwoFactorView {
+    enabled: bool,
+    recovery_codes_left: u32,
+    enrollment: Option<EnrollmentView>,
+}
+
+struct EnrollmentView {
+    /// The secret in groups of four, for typing into the app by hand.
+    secret: String,
+    uri: String,
+    qr_size: usize,
+    qr_path: String,
+}
+
+impl From<TwoFactorStatus> for TwoFactorView {
+    fn from(s: TwoFactorStatus) -> Self {
+        Self {
+            enabled: s.enabled,
+            recovery_codes_left: s.recovery_codes_left,
+            enrollment: s.enrollment.map(|e| {
+                let qr = crate::totp::qr_svg(&e.uri);
+                EnrollmentView {
+                    secret: e
+                        .secret
+                        .as_bytes()
+                        .chunks(4)
+                        .map(|c| std::str::from_utf8(c).expect("base32 is ASCII"))
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                    qr_size: qr.as_ref().map_or(0, |q| q.size),
+                    qr_path: qr.map(|q| q.path).unwrap_or_default(),
+                    uri: e.uri,
+                }
+            }),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct ConfirmPasswordForm {
+    password: String,
+}
+
+#[derive(Deserialize)]
+struct DisableTwoFactorForm {
+    password: String,
+    code: String,
+}
+
+async fn start_two_factor(
+    State(state): State<AppState>,
+    theme: Theme,
+    extensions: Extensions,
+    Form(form): Form<ConfirmPasswordForm>,
+) -> Response {
+    let result = state
+        .auth
+        .start_two_factor_setup(client_ip(&extensions), &form.password)
+        .await
+        .map(|_| "Scan the QR code with your authenticator app, then enter the code it shows.");
+    section_result(&state, theme, SECTION_TWO_FACTOR, result).await
+}
+
+async fn enable_two_factor(
+    State(state): State<AppState>,
+    theme: Theme,
+    extensions: Extensions,
+    headers: HeaderMap,
+    Form(form): Form<CodeForm>,
+) -> Response {
+    let current = read_cookie(&headers, SESSION_COOKIE).unwrap_or_default();
+    match state
+        .auth
+        .finish_two_factor_setup(client_ip(&extensions), &form.code, current)
+        .await
+    {
+        Ok(codes) => {
+            recovery_codes_page(
+                &state,
+                theme,
+                "Two-factor authentication is on. New sign-ins need a code from \
+             your authenticator app, and other sessions have been logged out.",
+                codes,
+            )
+            .await
+        }
+        Err(e) => section_result(&state, theme, SECTION_TWO_FACTOR, Err(e)).await,
+    }
+}
+
+async fn cancel_two_factor(State(state): State<AppState>, theme: Theme) -> Response {
+    state.auth.cancel_two_factor_setup();
+    let page = SettingsPage {
+        open: SECTION_TWO_FACTOR,
+        ..Default::default()
+    };
+    render(&settings_with(&state, theme, page).await)
+}
+
+async fn disable_two_factor(
+    State(state): State<AppState>,
+    theme: Theme,
+    extensions: Extensions,
+    Form(form): Form<DisableTwoFactorForm>,
+) -> Response {
+    let result = state
+        .auth
+        .disable_two_factor(client_ip(&extensions), &form.password, &form.code)
+        .await
+        .map(|()| "Two-factor authentication is off. Remove Direkt from your authenticator app.");
+    section_result(&state, theme, SECTION_TWO_FACTOR, result).await
+}
+
+async fn new_recovery_codes(
+    State(state): State<AppState>,
+    theme: Theme,
+    extensions: Extensions,
+    Form(form): Form<ConfirmPasswordForm>,
+) -> Response {
+    match state
+        .auth
+        .new_recovery_codes(client_ip(&extensions), &form.password)
+        .await
+    {
+        Ok(codes) => {
+            recovery_codes_page(
+                &state,
+                theme,
+                "New recovery codes made. The old ones no longer work.",
+                codes,
+            )
+            .await
+        }
+        Err(e) => section_result(&state, theme, SECTION_TWO_FACTOR, Err(e)).await,
+    }
+}
+
+async fn recovery_codes_page(
+    state: &AppState,
+    theme: Theme,
+    message: &str,
+    codes: Vec<String>,
+) -> Response {
+    let page = SettingsPage {
+        message: Some(message.to_owned()),
+        recovery_codes: codes,
+        open: SECTION_TWO_FACTOR,
+        ..Default::default()
+    };
+    render(&settings_with(state, theme, page).await)
 }
 
 #[derive(Deserialize)]

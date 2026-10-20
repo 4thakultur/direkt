@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block title %}Two-factor code · Direkt{% endblock %}
+{% block body %}
+<main class="narrow">
+  <div class="app-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 4v11m-5-5 5 5 5-5M5 20h14" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+  <h1 class="brand-large">Direkt</h1>
+  <form method="post" action="/login/code" class="card stack">
+    <h2>Two-factor code</h2>
+    <p class="muted">Enter the 6-digit code from your authenticator app, or one of your recovery codes.</p>
+    {% if let Some(error) = error %}<p class="flash error">{{ error }}</p>{% endif %}
+    <label>Code
+      <input name="code" autocomplete="one-time-code" maxlength="32" required autofocus
+             spellcheck="false" autocapitalize="off" class="code-input">
+    </label>
+    <button type="submit" class="primary">Verify</button>
+    <p class="muted small"><a href="/login">Start over</a></p>
+  </form>
+</main>
+{% endblock %}

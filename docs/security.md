@@ -25,12 +25,61 @@ direkt reset-admin            # or: docker compose exec direkt direkt reset-admi
 This deletes the administrator account, every session, and every API token.
 Restart Direkt and complete setup again.
 
+## Two-factor authentication
+
+Under **Settings → Two-factor authentication**, the administrator can require
+a 6-digit code from an authenticator app (Google Authenticator, Microsoft
+Authenticator, Aegis, 1Password, and others) at every new sign-in.
+
+1. Enter the password and choose **Set up**.
+2. Scan the QR code with the app, or type the setup key shown below it. On a
+   phone, the setup link opens the app directly.
+3. Enter the code the app shows, then save the ten recovery codes that
+   appear. They are shown only once.
+
+Turning it on logs out every other session, so anyone signed in elsewhere
+must sign in again with a code. The browser that turned it on stays signed
+in.
+
+Details:
+
+- Codes follow RFC 6238 (TOTP): HMAC-SHA1, six digits, 30-second steps. A
+  code one step early or late is accepted for clock drift. Each code works
+  only once; a code older than the last one used is refused. Codes depend on
+  the time, so keep the server's clock in sync (NTP).
+- After a correct password, the sign-in waits up to 5 minutes for the code,
+  in a `direkt_2fa` cookie (`HttpOnly`, `SameSite=Strict`, sent only to
+  `/login`). Five wrong codes end it. Password and code attempts share the
+  per-client limit above, and a correct password does not reset it: only a
+  completed sign-in does. Across all clients, at most 20 code attempts are
+  checked per 15 minutes, so a leaked password cannot be paired with guesses
+  from many addresses.
+- Each recovery code signs in once, typed with or without its hyphen. Make
+  new ones (which voids the old ones) under Settings with the password.
+- Turning it off needs the password and a code or recovery code.
+- API tokens are not affected: they are made from a signed-in session.
+  Revoke any you no longer trust.
+- The shared secret is stored in the database as is, because checking a code
+  needs it. Anyone who has a copy of the database or a backup can make codes,
+  so protect `data_dir` and its backups.
+
+Lost the phone and the recovery codes?
+
+```sh
+direkt reset-2fa              # or: docker compose exec direkt direkt reset-2fa
+```
+
+This turns two-factor authentication off and keeps the account, sessions and
+API tokens. Sign in with the password and set it up again.
+
 ## Sessions and tokens
 
 - Passwords are hashed with Argon2id. Sessions last 30 days. Changing the
   password ends every other session.
 - The session cookie is `HttpOnly` and `SameSite=Strict`. Set
   `server.secure_cookies = true` when the UI is reached over HTTPS.
+- With two-factor authentication on, `direkt_2fa` holds a sign-in that
+  waits for its code (see above).
 - The only other cookie, `direkt_theme`, holds the chosen UI theme (`classic`
   or `steve`). It carries no secret, and an unknown value falls back to
   Classic. Changing it requires a session.

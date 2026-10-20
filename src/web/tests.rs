@@ -524,6 +524,188 @@ async fn login_and_logout() {
     );
 }
 
+/// The authenticator app's code, `offset` steps from now.
+fn app_code(secret: &str, offset: i64) -> String {
+    let key = crate::totp::decode_base32(secret).unwrap();
+    crate::totp::code_at(
+        &key,
+        crate::totp::step_at(chrono::Utc::now().timestamp()) + offset,
+    )
+}
+
+#[tokio::test]
+async fn two_factor_sign_in_through_the_web_ui() {
+    let (app, cookie) = TestApp::with_admin().await;
+    let auth = cookie_header(&cookie);
+
+    let r = app
+        .post_form(
+            "/settings/two-factor/setup",
+            &auth,
+            "password=wrong+password",
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST);
+    assert!(r.body.contains("password is incorrect"));
+
+    let r = app
+        .post_form(
+            "/settings/two-factor/setup",
+            &auth,
+            &format!("password={}", encode(PASSWORD)),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    assert!(r.body.contains("<svg class=\"qr\""));
+    assert!(
+        r.body
+            .contains("href=\"otpauth://totp/Direkt:admin?secret=")
+    );
+    let secret: String = r
+        .body
+        .split("class=\"totp-key\">")
+        .nth(1)
+        .and_then(|rest| rest.split('<').next())
+        .unwrap()
+        .replace(' ', "");
+
+    let r = app
+        .post_form(
+            "/settings/two-factor/enable",
+            &auth,
+            &format!("code={}", app_code(&secret, 5)),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST);
+    let r = app
+        .post_form(
+            "/settings/two-factor/enable",
+            &auth,
+            &format!("code={}", app_code(&secret, 0)),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    assert!(r.body.contains("class=\"secret recovery-codes\""));
+    assert_eq!(
+        app.get("/settings", &auth).await.status,
+        StatusCode::OK,
+        "the session that turned it on stays signed in"
+    );
+
+    // The password alone starts a pending sign-in, not a session.
+    let r = app
+        .post_form(
+            "/login",
+            &[],
+            &format!("username=admin&password={}", encode(PASSWORD)),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::SEE_OTHER);
+    assert_eq!(r.header("location"), "/login/code");
+    let pending_cookie = r.header("set-cookie");
+    assert!(pending_cookie.starts_with("direkt_2fa="));
+    assert!(pending_cookie.contains("Path=/login"));
+    assert!(pending_cookie.contains("HttpOnly"));
+    let pending = pending_cookie.split(';').next().unwrap().to_owned();
+    assert_eq!(
+        app.get("/api/v1/downloads", &cookie_header(&pending))
+            .await
+            .status,
+        StatusCode::UNAUTHORIZED,
+        "a pending sign-in is not a session"
+    );
+
+    let r = app.get("/login/code", &[]).await;
+    assert_eq!(r.header("location"), "/login");
+    let r = app.get("/login/code", &cookie_header(&pending)).await;
+    assert_eq!(r.status, StatusCode::OK);
+    assert!(r.body.contains("Two-factor code"));
+
+    let r = app
+        .post_form("/login/code", &cookie_header(&pending), "code=12")
+        .await;
+    assert_eq!(r.status, StatusCode::UNAUTHORIZED);
+    assert!(r.body.contains("invalid code"));
+
+    let r = app
+        .post_form(
+            "/login/code",
+            &cookie_header(&pending),
+            &format!("code={}", app_code(&secret, 1)),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::SEE_OTHER, "{}", r.body);
+    assert_eq!(r.header("location"), "/");
+    let cookies: Vec<&str> = r
+        .headers
+        .get_all("set-cookie")
+        .iter()
+        .map(|v| v.to_str().unwrap())
+        .collect();
+    assert!(cookies.iter().any(|c| c.starts_with("direkt_2fa=;")));
+    let session = cookies
+        .iter()
+        .find(|c| c.starts_with("direkt_session="))
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap();
+    assert_eq!(
+        app.get("/api/v1/downloads", &cookie_header(session))
+            .await
+            .status,
+        StatusCode::OK
+    );
+
+    // Turning it off needs the password and a code.
+    let r = app
+        .post_form(
+            "/settings/two-factor/disable",
+            &auth,
+            &format!("password={}&code=000000x", encode(PASSWORD)),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST);
+    let r = app
+        .post_form(
+            "/settings/two-factor/disable",
+            &auth,
+            &format!(
+                "password={}&code={}",
+                encode(PASSWORD),
+                app_code(&secret, -1)
+            ),
+        )
+        .await;
+    // The previous step's code is older than the one already used.
+    assert_eq!(r.status, StatusCode::UNAUTHORIZED, "{}", r.body);
+    assert!(r.body.contains("already used"));
+}
+
+#[tokio::test]
+async fn two_factor_forms_reject_cross_site_requests() {
+    let (app, cookie) = TestApp::with_admin().await;
+    let r = app
+        .post_form(
+            "/settings/two-factor/setup",
+            &[
+                ("cookie", cookie.as_str()),
+                ("sec-fetch-site", "cross-site"),
+            ],
+            &format!("password={}", encode(PASSWORD)),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::FORBIDDEN);
+    let r = app
+        .post_form(
+            "/login/code",
+            &[("sec-fetch-site", "cross-site")],
+            "code=123456",
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::FORBIDDEN);
+}
+
 #[tokio::test]
 async fn login_page_escapes_user_input() {
     let (app, _) = TestApp::with_admin().await;
