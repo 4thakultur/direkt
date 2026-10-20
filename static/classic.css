@@ -1,5 +1,5 @@
-/* Direkt — black and red. Flat surfaces, one accent color, no glow.
-   No external assets: system fonts, inline SVG icons. */
+/* Direkt, theme "Classic (red)": black and red. Flat surfaces, one accent
+   color, no glow. No external assets: system fonts, inline SVG icons. */
 
 :root {
   color-scheme: dark;
@@ -711,6 +711,66 @@ th { font-size: 0.7rem; color: var(--dim); font-weight: 600; letter-spacing: 0.1
 
 .inline-row { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 1rem; }
 .table-wrap { overflow-x: auto; }
+
+/* ---------------------------------------------------------------------------
+   Parts of the shared markup only the Steve theme shows
+   ------------------------------------------------------------------------- */
+
+.tabbar, .pane-intro, .panel-icon, .app-icon, .hero-backdrop { display: none; }
+.page-title {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* ---------------------------------------------------------------------------
+   Appearance: theme picker
+   ------------------------------------------------------------------------- */
+
+.themes { display: flex; flex-wrap: wrap; gap: 0.75rem; }
+.theme-choice {
+  flex: 0 1 13rem;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.15rem;
+  padding: 0.6rem;
+  text-align: left;
+  background: var(--bg);
+}
+.theme-choice[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-bg); }
+.theme-name { margin-top: 0.4rem; font-weight: 600; color: var(--text); }
+.theme-desc { font-size: 0.78rem; font-weight: 400; color: var(--muted); }
+
+/* Theme previews. Each swatch draws its own theme, whichever one is active. */
+.swatch {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  width: 100%;
+  aspect-ratio: 16 / 10;
+  padding: 0 8px 8px;
+  overflow: hidden;
+  border-radius: 6px;
+}
+.sw-bar { height: 10px; margin: 0 -8px 2px; }
+.sw-card { display: flex; gap: 6px; align-items: center; padding: 5px; }
+.sw-art { width: 34px; height: 16px; flex: none; }
+.sw-lines { flex: 1; height: 5px; }
+.swatch-classic { background: #000; border: 1px solid #1f1f1f; }
+.swatch-classic .sw-bar { background: #000; border-bottom: 1px solid #1f1f1f; }
+.swatch-classic .sw-card { background: #0a0a0a; border: 1px solid #1f1f1f; border-left: 2px solid #e3262f; border-radius: 2px; }
+.swatch-classic .sw-art { background: #1b1b1b; border-radius: 1px; }
+.swatch-classic .sw-lines { background: linear-gradient(90deg, #e3262f 55%, #1b1b1b 55%); border-radius: 1px; }
+.swatch-steve { background: linear-gradient(135deg, #f5f5f7 50%, #000 50%); border: 1px solid rgba(0, 0, 0, 0.08); }
+.swatch-steve .sw-bar { background: rgba(255, 255, 255, 0.7); }
+.swatch-steve .sw-card { background: #fff; border-radius: 6px; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12); }
+.swatch-steve .sw-card + .sw-card { background: #1c1c1e; }
+.swatch-steve .sw-art { background: linear-gradient(135deg, #5ac8fa, #0071e3); border-radius: 3px; }
+.swatch-steve .sw-lines { background: linear-gradient(90deg, #0071e3 60%, rgba(120, 120, 128, 0.25) 60%); border-radius: 3px; }
 
 /* ---------------------------------------------------------------------------
    Small screens

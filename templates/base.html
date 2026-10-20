@@ -1,13 +1,20 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="{{ theme.id() }}">
 <head>
   <meta charset="utf-8">
+  {% if theme == Theme::Steve -%}
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" media="(prefers-color-scheme: light)" content="#f5f5f7">
+  <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#000000">
+  {%- else -%}
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark">
   <meta name="theme-color" content="#000000">
+  {%- endif %}
   <meta name="htmx-config" content='{"includeIndicatorStyles": false, "allowEval": false, "allowScriptTags": false, "responseHandling": [{"code": "204", "swap": false}, {"code": "[23]..", "swap": true}, {"code": "[45]..", "swap": true, "error": true}]}'>
   <title>{% block title %}Direkt{% endblock %}</title>
-  <link rel="stylesheet" href="/static/app.css">
+  <link rel="stylesheet" href="/static/{{ theme.id() }}.css">
   <script src="/static/htmx-2.0.4.min.js" defer></script>
   <script src="/static/app.js" defer></script>
 </head>

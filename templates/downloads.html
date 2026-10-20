@@ -1,6 +1,8 @@
 {% extends "app.html" %}
 {% block title %}Downloads · Direkt{% endblock %}
 {% block nav_downloads %} active{% endblock %}
+{% block tab_downloads %} active{% endblock %}
+{% block heading %}<h1 class="page-title">Downloads</h1>{% endblock %}
 {% block content %}
 <div class="pager" data-pager>
   <div class="pager-tabs" role="tablist" aria-label="Downloads page">
@@ -10,6 +12,10 @@
   </div>
   <div class="pager-track" data-pager-track>
     <section class="pane pane-new" aria-label="New download">
+      <div class="pane-intro">
+        <h2>New download</h2>
+        <p>Paste a direct link or a 1fichier link. Direkt looks it up before anything starts.</p>
+      </div>
       {{ submit|safe }}
       <button type="button" class="pager-hint" data-pane="1">Swipe for activity<svg class="icon" aria-hidden="true"><use href="#i-back"/></svg></button>
     </section>

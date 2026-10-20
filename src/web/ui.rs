@@ -14,7 +14,8 @@ use crate::settings::{OneFichierSettings, SECRET_MASK, TmdbSettings};
 use crate::store::ApiToken;
 use askama::Template;
 use axum::Router;
-use axum::extract::{Form, Path, State};
+use axum::extract::{Form, FromRequestParts, Path, State};
+use axum::http::request::Parts;
 use axum::http::{Extensions, HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
@@ -24,7 +25,8 @@ use std::fmt::Write as _;
 use uuid::Uuid;
 
 const HTMX_JS: &str = include_str!("../../static/htmx-2.0.4.min.js");
-const APP_CSS: &str = include_str!("../../static/app.css");
+const CLASSIC_CSS: &str = include_str!("../../static/classic.css");
+const STEVE_CSS: &str = include_str!("../../static/steve.css");
 const APP_JS: &str = include_str!("../../static/app.js");
 /// Most downloads shown in the queue sections (everything not finished).
 const QUEUE_LIMIT: i64 = 500;
@@ -36,7 +38,8 @@ pub fn public_routes() -> Router<AppState> {
         .route("/login", get(login_page).post(login_submit))
         .route("/setup", get(setup_page).post(setup_submit))
         .route("/static/htmx-2.0.4.min.js", get(htmx_js))
-        .route("/static/app.css", get(app_css))
+        .route("/static/classic.css", get(|| css(CLASSIC_CSS)))
+        .route("/static/steve.css", get(|| css(STEVE_CSS)))
         .route("/static/app.js", get(app_js))
 }
 
@@ -48,6 +51,7 @@ pub fn protected_routes() -> Router<AppState> {
         .route("/settings/tokens", post(create_token))
         .route("/settings/tokens/{id}/revoke", post(revoke_token))
         .route("/settings/password", post(change_password))
+        .route("/settings/theme", post(change_theme))
         .route("/settings/tmdb", post(save_tmdb))
         .route("/settings/tmdb/remove", post(remove_tmdb))
         .route("/artwork/{id}", get(artwork_image))
@@ -101,6 +105,69 @@ fn render_status(status: StatusCode, template: &impl Template) -> Response {
         *response.status_mut() = status;
     }
     response
+}
+
+/// The look of the web UI. Chosen per browser on the settings page and kept in
+/// a cookie, so a phone and a desktop can differ. Every full page renders with
+/// it; fragments only use classes both stylesheets style.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum Theme {
+    /// Black and red, flat.
+    #[default]
+    Classic,
+    /// Light and dark, after Apple's iOS, macOS and apple.com.
+    Steve,
+}
+
+const THEME_COOKIE: &str = "direkt_theme";
+
+impl Theme {
+    const ALL: [Theme; 2] = [Theme::Classic, Theme::Steve];
+
+    /// The cookie value, `data-theme` attribute and stylesheet name.
+    fn id(self) -> &'static str {
+        match self {
+            Theme::Classic => "classic",
+            Theme::Steve => "steve",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Theme::Classic => "Classic (red)",
+            Theme::Steve => "Steve",
+        }
+    }
+
+    fn description(self) -> &'static str {
+        match self {
+            Theme::Classic => "Black and red, flat and dense.",
+            Theme::Steve => "Light and dark, after iOS and macOS.",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|t| t.id() == value)
+    }
+
+    fn cookie(self, secure: bool) -> HeaderValue {
+        let cookie = format!(
+            "{THEME_COOKIE}={}; Path=/; HttpOnly; SameSite=Lax; Max-Age=31536000{}",
+            self.id(),
+            if secure { "; Secure" } else { "" }
+        );
+        HeaderValue::from_str(&cookie).expect("theme ids are ASCII")
+    }
+}
+
+impl<S: Send + Sync> FromRequestParts<S> for Theme {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(parts: &mut Parts, _: &S) -> Result<Self, Self::Rejection> {
+        Ok(read_cookie(&parts.headers, THEME_COOKIE)
+            .and_then(Theme::parse)
+            .unwrap_or_default())
+    }
 }
 
 fn status_for(err: &AppError) -> StatusCode {
@@ -361,13 +428,13 @@ async fn htmx_js() -> impl IntoResponse {
     )
 }
 
-async fn app_css() -> impl IntoResponse {
+async fn css(stylesheet: &'static str) -> impl IntoResponse {
     (
         [
             (header::CONTENT_TYPE, "text/css; charset=utf-8"),
             (header::CACHE_CONTROL, "no-cache"),
         ],
-        APP_CSS,
+        stylesheet,
     )
 }
 
@@ -388,6 +455,7 @@ async fn app_js() -> impl IntoResponse {
 #[derive(Template)]
 #[template(path = "login.html")]
 struct LoginPage {
+    theme: Theme,
     error: Option<String>,
     username: String,
 }
@@ -398,10 +466,11 @@ struct LoginForm {
     password: String,
 }
 
-async fn login_page(State(state): State<AppState>) -> Response {
+async fn login_page(State(state): State<AppState>, theme: Theme) -> Response {
     match state.auth.needs_setup().await {
         Ok(true) => Redirect::to("/setup").into_response(),
         _ => render(&LoginPage {
+            theme,
             error: None,
             username: String::new(),
         }),
@@ -410,6 +479,7 @@ async fn login_page(State(state): State<AppState>) -> Response {
 
 async fn login_submit(
     State(state): State<AppState>,
+    theme: Theme,
     extensions: Extensions,
     Form(form): Form<LoginForm>,
 ) -> Response {
@@ -429,6 +499,7 @@ async fn login_submit(
         Err(e) => render_status(
             status_for(&e),
             &LoginPage {
+                theme,
                 error: Some(e.message),
                 username: form.username,
             },
@@ -439,6 +510,7 @@ async fn login_submit(
 #[derive(Template)]
 #[template(path = "setup.html")]
 struct SetupPage {
+    theme: Theme,
     error: Option<String>,
     token_path: String,
     username: String,
@@ -460,10 +532,11 @@ fn setup_token_path(state: &AppState) -> String {
         .unwrap_or_default()
 }
 
-async fn setup_page(State(state): State<AppState>) -> Response {
+async fn setup_page(State(state): State<AppState>, theme: Theme) -> Response {
     match state.auth.needs_setup().await {
         Ok(false) => Redirect::to("/login").into_response(),
         _ => render(&SetupPage {
+            theme,
             error: None,
             token_path: setup_token_path(&state),
             username: String::new(),
@@ -473,6 +546,7 @@ async fn setup_page(State(state): State<AppState>) -> Response {
 
 async fn setup_submit(
     State(state): State<AppState>,
+    theme: Theme,
     extensions: Extensions,
     Form(form): Form<SetupForm>,
 ) -> Response {
@@ -502,6 +576,7 @@ async fn setup_submit(
         Err(e) => render_status(
             status_for(&e),
             &SetupPage {
+                theme,
                 error: Some(e.message),
                 token_path: setup_token_path(&state),
                 username: form.username,
@@ -604,6 +679,7 @@ struct ClearAction {
 #[derive(Template)]
 #[template(path = "downloads.html")]
 struct DownloadsPage {
+    theme: Theme,
     dash: Dashboard,
     submit: SubmitForm,
 }
@@ -781,8 +857,9 @@ async fn load_dashboard(state: &AppState) -> Dashboard {
     }
 }
 
-async fn downloads_page(State(state): State<AppState>) -> Response {
+async fn downloads_page(State(state): State<AppState>, theme: Theme) -> Response {
     render(&DownloadsPage {
+        theme,
         dash: load_dashboard(&state).await,
         submit: SubmitForm::default(),
     })
@@ -1072,6 +1149,7 @@ async fn delete_all(State(state): State<AppState>, which: TransferState) -> Resp
 #[derive(Template)]
 #[template(path = "download.html")]
 struct DownloadPage {
+    theme: Theme,
     d: DownloadView,
     events: Vec<EventView>,
 }
@@ -1099,9 +1177,13 @@ async fn load_detail(
     ))
 }
 
-async fn download_page(State(state): State<AppState>, Path(id): Path<Uuid>) -> Response {
+async fn download_page(
+    State(state): State<AppState>,
+    theme: Theme,
+    Path(id): Path<Uuid>,
+) -> Response {
     match load_detail(&state, id).await {
-        Ok((d, events)) => render(&DownloadPage { d, events }),
+        Ok((d, events)) => render(&DownloadPage { theme, d, events }),
         Err(e) => (status_for(&e), e.message).into_response(),
     }
 }
@@ -1147,6 +1229,7 @@ impl From<ApiToken> for TokenView {
 #[derive(Template, Default)]
 #[template(path = "settings.html")]
 struct SettingsPage {
+    theme: Theme,
     onefichier: OneFichierSettings,
     tmdb: TmdbSettings,
     cdn: Option<CdnDisplay>,
@@ -1165,8 +1248,10 @@ const SECTION_ONEFICHIER: &str = "onefichier";
 const SECTION_TMDB: &str = "artwork";
 const SECTION_TOKENS: &str = "tokens";
 const SECTION_PASSWORD: &str = "password";
+const SECTION_APPEARANCE: &str = "appearance";
 
-async fn settings_with(state: &AppState, mut page: SettingsPage) -> SettingsPage {
+async fn settings_with(state: &AppState, theme: Theme, mut page: SettingsPage) -> SettingsPage {
+    page.theme = theme;
     page.onefichier = state.settings.onefichier();
     page.tmdb = state.settings.tmdb();
     page.cdn = page.onefichier.cdn.as_ref().map(CdnDisplay::from);
@@ -1182,8 +1267,8 @@ async fn settings_with(state: &AppState, mut page: SettingsPage) -> SettingsPage
     page
 }
 
-async fn settings_page(State(state): State<AppState>) -> Response {
-    render(&settings_with(&state, SettingsPage::default()).await)
+async fn settings_page(State(state): State<AppState>, theme: Theme) -> Response {
+    render(&settings_with(&state, theme, SettingsPage::default()).await)
 }
 
 #[derive(Deserialize)]
@@ -1191,7 +1276,11 @@ struct TokenForm {
     name: String,
 }
 
-async fn create_token(State(state): State<AppState>, Form(form): Form<TokenForm>) -> Response {
+async fn create_token(
+    State(state): State<AppState>,
+    theme: Theme,
+    Form(form): Form<TokenForm>,
+) -> Response {
     let page = match state.auth.create_api_token(&form.name).await {
         Ok((token, secret)) => SettingsPage {
             new_token: Some(secret),
@@ -1208,10 +1297,14 @@ async fn create_token(State(state): State<AppState>, Form(form): Form<TokenForm>
             ..Default::default()
         },
     };
-    render(&settings_with(&state, page).await)
+    render(&settings_with(&state, theme, page).await)
 }
 
-async fn revoke_token(State(state): State<AppState>, Path(id): Path<Uuid>) -> Response {
+async fn revoke_token(
+    State(state): State<AppState>,
+    theme: Theme,
+    Path(id): Path<Uuid>,
+) -> Response {
     let page = match state.auth.revoke_api_token(id).await {
         Ok(()) => SettingsPage {
             message: Some("Token revoked.".into()),
@@ -1224,7 +1317,7 @@ async fn revoke_token(State(state): State<AppState>, Path(id): Path<Uuid>) -> Re
             ..Default::default()
         },
     };
-    render(&settings_with(&state, page).await)
+    render(&settings_with(&state, theme, page).await)
 }
 
 /// CDN credits prepared for the settings page.
@@ -1260,6 +1353,7 @@ struct OneFichierForm {
 
 async fn save_onefichier(
     State(state): State<AppState>,
+    theme: Theme,
     Form(form): Form<OneFichierForm>,
 ) -> Response {
     let value = form.api_key.trim();
@@ -1275,7 +1369,7 @@ async fn save_onefichier(
                 |_| "1fichier API key saved. Retry any 1fichier downloads that need attention.",
             )
         };
-    settings_result(&state, result).await
+    settings_result(&state, theme, result).await
 }
 
 #[derive(Deserialize)]
@@ -1288,6 +1382,7 @@ struct SignInForm {
 
 async fn sign_in_onefichier(
     State(state): State<AppState>,
+    theme: Theme,
     Form(form): Form<SignInForm>,
 ) -> Response {
     let result = state
@@ -1302,34 +1397,34 @@ async fn sign_in_onefichier(
                 "Signed in to 1fichier. Retry any 1fichier downloads that need attention."
             }
         });
-    settings_result(&state, result).await
+    settings_result(&state, theme, result).await
 }
 
-async fn sign_out_onefichier(State(state): State<AppState>) -> Response {
+async fn sign_out_onefichier(State(state): State<AppState>, theme: Theme) -> Response {
     let result = state
         .settings
         .sign_out_onefichier()
         .await
         .map(|_| "Signed out of 1fichier; the stored email and password were deleted.");
-    settings_result(&state, result).await
+    settings_result(&state, theme, result).await
 }
 
-async fn refresh_onefichier_cdn(State(state): State<AppState>) -> Response {
+async fn refresh_onefichier_cdn(State(state): State<AppState>, theme: Theme) -> Response {
     let result = state
         .settings
         .refresh_onefichier_cdn()
         .await
         .map(|_| "1fichier CDN credits updated.");
-    settings_result(&state, result).await
+    settings_result(&state, theme, result).await
 }
 
-async fn remove_onefichier(State(state): State<AppState>) -> Response {
+async fn remove_onefichier(State(state): State<AppState>, theme: Theme) -> Response {
     let result = state
         .settings
         .clear_onefichier_key()
         .await
         .map(|_| "1fichier API key removed.");
-    settings_result(&state, result).await
+    settings_result(&state, theme, result).await
 }
 
 #[derive(Deserialize)]
@@ -1337,7 +1432,11 @@ struct TmdbForm {
     api_key: String,
 }
 
-async fn save_tmdb(State(state): State<AppState>, Form(form): Form<TmdbForm>) -> Response {
+async fn save_tmdb(
+    State(state): State<AppState>,
+    theme: Theme,
+    Form(form): Form<TmdbForm>,
+) -> Response {
     let value = form.api_key.trim();
     // The form is pre-filled with the mask; submitting it unchanged is a no-op.
     let result = if value == SECRET_MASK && state.settings.tmdb().configured {
@@ -1351,26 +1450,31 @@ async fn save_tmdb(State(state): State<AppState>, Form(form): Form<TmdbForm>) ->
             .await
             .map(|_| "TMDB API key saved. Artwork appears as downloads are shown.")
     };
-    section_result(&state, SECTION_TMDB, result).await
+    section_result(&state, theme, SECTION_TMDB, result).await
 }
 
-async fn remove_tmdb(State(state): State<AppState>) -> Response {
+async fn remove_tmdb(State(state): State<AppState>, theme: Theme) -> Response {
     let result = state
         .settings
         .clear_tmdb_key()
         .await
         .map(|_| "TMDB API key removed. Artwork already found stays cached.");
-    section_result(&state, SECTION_TMDB, result).await
+    section_result(&state, theme, SECTION_TMDB, result).await
 }
 
 /// Render the settings page after a 1fichier action, with that section open.
-async fn settings_result(state: &AppState, result: Result<&str, AppError>) -> Response {
-    section_result(state, SECTION_ONEFICHIER, result).await
+async fn settings_result(
+    state: &AppState,
+    theme: Theme,
+    result: Result<&str, AppError>,
+) -> Response {
+    section_result(state, theme, SECTION_ONEFICHIER, result).await
 }
 
 /// Render the settings page after an action, with its section open.
 async fn section_result(
     state: &AppState,
+    theme: Theme,
     open: &'static str,
     result: Result<&str, AppError>,
 ) -> Response {
@@ -1378,6 +1482,7 @@ async fn section_result(
         Ok(message) => render(
             &settings_with(
                 state,
+                theme,
                 SettingsPage {
                     message: Some(message.to_owned()),
                     open,
@@ -1393,7 +1498,7 @@ async fn section_result(
                 open,
                 ..Default::default()
             };
-            render_status(status, &settings_with(state, page).await)
+            render_status(status, &settings_with(state, theme, page).await)
         }
     }
 }
@@ -1407,6 +1512,7 @@ struct PasswordForm {
 
 async fn change_password(
     State(state): State<AppState>,
+    theme: Theme,
     extensions: Extensions,
     Form(form): Form<PasswordForm>,
 ) -> Response {
@@ -1416,7 +1522,10 @@ async fn change_password(
             open: SECTION_PASSWORD,
             ..Default::default()
         };
-        return render_status(StatusCode::BAD_REQUEST, &settings_with(&state, page).await);
+        return render_status(
+            StatusCode::BAD_REQUEST,
+            &settings_with(&state, theme, page).await,
+        );
     }
     match state
         .auth
@@ -1433,7 +1542,7 @@ async fn change_password(
                 open: SECTION_PASSWORD,
                 ..Default::default()
             };
-            let mut response = render(&settings_with(&state, page).await);
+            let mut response = render(&settings_with(&state, theme, page).await);
             response.headers_mut().insert(
                 header::SET_COOKIE,
                 session_cookie(&session, state.secure_cookies),
@@ -1447,14 +1556,53 @@ async fn change_password(
                 open: SECTION_PASSWORD,
                 ..Default::default()
             };
-            render_status(status, &settings_with(&state, page).await)
+            render_status(status, &settings_with(&state, theme, page).await)
         }
     }
+}
+
+#[derive(Deserialize)]
+struct ThemeForm {
+    theme: String,
+}
+
+/// Switch this browser's theme. The page answering the switch already uses it.
+async fn change_theme(State(state): State<AppState>, Form(form): Form<ThemeForm>) -> Response {
+    let Some(theme) = Theme::parse(&form.theme) else {
+        let page = SettingsPage {
+            error: Some("unknown theme".into()),
+            open: SECTION_APPEARANCE,
+            ..Default::default()
+        };
+        return render_status(
+            StatusCode::BAD_REQUEST,
+            &settings_with(&state, Theme::default(), page).await,
+        );
+    };
+    let page = SettingsPage {
+        open: SECTION_APPEARANCE,
+        ..Default::default()
+    };
+    let mut response = render(&settings_with(&state, theme, page).await);
+    response
+        .headers_mut()
+        .insert(header::SET_COOKIE, theme.cookie(state.secure_cookies));
+    response
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn themes_round_trip_through_their_ids() {
+        for theme in Theme::ALL {
+            assert_eq!(Theme::parse(theme.id()), Some(theme));
+        }
+        assert_eq!(Theme::parse("Steve"), None);
+        assert_eq!(Theme::parse(""), None);
+        assert_eq!(Theme::default(), Theme::Classic);
+    }
 
     #[test]
     fn formatting() {

@@ -1,4 +1,5 @@
 <section class="hero state-{{ d.state }}">
+  {% if let Some(art) = d.artwork %}<img class="hero-backdrop" src="/artwork/{{ art }}" alt="" decoding="async">{% endif %}
   <a class="art art-lg" href="/downloads/{{ d.id }}" tabindex="-1" aria-hidden="true">{% if let Some(art) = d.artwork %}<img src="/artwork/{{ art }}" alt="" decoding="async">{% else %}<span>{{ d.badge }}</span>{% endif %}</a>
   <div class="hero-body">
     <div class="hero-head">

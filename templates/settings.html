@@ -1,12 +1,15 @@
 {% extends "app.html" %}
 {% block title %}Settings · Direkt{% endblock %}
 {% block nav_settings %} active{% endblock %}
+{% block tab_settings %} active{% endblock %}
+{% block heading %}<h1 class="page-title">Settings</h1>{% endblock %}
 {% block content %}
 {% if let Some(message) = message %}<p class="flash ok">{{ message }}</p>{% endif %}
 {% if let Some(error) = error %}<p class="flash error">{{ error }}</p>{% endif %}
 
 <details class="panel" id="onefichier"{% if open == "onefichier" || onefichier.account.attention.is_some() %} open{% endif %}>
   <summary>
+    <span class="panel-icon tint-orange" aria-hidden="true"><svg class="icon"><use href="#i-cloud"/></svg></span>
     <span class="panel-title">
       <span class="panel-name">1fichier</span>
       <span class="panel-desc">Premium account, CDN credits and API key</span>
@@ -99,6 +102,7 @@
 
 <details class="panel" id="artwork"{% if open == "artwork" %} open{% endif %}>
   <summary>
+    <span class="panel-icon tint-purple" aria-hidden="true"><svg class="icon"><use href="#i-photo"/></svg></span>
     <span class="panel-title">
       <span class="panel-name">Artwork</span>
       <span class="panel-desc">Cover images for movies, series and games</span>
@@ -141,6 +145,7 @@
 
 <details class="panel" id="tokens"{% if open == "tokens" %} open{% endif %}>
   <summary>
+    <span class="panel-icon tint-gray" aria-hidden="true"><svg class="icon"><use href="#i-key"/></svg></span>
     <span class="panel-title">
       <span class="panel-name">API tokens</span>
       <span class="panel-desc">Access for scripts and integrations</span>
@@ -188,6 +193,7 @@
 
 <details class="panel" id="password"{% if open == "password" %} open{% endif %}>
   <summary>
+    <span class="panel-icon tint-blue" aria-hidden="true"><svg class="icon"><use href="#i-lock"/></svg></span>
     <span class="panel-title">
       <span class="panel-name">Change password</span>
       <span class="panel-desc">Administrator login for the web UI</span>
@@ -207,6 +213,32 @@
       </label>
       <button type="submit">Change password</button>
     </form>
+  </div>
+</details>
+<details class="panel" id="appearance"{% if open == "appearance" %} open{% endif %}>
+  <summary>
+    <span class="panel-icon tint-indigo" aria-hidden="true"><svg class="icon"><use href="#i-appearance"/></svg></span>
+    <span class="panel-title">
+      <span class="panel-name">Appearance</span>
+      <span class="panel-desc">Theme for this browser</span>
+    </span>
+    <span class="pill">{{ theme.label() }}</span>
+    <svg class="icon chevron" aria-hidden="true"><use href="#i-chevron"/></svg>
+  </summary>
+  <div class="panel-body stack">
+    <form method="post" action="/settings/theme" class="themes">
+      {% for t in Theme::ALL %}
+      <button type="submit" name="theme" value="{{ t.id() }}" class="theme-choice" aria-pressed="{{ t == theme }}">
+        <span class="swatch swatch-{{ t.id() }}" aria-hidden="true"><span class="sw-bar"></span><span class="sw-card"><span class="sw-art"></span><span class="sw-lines"></span></span><span class="sw-card"><span class="sw-art"></span><span class="sw-lines"></span></span></span>
+        <span class="theme-name">{{ t.label() }}</span>
+        <span class="theme-desc">{{ t.description() }}</span>
+      </button>
+      {% endfor %}
+    </form>
+    <p class="muted small">
+      Kept in a cookie, so each browser and device has its own choice. Steve
+      follows the system's light or dark mode.
+    </p>
   </div>
 </details>
 {% endblock %}
