@@ -539,6 +539,9 @@ progress.bar:indeterminate::-moz-progress-bar { background: transparent; }
    ------------------------------------------------------------------------- */
 
 .group { margin-top: 2rem; }
+.empty-hint { margin: 2rem 1rem 0; text-align: center; color: var(--muted); font-size: 0.95rem; }
+.empty-hint .hint-phone { display: none; }
+.empty-hint button.link { font-size: inherit; }
 .group-head { display: flex; align-items: baseline; gap: 1rem; margin: 0 0 0.6rem; }
 .group-title {
   flex: 1;
@@ -1154,6 +1157,10 @@ td button { padding: 0.3rem 0.85rem; font-size: 0.82rem; }
     font-weight: 400;
   }
   .pager-hint:hover { background: none; }
+
+  /* Activity has no link field: point back to the New pane. */
+  .empty-hint .hint-wide { display: none; }
+  .empty-hint .hint-phone { display: inline; }
   .pager-hint .icon { width: 15px; height: 15px; transform: rotate(180deg); animation: nudge 1.6s ease-in-out 0.8s 2; }
 }
 

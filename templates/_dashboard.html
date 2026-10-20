@@ -26,6 +26,9 @@
 </section>
 
 {% for d in downloading %}{% include "_hero.html" %}{% endfor %}
+{% if downloading.is_empty() %}
+<p class="empty-hint"><span class="hint-wide">Nothing is downloading. Paste a link above to start one.</span><span class="hint-phone">Nothing is downloading. Swipe back to <button type="button" class="link" data-pane="0">New</button> and paste a link to start one.</span></p>
+{% endif %}
 
 {% for group in groups %}
 <section class="group">

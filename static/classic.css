@@ -459,6 +459,8 @@ progress.bar:indeterminate::-moz-progress-bar { background: transparent; }
    ------------------------------------------------------------------------- */
 
 .group { margin-top: 1.75rem; }
+.empty-hint { margin: 1.5rem 0 0; text-align: center; color: var(--muted); font-size: 0.9rem; }
+.empty-hint .hint-phone { display: none; }
 .group-head {
   display: flex;
   align-items: center;
