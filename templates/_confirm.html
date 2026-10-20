@@ -1,0 +1,11 @@
+<div class="modal" hx-get="/ui/modal/close" hx-trigger="click target:.modal" hx-target="#modal">
+  <div class="dialog" role="alertdialog" aria-modal="true" aria-labelledby="dialog-title" aria-describedby="dialog-message">
+    <h2 id="dialog-title" class="dialog-title">{{ title }}</h2>
+    <p id="dialog-message" class="dialog-message">{{ message }}</p>
+    {% if let Some(detail) = detail %}<p class="dialog-detail break">{{ detail }}</p>{% endif %}
+    <div class="dialog-actions">
+      <button type="button" hx-get="/ui/modal/close" hx-target="#modal" autofocus>{{ dismiss }}</button>
+      <button type="button" class="primary" hx-post="{{ action }}" hx-target="#flash" hx-disabled-elt="this">{{ confirm }}</button>
+    </div>
+  </div>
+</div>

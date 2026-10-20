@@ -66,13 +66,17 @@ pub fn protected_routes() -> Router<AppState> {
         .route("/ui/downloads/{id}/detail", get(detail_fragment))
         .route(
             "/ui/cancelled/delete",
-            post(|state| delete_all(state, TransferState::Cancelled)),
+            get(|| confirm_delete_all(TransferState::Cancelled))
+                .post(|state| delete_all(state, TransferState::Cancelled)),
         )
         .route(
             "/ui/completed/delete",
-            post(|state| delete_all(state, TransferState::Completed)),
+            get(|| confirm_delete_all(TransferState::Completed))
+                .post(|state| delete_all(state, TransferState::Completed)),
         )
         .route("/ui/downloads/{id}/{action}", post(download_action))
+        .route("/ui/downloads/{id}/{action}/confirm", get(confirm_action))
+        .route("/ui/modal/close", get(close_modal))
 }
 
 // ---------------------------------------------------------------------------
@@ -580,9 +584,9 @@ struct Group {
 }
 
 struct ClearAction {
+    /// GET shows the confirmation dialog, POST empties the list.
     url: &'static str,
     label: &'static str,
-    confirm: &'static str,
 }
 
 #[derive(Template)]
@@ -745,12 +749,10 @@ async fn load_dashboard(state: &AppState) -> Dashboard {
             "Cancelled" => Some(ClearAction {
                 url: "/ui/cancelled/delete",
                 label: "Delete all",
-                confirm: "Delete all cancelled downloads from the list?",
             }),
             "Completed" => Some(ClearAction {
                 url: "/ui/completed/delete",
                 label: "Clear list",
-                confirm: "Remove all completed downloads from the list? Their files stay on disk.",
             }),
             _ => None,
         },
@@ -883,6 +885,120 @@ struct Flash {
     message: String,
 }
 
+/// The result of a download action: a toast, and the confirmation dialog
+/// (if one led here) closed.
+#[derive(Template)]
+#[template(path = "_action_result.html")]
+struct ActionResult {
+    ok: bool,
+    message: String,
+}
+
+/// An in-page confirmation dialog, swapped into `#modal`.
+#[derive(Template)]
+#[template(path = "_confirm.html")]
+struct ConfirmDialog {
+    title: &'static str,
+    message: String,
+    /// Extra line, e.g. the file path about to be deleted.
+    detail: Option<String>,
+    /// POSTed when confirmed.
+    action: String,
+    confirm: &'static str,
+    dismiss: &'static str,
+}
+
+async fn close_modal() -> Response {
+    Html("").into_response()
+}
+
+async fn confirm_action(
+    State(state): State<AppState>,
+    Path((id, action)): Path<(Uuid, String)>,
+) -> Response {
+    let d = match state.downloads.get(id).await {
+        Ok(d) => d,
+        Err(e) => {
+            return render_status(
+                status_for(&e),
+                &Flash {
+                    ok: false,
+                    message: e.message,
+                },
+            );
+        }
+    };
+    let name = d.filename.clone().unwrap_or_else(|| d.display_url.clone());
+    let (title, message, detail, confirm, dismiss) = match action.as_str() {
+        "cancel" => (
+            "Cancel download?",
+            format!("\u{201c}{name}\u{201d} stops, and its partial data is deleted."),
+            None,
+            "Cancel download",
+            "Keep downloading",
+        ),
+        "delete" => (
+            "Remove from list?",
+            format!("\u{201c}{name}\u{201d} is removed from the list. The file stays on disk."),
+            None,
+            "Remove",
+            "Keep",
+        ),
+        "delete-file" => (
+            "Delete file?",
+            format!(
+                "\u{201c}{name}\u{201d} is deleted from disk and removed from the list. \
+                 This can\u{2019}t be undone."
+            ),
+            d.file_path.clone(),
+            "Delete file",
+            "Keep file",
+        ),
+        _ => {
+            return render_status(
+                StatusCode::NOT_FOUND,
+                &Flash {
+                    ok: false,
+                    message: "unknown action".into(),
+                },
+            );
+        }
+    };
+    render(&ConfirmDialog {
+        title,
+        message,
+        detail,
+        action: format!("/ui/downloads/{id}/{action}"),
+        confirm,
+        dismiss,
+    })
+}
+
+async fn confirm_delete_all(which: TransferState) -> Response {
+    let dialog = if which == TransferState::Completed {
+        ConfirmDialog {
+            title: "Clear the completed list?",
+            message: "All completed downloads are removed from the list. Their files stay on \
+                      disk."
+                .into(),
+            detail: None,
+            action: "/ui/completed/delete".into(),
+            confirm: "Clear list",
+            dismiss: "Keep",
+        }
+    } else {
+        ConfirmDialog {
+            title: "Delete all cancelled downloads?",
+            message: "They are removed from the list.".into(),
+            detail: None,
+            action: "/ui/cancelled/delete".into(),
+            confirm: "Delete all",
+            dismiss: "Keep",
+        }
+    };
+    render(&dialog)
+}
+
 async fn download_action(
     State(state): State<AppState>,
     Path((id, action)): Path<(Uuid, String)>,
@@ -901,13 +1017,13 @@ async fn download_action(
         _ => Err(AppError::not_found("unknown action")),
     };
     match result {
-        Ok(message) => with_refresh(render(&Flash {
+        Ok(message) => with_refresh(render(&ActionResult {
             ok: true,
             message: message.to_owned(),
         })),
         Err(e) => with_refresh(render_status(
             status_for(&e),
-            &Flash {
+            &ActionResult {
                 ok: false,
                 message: e.message,
             },
@@ -919,7 +1035,7 @@ async fn delete_all(State(state): State<AppState>, which: TransferState) -> Resp
     let (status, flash) = match state.downloads.delete_all(which).await {
         Ok(n) => (
             StatusCode::OK,
-            Flash {
+            ActionResult {
                 ok: true,
                 message: format!(
                     "Removed {n} {} download{} from the list",
@@ -930,7 +1046,7 @@ async fn delete_all(State(state): State<AppState>, which: TransferState) -> Resp
         ),
         Err(e) => (
             status_for(&e),
-            Flash {
+            ActionResult {
                 ok: false,
                 message: e.message,
             },

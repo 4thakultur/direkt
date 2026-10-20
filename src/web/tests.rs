@@ -903,16 +903,42 @@ async fn completed_downloads_can_be_removed_with_or_without_their_file() {
     let gone_id = app.completed_download(&gone).await;
     let outside_id = app.completed_download(&outside).await;
 
+    // Buttons open an in-page dialog, never a browser alert.
     let dash = app.get("/ui/dashboard", &auth).await;
+    assert!(!dash.body.contains("hx-confirm"));
+    for action in ["delete", "delete-file"] {
+        let confirm = format!("/ui/downloads/{keep_id}/{action}/confirm");
+        assert!(dash.body.contains(&confirm), "{}", dash.body);
+        let dialog = app.get(&confirm, &auth).await;
+        assert_eq!(dialog.status, StatusCode::OK);
+        assert!(
+            dialog.body.contains("role=\"alertdialog\""),
+            "{}",
+            dialog.body
+        );
+        let post = format!("hx-post=\"/ui/downloads/{keep_id}/{action}\"");
+        assert!(dialog.body.contains(&post), "{}", dialog.body);
+    }
+    let dialog = app
+        .get(
+            &format!("/ui/downloads/{keep_id}/delete-file/confirm"),
+            &auth,
+        )
+        .await;
+    assert!(dialog.body.contains("kept.mkv"), "shows the file path");
+    let dialog = app.get("/ui/completed/delete", &auth).await;
     assert!(
-        dash.body
-            .contains(&format!("/ui/downloads/{keep_id}/delete\""))
+        dialog.body.contains("Their files stay on disk"),
+        "{}",
+        dialog.body
     );
-    assert!(
-        dash.body
-            .contains(&format!("/ui/downloads/{keep_id}/delete-file"))
-    );
-    assert!(dash.body.contains("/ui/completed/delete"));
+    assert!(dialog.body.contains("hx-post=\"/ui/completed/delete\""));
+    let r = app
+        .get(&format!("/ui/downloads/{keep_id}/bogus/confirm"), &auth)
+        .await;
+    assert_eq!(r.status, StatusCode::NOT_FOUND);
+    let r = app.get("/ui/modal/close", &auth).await;
+    assert_eq!((r.status, r.body.as_str()), (StatusCode::OK, ""));
     let detail = app.get(&format!("/downloads/{keep_id}"), &auth).await;
     assert!(!detail.body.contains("/delete"), "not on the detail page");
 
@@ -921,6 +947,10 @@ async fn completed_downloads_can_be_removed_with_or_without_their_file() {
         .await;
     assert_eq!(r.status, StatusCode::OK);
     assert!(r.body.contains("Removed from the list"), "{}", r.body);
+    assert!(
+        r.body.contains("id=\"modal\" hx-swap-oob"),
+        "the result closes the dialog"
+    );
     assert!(kept.exists(), "removing from the list keeps the file");
 
     let r = app

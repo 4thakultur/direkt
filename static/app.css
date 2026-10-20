@@ -558,6 +558,40 @@ progress.bar:indeterminate::-moz-progress-bar { background: transparent; }
 }
 
 /* ---------------------------------------------------------------------------
+   Confirmation dialog (server-rendered into #modal; no browser alerts)
+   ------------------------------------------------------------------------- */
+
+.modal {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: grid;
+  place-items: center;
+  padding: 1rem;
+  background: rgba(0, 0, 0, 0.78);
+}
+.dialog {
+  width: min(28rem, 100%);
+  padding: 1.25rem 1.25rem 1rem;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-top: 3px solid var(--accent);
+  border-radius: var(--radius-lg);
+}
+.dialog-title { font-size: 1.05rem; color: var(--text); }
+.dialog-message { color: var(--muted); overflow-wrap: anywhere; }
+.dialog-detail {
+  padding: 0.5rem 0.6rem;
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  color: var(--muted);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.dialog-actions { display: flex; justify-content: flex-end; gap: 0.5rem; margin-top: 1rem; }
+
+/* ---------------------------------------------------------------------------
    Cards, details, history, settings
    ------------------------------------------------------------------------- */
 
