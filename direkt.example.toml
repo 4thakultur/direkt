@@ -1,0 +1,43 @@
+# Direkt configuration example.
+#
+# Copy to direkt.toml (or point DIREKT_CONFIG at your file) and adjust.
+# Every key is optional; omitted keys use the defaults shown here.
+# Never put secrets in this file if it is committed anywhere.
+
+[server]
+# Address and port the web UI and API listen on.
+listen = "0.0.0.0:8080"
+
+[storage]
+# Database and application state. Back this directory up.
+data_dir = "/data"
+# Completed transfers are placed here.
+download_dir = "/downloads"
+# Partial downloads live here until the transfer completes. Keep it on the
+# same filesystem as download_dir so completion is an atomic rename.
+incomplete_dir = "/downloads/.incomplete"
+# Free space (MiB) to always leave on the incomplete_dir filesystem. Downloads
+# that would use it are blocked with an "insufficient disk space" error.
+min_free_space_mb = 1024
+
+[downloads]
+# Maximum simultaneous transfers (1-32).
+max_concurrent = 3
+# Automatic retries for transient failures before a download is marked failed.
+max_retries = 5
+# Retry delay starts here and doubles on each retry, up to retry_max_delay_secs.
+retry_base_delay_secs = 30
+retry_max_delay_secs = 3600
+
+[network]
+# By default Direkt only downloads from public internet addresses, which
+# protects your LAN from server-side request forgery. List private networks
+# here (CIDR notation) only if you need to download from hosts on them.
+allowed_private_networks = []
+# allowed_private_networks = ["192.168.1.0/24"]
+
+[log]
+# Log filter; the RUST_LOG environment variable overrides it.
+level = "info"
+# "pretty" for humans, "json" for log collectors.
+format = "pretty"

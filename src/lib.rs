@@ -1,0 +1,12 @@
+//! Direkt: a self-hostable direct download manager.
+
+pub mod config;
+pub mod domain;
+pub mod engine;
+pub mod error;
+pub mod fsutil;
+pub mod http_client;
+pub mod net;
+pub mod providers;
+pub mod service;
+pub mod store;

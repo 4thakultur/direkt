@@ -1,0 +1,7 @@
+/target
+/data
+/downloads
+/direkt.toml
+*.db
+*.db-shm
+*.db-wal
