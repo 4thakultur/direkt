@@ -217,6 +217,7 @@ pub struct ListQuery {
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct CreateToken {
     /// A label to recognize the token by, e.g. the integration using it.
+    #[schema(example = "phone shortcut")]
     pub name: String,
 }
 
@@ -296,6 +297,7 @@ async fn create_preview(
 /// Change a preview's type; the title and artwork are looked up again.
 #[utoipa::path(
     put, path = "/api/v1/previews/{id}", tag = "downloads",
+    params(("id" = Uuid, Path, description = "Preview ID")),
     request_body = RetypePreview,
     responses(
         (status = 200, body = Preview),
@@ -636,6 +638,7 @@ async fn get_onefichier(State(state): State<AppState>) -> Json<OneFichierSetting
 #[serde(deny_unknown_fields)]
 pub struct SetOneFichierKey {
     /// Premium API key from 1fichier.com (My account → Settings).
+    #[schema(example = "YOUR_1FICHIER_API_KEY")]
     pub api_key: String,
 }
 
@@ -721,6 +724,7 @@ async fn get_tmdb(State(state): State<AppState>) -> Json<TmdbSettings> {
 pub struct SetTmdbKey {
     /// TMDB API key (32 hex digits) or API read access token, from
     /// themoviedb.org (Settings → API).
+    #[schema(example = "YOUR_TMDB_KEY")]
     pub api_key: String,
 }
 
@@ -758,6 +762,7 @@ async fn delete_tmdb(State(state): State<AppState>) -> ApiResult<Json<TmdbSettin
 #[serde(deny_unknown_fields)]
 pub struct OneFichierSignIn {
     /// Email address of the 1fichier account.
+    #[schema(example = "you@example.com")]
     pub email: String,
     /// Account password. Send `************************` to reuse the stored
     /// password of the same account.

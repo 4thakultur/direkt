@@ -1396,6 +1396,36 @@ async fn ui_token_management() {
 }
 
 #[tokio::test]
+async fn api_reference_page() {
+    let app = TestApp::new().await;
+    let r = app.get("/settings/api", &[]).await;
+    assert_eq!(r.status, StatusCode::SEE_OTHER, "requires sign-in");
+
+    let (app, cookie) = TestApp::with_admin().await;
+    let auth = cookie_header(&cookie);
+    let settings = app.get("/settings", &auth).await;
+    assert!(settings.body.contains(r#"href="/settings/api""#));
+
+    let page = app.get("/settings/api", &auth).await;
+    assert_eq!(page.status, StatusCode::OK);
+    for text in [
+        "/api/v1/downloads/{id}/retry",
+        r#"id="op-create_download""#,
+        r#"id="schema-DownloadDto""#,
+        r##"href="#schema-DownloadDto""##,
+        "<code>insufficient_disk_space</code>",
+        "Authorization: Bearer $TOKEN",
+    ] {
+        assert!(page.body.contains(text), "missing {text}");
+    }
+    // Example JSON is escaped, never raw markup.
+    assert!(
+        page.body
+            .contains("{&#34;url&#34;:&#34;https://example.com/files/movie.mkv&#34;}")
+    );
+}
+
+#[tokio::test]
 async fn file_password_is_asked_on_the_confirmation_menu() {
     let (app, cookie) = TestApp::with_admin_local().await;
     let auth = cookie_header(&cookie);

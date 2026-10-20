@@ -1,0 +1,214 @@
+{% extends "app.html" %}
+{% block title %}API · Direkt{% endblock %}
+{% block nav_settings %} active{% endblock %}
+{% block corner %}<a href="/settings" class="corner-btn" aria-label="Settings" title="Settings"><svg class="icon" aria-hidden="true"><use href="#i-gear"/></svg></a>{% endblock %}
+
+{%- macro text(t) -%}
+{%- for s in t.iter() -%}{% if s.code %}<code>{{ s.text }}</code>{% else %}{{ s.text }}{% endif %}{%- endfor -%}
+{%- endmacro -%}
+
+{%- macro ty(t) -%}
+{%- if let Some(name) = t.schema -%}{{ t.prefix }}<a href="#schema-{{ name }}"><code>{{ name }}</code></a>
+{%- else -%}<code>{{ t.label }}</code>{%- endif -%}
+{%- endmacro -%}
+
+{%- macro fields(list) -%}
+<div class="table-wrap">
+<table class="api-fields">
+  <thead><tr><th>Name</th><th>Type</th><th>Description</th></tr></thead>
+  <tbody>
+  {% for f in list.iter() %}
+    <tr>
+      <td class="api-name">
+        <code>{{ f.name }}</code>
+        {% if f.required %}<span class="api-tag required">required</span>{% else %}<span class="api-tag">optional</span>{% endif %}
+        {% if !f.location.is_empty() %}<span class="api-tag">{{ f.location }}</span>{% endif %}
+      </td>
+      <td class="api-type">{% call ty(f.ty) %}{% endcall %}{% if f.nullable %} <span class="muted">or <code>null</code></span>{% endif %}</td>
+      <td>
+        {% call text(f.description) %}{% endcall %}
+        {% if !f.values.is_empty() %}<div class="api-values">One of {% for v in f.values %}<code>{{ v }}</code>{% if !loop.last %} {% endif %}{% endfor %}</div>{% endif %}
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{%- endmacro -%}
+
+{% block content %}
+<p class="back"><a href="/settings#tokens"><svg class="icon" aria-hidden="true"><use href="#i-back"/></svg><span>Settings</span></a></p>
+
+<div class="api">
+<nav class="api-toc" aria-label="API reference">
+  <p class="api-toc-title">On this page</p>
+  <ul>
+    <li><a href="#start">Getting started</a></li>
+    <li><a href="#states">Download states</a></li>
+    {% for g in api.groups %}
+    <li>
+      <a href="#{{ g.id }}">{{ g.description }}</a>
+      <ul>
+        {% for e in g.endpoints %}
+        <li><a href="#{{ e.id }}" title="{{ e.method }} {{ e.path }}"><span class="method {{ e.method_class() }}">{{ e.method }}</span><span class="api-toc-path">{{ e.short_path() }}</span></a></li>
+        {% endfor %}
+      </ul>
+    </li>
+    {% endfor %}
+    <li><a href="#schemas">Schemas</a></li>
+    <li><a href="#errors">Errors</a></li>
+  </ul>
+</nav>
+
+<article class="api-doc">
+  <header class="api-head">
+    <h1>{{ api.title }}</h1>
+    {% for p in api.intro %}<p class="muted">{% call text(p) %}{% endcall %}</p>{% endfor %}
+    <p class="api-links"><a href="/api/openapi.json">OpenAPI 3.1 document</a> · <a href="/settings#tokens">Manage tokens</a></p>
+  </header>
+
+  <section class="api-section" id="start">
+    <h2>Getting started</h2>
+    <p>
+      Every endpoint lives under <code>/api/v1</code> and speaks JSON.
+      Create a token under <a href="/settings#tokens">Settings → API tokens</a> and send it with every request as
+      <code>Authorization: Bearer &lt;token&gt;</code>. The examples on this page read the address and the token
+      from two shell variables:
+    </p>
+    <pre class="api-code"><code>DIREKT={{ origin }}
+TOKEN=dkt_...</code></pre>
+    <p>Then submit a download and follow its progress:</p>
+    <pre class="api-code"><code>curl -X POST "$DIREKT/api/v1/downloads" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"url":"https://example.com/files/movie.mkv"}'
+
+curl "$DIREKT/api/v1/downloads?state=queued,downloading" \
+  -H "Authorization: Bearer $TOKEN"</code></pre>
+    <dl class="details api-facts">
+      <dt>Authentication</dt>
+      <dd>A bearer token, or the web UI's session cookie. Tokens skip two-factor sign-in, so keep them secret and revoke unused ones.</dd>
+      <dt>Requests</dt>
+      <dd>Bodies are JSON with <code>Content-Type: application/json</code>. Unknown fields are rejected on most endpoints.</dd>
+      <dt>Times</dt>
+      <dd>RFC 3339 in UTC, e.g. <code>2026-10-21T08:30:00Z</code>.</dd>
+      <dt>Sizes and speeds</dt>
+      <dd>Bytes, and bytes per second.</dd>
+      <dt>Errors</dt>
+      <dd><code>{"error": {"kind": "...", "message": "..."}}</code> with a matching HTTP status; see <a href="#errors">Errors</a>.</dd>
+      <dt>Unauthenticated</dt>
+      <dd><code>GET /healthz</code> (health check) and <code>GET /api/openapi.json</code>.</dd>
+    </dl>
+  </section>
+
+  <section class="api-section" id="states">
+    <h2>Download states</h2>
+    <p>
+      A download's <code>state</code> follows the transfer. Organizing a completed file into the media library is
+      tracked separately in <code>post_state</code>, so a completed transfer stays completed even when organizing fails.
+    </p>
+    <div class="table-wrap">
+    <table class="api-fields">
+      <thead><tr><th>State</th><th>Meaning</th><th>Can become</th></tr></thead>
+      <tbody>
+      {% for s in api.states %}
+        <tr>
+          <td class="api-name"><code>{{ s.name }}</code></td>
+          <td>{{ s.meaning }}</td>
+          <td class="api-values">{% for n in s.next %}<code>{{ n }}</code>{% if !loop.last %} {% endif %}{% else %}<span class="muted">nothing (final)</span>{% endfor %}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    </div>
+  </section>
+
+  {% for g in api.groups %}
+  <section class="api-section" id="{{ g.id }}">
+    <h2>{{ g.description }}</h2>
+    {% for e in g.endpoints %}
+    <section class="endpoint" id="{{ e.id }}">
+      <h3 class="endpoint-head">
+        <span class="method {{ e.method_class() }}">{{ e.method }}</span>
+        <code class="endpoint-path break">{{ e.path }}</code>
+        <a class="endpoint-anchor" href="#{{ e.id }}" aria-label="Link to this endpoint">#</a>
+      </h3>
+      <p class="endpoint-summary">{% call text(e.summary) %}{% endcall %}</p>
+      {% for p in e.details %}<p class="muted">{% call text(p) %}{% endcall %}</p>{% endfor %}
+
+      {% if !e.params.is_empty() %}
+      <h4>Parameters</h4>
+      {% call fields(e.params) %}{% endcall %}
+      {% endif %}
+
+      {% if let Some(body) = e.body %}
+      <h4>Request body <span class="muted">· {% call ty(body.ty) %}{% endcall %}{% if !body.required %}, optional{% endif %}</span></h4>
+      {% if body.fields.is_empty() %}<p class="muted">No fields.</p>{% else %}{% call fields(body.fields) %}{% endcall %}{% endif %}
+      {% endif %}
+
+      <h4>Responses</h4>
+      <div class="table-wrap">
+      <table class="api-fields api-responses">
+        <thead><tr><th>Status</th><th>Description</th><th>Body</th></tr></thead>
+        <tbody>
+        {% for r in e.responses %}
+          <tr>
+            <td><span class="status-code{% if r.is_error() %} error{% endif %}">{{ r.status }}</span></td>
+            <td>{% call text(r.description) %}{% endcall %}</td>
+            <td class="api-type">{% if let Some(t) = r.ty %}{% call ty(t) %}{% endcall %}{% else %}<span class="muted">none</span>{% endif %}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      </div>
+
+      <h4>Example</h4>
+      <pre class="api-code"><code>{{ e.example }}</code></pre>
+    </section>
+    {% endfor %}
+  </section>
+  {% endfor %}
+
+  <section class="api-section" id="schemas">
+    <h2>Schemas</h2>
+    <p>The objects that requests and responses are made of. Fields marked optional may be left out.</p>
+    {% for s in api.schemas %}
+    <section class="endpoint schema" id="schema-{{ s.name }}">
+      <h3 class="endpoint-head"><code>{{ s.name }}</code></h3>
+      {% for p in s.description %}<p class="muted">{% call text(p) %}{% endcall %}</p>{% endfor %}
+      {% if !s.fields.is_empty() %}
+      {% call fields(s.fields) %}{% endcall %}
+      {% else if !s.values.is_empty() %}
+      <p class="api-values">A string, one of {% for v in s.values %}<code>{{ v }}</code>{% if !loop.last %} {% endif %}{% endfor %}</p>
+      {% endif %}
+    </section>
+    {% endfor %}
+  </section>
+
+  <section class="api-section" id="errors">
+    <h2>Errors</h2>
+    <p>
+      A failed request returns an error status and a body such as
+      <code>{"error": {"kind": "not_found", "message": "download not found"}}</code>.
+      The <code>message</code> is safe to show to people; branch on <code>kind</code>.
+      Malformed JSON, a wrong content type or an oversized body get the same shape, with the status that fits
+      (for example 413 or 415). A <code>401</code> also carries <code>WWW-Authenticate: Bearer</code>.
+    </p>
+    <div class="table-wrap">
+    <table class="api-fields">
+      <thead><tr><th>Kind</th><th>Status</th><th>Meaning</th></tr></thead>
+      <tbody>
+      {% for k in api.error_kinds %}
+        <tr>
+          <td class="api-name"><code>{{ k.name }}</code></td>
+          <td><span class="status-code error">{{ k.status }}</span></td>
+          <td>{{ k.meaning }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    </div>
+  </section>
+</article>
+</div>
+{% endblock %}

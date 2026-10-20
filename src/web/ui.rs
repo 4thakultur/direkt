@@ -56,6 +56,7 @@ pub fn protected_routes() -> Router<AppState> {
         .route("/", get(downloads_page))
         .route("/downloads/{id}", get(download_page))
         .route("/settings", get(settings_page))
+        .route("/settings/api", get(api_page))
         .route("/settings/tokens", post(create_token))
         .route("/settings/tokens/{id}/revoke", post(revoke_token))
         .route("/settings/password", post(change_password))
@@ -1420,6 +1421,32 @@ async fn settings_with(state: &AppState, theme: Theme, mut page: SettingsPage) -
 
 async fn settings_page(State(state): State<AppState>, theme: Theme) -> Response {
     render(&settings_with(&state, theme, SettingsPage::default()).await)
+}
+
+#[derive(Template)]
+#[template(path = "api.html")]
+struct ApiPage {
+    theme: Theme,
+    api: &'static super::api_docs::ApiReference,
+    /// This server's address as the browser reached it, for the examples.
+    origin: String,
+}
+
+async fn api_page(State(state): State<AppState>, theme: Theme, headers: HeaderMap) -> Response {
+    let host = headers
+        .get(header::HOST)
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("localhost:9877");
+    let scheme = if state.secure_cookies {
+        "https"
+    } else {
+        "http"
+    };
+    render(&ApiPage {
+        theme,
+        api: &super::api_docs::REFERENCE,
+        origin: format!("{scheme}://{host}"),
+    })
 }
 
 #[derive(Deserialize)]

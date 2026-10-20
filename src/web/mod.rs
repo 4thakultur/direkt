@@ -2,6 +2,7 @@
 //! headers. Handlers stay thin; business rules live in the services.
 
 pub mod api;
+mod api_docs;
 mod error;
 pub mod server;
 mod ui;

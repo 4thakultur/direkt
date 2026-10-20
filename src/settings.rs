@@ -346,6 +346,7 @@ pub struct MiscUpdate {
     /// Bytes per second, at least 10000; 0 removes the limit.
     pub speed_limit: Option<u64>,
     /// 1 to 32. Lowering it lets running downloads finish.
+    #[schema(example = 3)]
     pub max_concurrent: Option<usize>,
     pub confirm_downloads: Option<bool>,
 }

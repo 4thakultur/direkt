@@ -990,3 +990,145 @@ th { font-size: 0.7rem; color: var(--dim); font-weight: 600; letter-spacing: 0.1
 
 /* Media library folder that failed its startup check. */
 .folder-problem { display: block; }
+
+/* ---------------------------------------------------------------------------
+   API reference (/settings/api): a contents list beside the endpoints
+   ------------------------------------------------------------------------- */
+
+.api { display: grid; grid-template-columns: 250px minmax(0, 1fr); gap: 2.5rem; align-items: start; }
+.api-toc {
+  position: sticky;
+  top: calc(56px + 1.25rem);
+  max-height: calc(100vh - 56px - 2.5rem);
+  overflow-y: auto;
+  font-size: 0.8rem;
+}
+.api-toc ul { list-style: none; margin: 0; padding: 0; }
+.api-toc > ul > li { margin-bottom: 0.6rem; }
+.api-toc > ul > li > a { color: var(--text); font-weight: 600; }
+.api-toc ul ul { margin-top: 0.3rem; }
+.api-toc ul ul a { display: flex; gap: 0.4rem; align-items: baseline; padding: 0.15rem 0; color: var(--muted); }
+.api-toc ul ul a:hover { color: var(--text); }
+.api-toc a:hover { color: var(--accent); }
+.api-toc-title { color: var(--dim); font-size: 0.7rem; font-weight: 600; letter-spacing: 0.14em; text-transform: uppercase; }
+.api-toc-path { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); font-size: 0.72rem; }
+.api-toc .method { min-width: 3.1rem; padding: 0; border: none; background: none; font-size: 0.6rem; }
+
+.api-doc { min-width: 0; }
+.api-head { padding-bottom: 1.25rem; margin-bottom: 1.5rem; border-bottom: 1px solid var(--border); }
+.api-head h1 { font-size: 1.6rem; color: #fff; }
+.api-links { font-size: 0.85rem; }
+.api-links a, .api-doc p a, .api-doc td a, .api-doc dd a { color: var(--accent); }
+.api-links a:hover, .api-doc p a:hover, .api-doc td a:hover, .api-doc dd a:hover { color: var(--accent-hover); }
+
+.api-section { margin-bottom: 2.5rem; scroll-margin-top: calc(56px + 1rem); }
+.api-section > h2 {
+  margin-bottom: 0.9rem;
+  padding-left: 0.6rem;
+  border-left: 3px solid var(--accent);
+  font-size: 1.15rem;
+  color: #fff;
+}
+.api-section > p { color: var(--muted); max-width: 70ch; }
+.api-section code, .api-fields code { color: var(--text); }
+
+.endpoint {
+  margin-top: 1rem;
+  padding: 1.1rem 1.25rem 1.25rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  scroll-margin-top: calc(56px + 1rem);
+}
+.endpoint:target { border-color: var(--accent); }
+.endpoint h4 {
+  margin: 1.1rem 0 0.4rem;
+  color: var(--dim);
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+.endpoint h4 .muted { text-transform: none; letter-spacing: 0; font-weight: 400; font-size: 0.8rem; }
+.endpoint-head { display: flex; flex-wrap: wrap; align-items: center; gap: 0.6rem; margin-bottom: 0.6rem; font-size: 1rem; }
+.endpoint-path { font-size: 0.95rem; color: #fff; }
+.endpoint-anchor { margin-left: auto; color: var(--dim); font-weight: 400; }
+.endpoint-anchor:hover { color: var(--accent); }
+.endpoint-summary { color: var(--text); }
+.endpoint .muted { font-size: 0.875rem; }
+
+.method {
+  display: inline-block;
+  min-width: 3.6rem;
+  padding: 0.15rem 0.4rem;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-align: center;
+  color: var(--muted);
+}
+.method.post { color: #fff; border-color: var(--accent); background: var(--accent); }
+.method.put, .method.patch { color: var(--warn); border-color: rgba(255, 138, 122, 0.4); }
+.method.delete { color: var(--error); border-color: rgba(255, 59, 59, 0.4); background: var(--error-bg); }
+.api-toc .method.post { color: var(--accent); background: none; }
+.api-toc .method.delete { background: none; }
+
+.api-fields { font-size: 0.84rem; }
+.api-fields td { vertical-align: top; }
+.api-fields tbody tr:last-child td { border-bottom: none; }
+.api-name { white-space: nowrap; }
+.api-type { white-space: nowrap; }
+.api-tag {
+  display: inline-block;
+  margin-left: 0.3rem;
+  padding: 0 0.35rem;
+  border-radius: var(--radius);
+  font-size: 0.66rem;
+  color: var(--dim);
+  background: var(--surface-3);
+}
+.api-tag.required { color: var(--accent); background: var(--accent-bg); }
+.api-doc a code { color: var(--accent); }
+.api-values { margin-top: 0.3rem; font-size: 0.8rem; color: var(--muted); }
+.api-values code { display: inline-block; margin: 0.1rem 0; }
+.status-code { font-family: var(--mono); font-weight: 600; color: var(--text); }
+.status-code.error { color: var(--warn); }
+
+.api-code {
+  margin: 0.4rem 0 0.75rem;
+  padding: 0.8rem 1rem;
+  overflow-x: auto;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-left: 2px solid var(--accent);
+  border-radius: var(--radius);
+  font-size: 0.8rem;
+  line-height: 1.55;
+}
+.api-code code { color: var(--text); }
+.api-facts { margin-top: 1rem; }
+
+@media (max-width: 900px) {
+  .api { grid-template-columns: minmax(0, 1fr); gap: 1rem; }
+  .api-toc { position: static; max-height: none; }
+  /* Only the sections, as a row of links: the endpoints are a scroll away. */
+  .api-toc ul ul { display: none; }
+  .api-toc > ul { display: flex; flex-wrap: wrap; gap: 0.4rem; }
+  .api-toc > ul > li { margin: 0; }
+  .api-toc > ul > li > a {
+    display: block;
+    padding: 0.3rem 0.6rem;
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius);
+    font-weight: 500;
+  }
+}
+
+@media (max-width: 520px) {
+  .endpoint { padding: 0.9rem; }
+  .api-name, .api-type { white-space: normal; }
+  .api-fields th, .api-fields td { padding: 0.45rem 0.35rem; }
+}

@@ -3,6 +3,11 @@
 The machine-readable specification is served by a running instance at
 `/api/openapi.json` (OpenAPI 3.1). It requires no authentication.
 
+A readable reference, generated from the same document, is in the web UI at
+`/settings/api` (linked from *Settings → API tokens*). It lists every endpoint
+with its parameters, request fields, responses and a `curl` example, plus the
+download states, schemas and error kinds. It requires signing in.
+
 ## Authentication
 
 Every endpoint under `/api/v1` needs one of these:

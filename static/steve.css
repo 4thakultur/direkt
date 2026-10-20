@@ -1241,3 +1241,139 @@ td button { padding: 0.3rem 0.85rem; font-size: 0.82rem; }
 
 /* Media library folder that failed its startup check. */
 .folder-problem { display: block; }
+
+/* ---------------------------------------------------------------------------
+   API reference (/settings/api): a sidebar of contents, as in Apple's
+   developer documentation, beside grouped cards
+   ------------------------------------------------------------------------- */
+
+.api { display: grid; grid-template-columns: 250px minmax(0, 1fr); gap: 2.5rem; align-items: start; }
+.api-toc {
+  position: sticky;
+  top: calc(var(--topbar-h) + env(safe-area-inset-top) + 1.25rem);
+  max-height: calc(100vh - var(--topbar-h) - 2.5rem);
+  overflow-y: auto;
+  font-size: 0.85rem;
+}
+.api-toc ul { list-style: none; margin: 0; padding: 0; }
+.api-toc > ul > li { margin-bottom: 0.75rem; }
+.api-toc > ul > li > a { color: var(--text); font-weight: 600; }
+.api-toc ul ul { margin-top: 0.3rem; }
+.api-toc ul ul a { display: flex; gap: 0.45rem; align-items: baseline; padding: 0.2rem 0; color: var(--muted); }
+.api-toc a:hover { color: var(--accent-text); text-decoration: none; }
+.api-toc-title { color: var(--muted); font-size: 0.78rem; font-weight: 500; }
+.api-toc-path { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); font-size: 0.76rem; }
+
+.api-doc { min-width: 0; }
+.api-head { margin-bottom: 2rem; }
+.api-head h1 {
+  margin: 0.25rem 0 0.75rem;
+  font-size: 2.5rem;
+  font-weight: 700;
+  letter-spacing: -0.035em;
+  line-height: 1.1;
+}
+.api-head p { max-width: 65ch; }
+.api-links { font-size: 0.95rem; }
+
+.api-section { margin-bottom: 2.75rem; scroll-margin-top: calc(var(--topbar-h) + 1rem); }
+.api-section > h2 { margin-bottom: 0.75rem; font-size: 1.6rem; font-weight: 700; }
+.api-section > p { color: var(--muted); max-width: 70ch; }
+.api-section > .table-wrap, .api-facts {
+  padding: 0.25rem 1.1rem;
+  background: var(--surface);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+.api-facts { margin-top: 1.25rem; }
+.api-facts dd { text-align: left; }
+
+.endpoint {
+  margin-top: 1rem;
+  padding: 1.25rem 1.35rem 1.35rem;
+  background: var(--surface);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  scroll-margin-top: calc(var(--topbar-h) + 1rem);
+}
+.endpoint:target { box-shadow: 0 0 0 3px var(--ring), var(--shadow); }
+.endpoint h4 { margin: 1.25rem 0 0.35rem; font-size: 0.95rem; font-weight: 600; }
+.endpoint h4 .muted { font-weight: 400; }
+.endpoint-head { display: flex; flex-wrap: wrap; align-items: center; gap: 0.6rem; margin-bottom: 0.6rem; font-size: 1.05rem; }
+.endpoint-path { padding: 0; background: none; font-size: 1rem; font-weight: 600; }
+.schema .endpoint-head code { padding: 0; background: none; font-size: 1.1rem; font-weight: 600; }
+.endpoint-anchor { margin-left: auto; color: var(--dim); font-weight: 400; }
+.endpoint-summary { font-size: 1rem; }
+.endpoint .muted { font-size: 0.9rem; }
+
+.method {
+  display: inline-block;
+  min-width: 3.6rem;
+  padding: 0.2rem 0.5rem;
+  border-radius: 999px;
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-align: center;
+  color: var(--accent-text);
+  background: var(--accent-bg);
+}
+.method.get { color: var(--green); background: var(--green-bg); }
+.method.put, .method.patch { color: var(--orange); background: var(--orange-bg); }
+.method.delete { color: var(--red); background: var(--red-bg); }
+/* Only the colour in the contents list. */
+.api-toc .method { min-width: 3.2rem; padding: 0; background: none; font-size: 0.62rem; text-align: left; }
+
+.api-fields { font-size: 0.88rem; }
+.api-fields td { vertical-align: top; }
+.api-name, .api-type { white-space: nowrap; }
+.api-tag {
+  display: inline-block;
+  margin-left: 0.3rem;
+  padding: 0.05rem 0.45rem;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  color: var(--muted);
+  background: var(--fill);
+}
+.api-tag.required { color: var(--orange); background: var(--orange-bg); }
+.api-doc a code { color: var(--accent-text); }
+.api-values { margin-top: 0.3rem; font-size: 0.82rem; color: var(--muted); }
+.api-values code { display: inline-block; margin: 0.1rem 0; }
+.status-code { font-family: var(--mono); font-weight: 600; color: var(--green); }
+.status-code.error { color: var(--orange); }
+
+.api-code {
+  margin: 0.5rem 0 0.75rem;
+  padding: 0.9rem 1.1rem;
+  overflow-x: auto;
+  background: var(--surface-2);
+  border-radius: var(--radius-sm);
+  font-size: 0.82rem;
+  line-height: 1.55;
+}
+.api-code code { padding: 0; background: none; font-size: inherit; overflow-wrap: normal; }
+.api-section > .api-code { background: var(--surface); box-shadow: var(--shadow); }
+
+@media (max-width: 900px) {
+  .api { grid-template-columns: minmax(0, 1fr); gap: 1rem; }
+  .api-toc { position: static; max-height: none; }
+  /* Only the sections, as a row of capsules: the endpoints are a scroll away. */
+  .api-toc ul ul { display: none; }
+  .api-toc > ul { display: flex; flex-wrap: wrap; gap: 0.45rem; }
+  .api-toc > ul > li { margin: 0; }
+  .api-toc > ul > li > a {
+    display: block;
+    padding: 0.35rem 0.85rem;
+    border-radius: 999px;
+    background: var(--fill);
+    font-weight: 500;
+  }
+}
+
+@media (max-width: 520px) {
+  .api-head h1 { font-size: 2.125rem; }
+  .endpoint { padding: 1rem; }
+  .api-name, .api-type { white-space: normal; }
+  .api-fields th, .api-fields td { padding: 0.5rem 0.35rem; }
+}
