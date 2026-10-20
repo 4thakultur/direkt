@@ -34,23 +34,21 @@ write to. Movie, TV and fallback folders must be separate, and none may be
 inside another; Direkt refuses to start otherwise. Point your Jellyfin
 "Movies" and "Shows" libraries at the first two.
 
-In Docker, these are paths **inside the container**. Mount your library into
-the Direkt container and set the variables in the compose file:
+In Docker, these are paths **inside the container**. The shipped
+`compose.yaml` already sets them to `/media/movies`, `/media/tv` and
+`/media/unsorted` and mounts a host folder at each; you choose the host
+folders in `.env`, using their real (case-sensitive) names:
 
-```yaml
-services:
-  direkt:
-    volumes:
-      - /srv/media:/media
-    environment:
-      DIREKT_MOVIES_DIR: /media/movies
-      DIREKT_TV_DIR: /media/tv
-      DIREKT_UNSORTED_DIR: /media/unsorted   # optional
+```sh
+HOST_MOVIES_DIR=/srv/media/Movies
+HOST_TV_DIR=/srv/media/TV Shows
+HOST_UNSORTED_DIR=/srv/media/Unsorted
 ```
 
- When the library is on the same filesystem as
-the download folder, a move is an instant rename. Otherwise Direkt copies the
-file and then deletes the original.
+See [docker.md](docker.md#volumes). When the library is on the same
+filesystem as the download folder and Direkt sees both through one mount, a
+move is an instant rename. Otherwise, as with the separate mounts of the
+shipped `compose.yaml`, Direkt copies the file and then deletes the original.
 
 When no movie or TV folder is set, downloads stay in the download folder, as
 before.

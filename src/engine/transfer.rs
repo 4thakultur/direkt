@@ -56,6 +56,15 @@ pub(super) struct Attempt<'a> {
 
 impl Attempt<'_> {
     pub async fn run(mut self) -> Result<AttemptOutcome, TransferError> {
+        // Created at startup, but it may have been removed since (a cleaned-up
+        // downloads folder, for one).
+        let dir = &self.inner.settings.incomplete_dir;
+        tokio::fs::create_dir_all(dir).await.map_err(|e| {
+            TransferError::from_io(
+                &e,
+                &format!("creating the incomplete-downloads folder {}", dir.display()),
+            )
+        })?;
         let mut may_restart = true;
         loop {
             match self.run_once().await? {
@@ -307,8 +316,12 @@ impl Attempt<'_> {
     /// configured reserve.
     fn check_disk_space(&self, remaining: Option<u64>) -> Result<(), TransferError> {
         let dir = &self.inner.settings.incomplete_dir;
-        let available = fsutil::available_space(dir)
-            .map_err(|e| TransferError::from_io(&e, "checking free disk space"))?;
+        let available = fsutil::available_space(dir).map_err(|e| {
+            TransferError::from_io(
+                &e,
+                &format!("checking free disk space in {}", dir.display()),
+            )
+        })?;
         let needed = remaining
             .unwrap_or(0)
             .saturating_add(self.inner.settings.min_free_bytes);

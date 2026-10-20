@@ -177,9 +177,11 @@
     {% endif %}
     <p class="muted small">
       For safety, these folders can only be set when Direkt is launched, with
-      the environment variables shown (in Docker, under <code>environment:</code>
-      in your compose file, as paths inside the container). Restart Direkt to
-      change them. Without a fallback folder, videos that can't be identified
+      the environment variables shown, as paths inside the container. With the
+      shipped Docker Compose file, leave those as they are and choose the host
+      folders mounted there with <code>HOST_MOVIES_DIR</code>,
+      <code>HOST_TV_DIR</code> and <code>HOST_UNSORTED_DIR</code> in
+      <code>.env</code>. Restart Direkt to change them. Without a fallback folder, videos that can't be identified
       stay in the download folder and are marked for attention.
     </p>
   </div>

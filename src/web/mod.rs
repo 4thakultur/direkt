@@ -222,7 +222,10 @@ async fn security_headers(request: Request, next: Next) -> Response {
     set(header::CONTENT_SECURITY_POLICY, CSP);
     set(header::X_CONTENT_TYPE_OPTIONS, "nosniff");
     set(header::X_FRAME_OPTIONS, "DENY");
-    set(header::REFERRER_POLICY, "no-referrer");
+    // Not `no-referrer`: that makes browsers send `Origin: null` on form
+    // posts, and over plain HTTP (no `Sec-Fetch-Site`) `same_origin` needs
+    // the real origin. Other sites still get no referrer.
+    set(header::REFERRER_POLICY, "same-origin");
     if !is_static {
         set(header::CACHE_CONTROL, "no-store");
     }

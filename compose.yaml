@@ -13,11 +13,17 @@ services:
     restart: unless-stopped
     # Files Direkt creates belong to this user and group on the host.
     user: "${PUID:-1000}:${PGID:-1000}"
+    # HOST_* variables in .env are host-side settings read by Compose only;
+    # Direkt never sees them. The older DIREKT_PORT, DIREKT_DATA_DIR,
+    # DIREKT_DOWNLOADS_DIR and DIREKT_MEDIA_DIR names still work.
     ports:
-      - "${DIREKT_PORT:-9877}:9877"
+      - "${HOST_PORT:-${DIREKT_PORT:-9877}}:9877"
     environment:
-      # Media library folders, inside the container. Each must exist.
-      # Remove all three to leave completed downloads in /downloads.
+      # Read by Direkt: the media library folders inside the container. They
+      # match the mounts below; choose the host folders with HOST_MOVIES_DIR,
+      # HOST_TV_DIR and HOST_UNSORTED_DIR in .env, not here.
+      # To leave completed downloads in /downloads, remove these three lines
+      # and the three library mounts.
       DIREKT_MOVIES_DIR: /media/movies
       DIREKT_TV_DIR: /media/tv
       DIREKT_UNSORTED_DIR: /media/unsorted
@@ -25,13 +31,33 @@ services:
       DIREKT_ONEFICHIER_API_KEY: ${DIREKT_ONEFICHIER_API_KEY:-}
       DIREKT_TMDB_API_KEY: ${DIREKT_TMDB_API_KEY:-}
       # RUST_LOG: debug
+    # Host folders must exist: Compose refuses to start rather than create
+    # them owned by root, or create an empty library where a mount is missing.
     volumes:
       # Database, setup token, artwork cache. Back this up.
-      - ${DIREKT_DATA_DIR:-./data}:/data
+      - type: bind
+        source: ${HOST_DATA_DIR:-${DIREKT_DATA_DIR:-./data}}
+        target: /data
+        bind: { create_host_path: false }
       # Completed and partial downloads.
-      - ${DIREKT_DOWNLOADS_DIR:-./downloads}:/downloads
-      # Media library (the parent of the movies, tv and unsorted folders).
-      - ${DIREKT_MEDIA_DIR:-./media}:/media
+      - type: bind
+        source: ${HOST_DOWNLOADS_DIR:-${DIREKT_DOWNLOADS_DIR:-./downloads}}
+        target: /downloads
+        bind: { create_host_path: false }
+      # Media library folders. Without HOST_*_DIR they default to movies, tv
+      # and unsorted inside DIREKT_MEDIA_DIR (the older setting) or ./media.
+      - type: bind
+        source: ${HOST_MOVIES_DIR:-${DIREKT_MEDIA_DIR:-./media}/movies}
+        target: /media/movies
+        bind: { create_host_path: false }
+      - type: bind
+        source: ${HOST_TV_DIR:-${DIREKT_MEDIA_DIR:-./media}/tv}
+        target: /media/tv
+        bind: { create_host_path: false }
+      - type: bind
+        source: ${HOST_UNSORTED_DIR:-${DIREKT_MEDIA_DIR:-./media}/unsorted}
+        target: /media/unsorted
+        bind: { create_host_path: false }
       # Optional: your own configuration file (see direkt.example.toml).
       # - ./direkt.toml:/etc/direkt/direkt.toml:ro
     # Hardening: Direkt writes only to the mounted directories.

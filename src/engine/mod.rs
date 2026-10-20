@@ -698,6 +698,12 @@ async fn finalize(
     filename: &str,
 ) -> Result<(), TransferError> {
     let dir = inner.settings.download_dir.clone();
+    tokio::fs::create_dir_all(&dir).await.map_err(|e| {
+        TransferError::from_io(
+            &e,
+            &format!("creating the download folder {}", dir.display()),
+        )
+    })?;
     for _ in 0..5 {
         let (dir, name) = (dir.clone(), filename.to_owned());
         let dest = tokio::task::spawn_blocking(move || fsutil::unique_destination(&dir, &name))

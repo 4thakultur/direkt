@@ -22,29 +22,49 @@ docker compose exec direkt cat /data/setup-token
 
 ## Volumes
 
-| Container path      | Host (default)  | Holds |
-|---------------------|-----------------|-------|
-| `/data`             | `./data`        | SQLite database, setup token, artwork cache. **Back this up.** |
-| `/downloads`        | `./downloads`   | Completed downloads; partial ones in `/downloads/.incomplete` |
-| `/media`            | `./media`       | The media library: `movies`, `tv`, `unsorted` |
-| `/etc/direkt/direkt.toml` | (built in) | Configuration; optional bind mount, see below |
+| Container path      | `.env` setting (default)               | Holds |
+|---------------------|----------------------------------------|-------|
+| `/data`             | `HOST_DATA_DIR` (`./data`)             | SQLite database, setup token, artwork cache. **Back this up.** |
+| `/downloads`        | `HOST_DOWNLOADS_DIR` (`./downloads`)   | Completed downloads; partial ones in `/downloads/.incomplete` |
+| `/media/movies`     | `HOST_MOVIES_DIR` (`./media/movies`)   | Movie library |
+| `/media/tv`         | `HOST_TV_DIR` (`./media/tv`)           | TV library |
+| `/media/unsorted`   | `HOST_UNSORTED_DIR` (`./media/unsorted`) | Videos that couldn't be identified with confidence |
+| `/etc/direkt/direkt.toml` | (built in)                       | Configuration; optional bind mount, see below |
 
-Set the host side with `DIREKT_DATA_DIR`, `DIREKT_DOWNLOADS_DIR` and
-`DIREKT_MEDIA_DIR` in `.env`. Paths inside the container are what Direkt
-sees and logs; they are not the host paths.
+Two kinds of variables are involved:
 
-The `movies`, `tv` and `unsorted` folders must exist: Direkt creates the
-show, movie and season folders inside them, never the library folders
-themselves, so a missing mount can't fill your system disk. Point Jellyfin
-or Plex at the host's `media/movies` and `media/tv`. To run without a media
-library, delete the three `DIREKT_*_DIR` lines in `compose.yaml`; completed
-files then stay in `/downloads`.
+- **`HOST_*` in `.env`** are read by Docker Compose only. They choose which
+  host folder is mounted at each container path (and `HOST_PORT` the host
+  port). Use your real folder names, which are case-sensitive, for example
+  `HOST_TV_DIR=/srv/media/TV Shows`.
+- **`DIREKT_*`** are read by Direkt inside the container. The library ones
+  in `compose.yaml` (`DIREKT_MOVIES_DIR=/media/movies` and so on) are
+  container paths that match the mounts; leave them as they are.
 
-`/downloads` and `/media` are separate mounts, so organizing a file copies it
-and then deletes the original, which takes a while for large files. To get
-instant moves, mount one host directory that holds both, and point
-`storage.download_dir` and `storage.incomplete_dir` at it in your own
-`direkt.toml`.
+Direkt only sees, checks and logs container paths, never host paths.
+
+Every host folder must exist before the first start: the mounts set
+`create_host_path: false`, so Compose refuses to start instead of creating a
+missing one owned by root. Direkt likewise creates movie, show and season
+folders inside the libraries but never the library folders themselves, so a
+missing mount can't fill your system disk. Point Jellyfin or Plex at the
+same host folders. To run without a media library, delete the three
+`DIREKT_*_DIR` lines and the three library mounts in `compose.yaml`;
+completed files then stay in `/downloads`.
+
+Each mount is separate, so organizing a file copies it from `/downloads`
+into the library and then deletes the original, even when both are on the
+same disk. That takes a while for large files; the download stays completed
+in the meantime.
+
+### Upgrading from the older variable names
+
+`.env` files written for earlier versions keep working: `DIREKT_PORT`,
+`DIREKT_DATA_DIR` and `DIREKT_DOWNLOADS_DIR` are used when the `HOST_*`
+setting is unset, and `DIREKT_MEDIA_DIR` provides the libraries as its
+`movies`, `tv` and `unsorted` subfolders. If your library folders are named
+differently (`Movies`, `TV Shows`), set `HOST_MOVIES_DIR`, `HOST_TV_DIR` and
+`HOST_UNSORTED_DIR` to them.
 
 ## Permissions
 
@@ -140,7 +160,7 @@ HTTPS and `server.secure_cookies = true`.
 | Symptom | Cause |
 |---------|-------|
 | `creating directory /downloads/...: Permission denied` | The mounted directory isn't writable by `PUID:PGID` |
-| Settings → Media library shows a folder as failing | It doesn't exist inside the container: check `DIREKT_MEDIA_DIR` and the folder names |
+| Settings → Media library shows a folder as failing | It doesn't exist inside the container: check `HOST_MOVIES_DIR`, `HOST_TV_DIR` and `HOST_UNSORTED_DIR` in `.env`, including upper and lower case |
 | Login doesn't stick | `server.secure_cookies = true` over plain HTTP; turn it off or use HTTPS |
 | Downloads from a LAN host are refused | Outbound access to private networks is off by default; see `network.allowed_private_networks` |
 | Container shown as `unhealthy` | `docker compose logs direkt` shows why; often a full or unavailable `/data` |

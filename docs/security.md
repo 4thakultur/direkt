@@ -154,7 +154,8 @@ database.
 
 Every response carries a strict Content-Security-Policy (no inline scripts,
 styles, or `eval`), `X-Frame-Options: DENY`, `nosniff`, and
-`Referrer-Policy: no-referrer`. API and page responses are `no-store`.
+`Referrer-Policy: same-origin` (other sites get no referrer; same-origin form
+posts keep a real `Origin`, which the check below relies on over plain HTTP). API and page responses are `no-store`.
 Cookie-authenticated requests that change state must come from the same
 origin, and so must login and setup form submissions: another site cannot
 sign a visitor in to an account of its choosing, or use up their sign-in

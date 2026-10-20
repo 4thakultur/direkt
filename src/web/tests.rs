@@ -320,6 +320,7 @@ async fn security_headers_on_every_response() {
         );
         assert_eq!(r.header("x-content-type-options"), "nosniff", "{uri}");
         assert_eq!(r.header("x-frame-options"), "DENY", "{uri}");
+        assert_eq!(r.header("referrer-policy"), "same-origin", "{uri}");
         assert_eq!(r.header("cache-control"), "no-store", "{uri}");
     }
 }
@@ -847,6 +848,30 @@ async fn cross_site_login_attempts_are_rejected_without_counting() {
         )
         .await;
     assert_eq!(r.status, StatusCode::FORBIDDEN);
+
+    // `Origin: null` is what a form post sends under `no-referrer`.
+    let r = app
+        .post_form(
+            "/login",
+            &[("origin", "null"), ("host", "direkt.lan")],
+            &form,
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::FORBIDDEN, "opaque origin");
+
+    // Plain HTTP on a LAN address: browsers send no `Sec-Fetch-Site` there,
+    // only `Origin`.
+    let r = app
+        .post_form(
+            "/login",
+            &[
+                ("origin", "http://192.168.1.20:9877"),
+                ("host", "192.168.1.20:9877"),
+            ],
+            &form,
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::SEE_OTHER, "same origin over HTTP");
 
     let r = app
         .post_form("/login", &[("sec-fetch-site", "same-origin")], &form)

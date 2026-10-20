@@ -742,7 +742,13 @@ pub fn check_library_dir(path: &Path) -> Result<(), String> {
         Ok(meta) if meta.is_dir() => {}
         Ok(_) => return Err("not a folder".into()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Err("does not exist; check the container's volume mounts".into());
+            return Err(match differently_cased_sibling(path) {
+                Some(name) => format!(
+                    "does not exist, but \"{name}\" does next to it; folder names are \
+                     case-sensitive"
+                ),
+                None => "does not exist; check the container's volume mounts".into(),
+            });
         }
         Err(e) => return Err(format!("cannot be read: {e}")),
     }
@@ -766,6 +772,17 @@ pub fn check_library_dir(path: &Path) -> Result<(), String> {
             "Direkt cannot write to it ({e}); check the folder's owner and permissions"
         )),
     }
+}
+
+/// A folder beside `path` whose name matches it except for letter case.
+fn differently_cased_sibling(path: &Path) -> Option<String> {
+    let wanted = path.file_name()?.to_str()?;
+    std::fs::read_dir(path.parent()?)
+        .ok()?
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_ok_and(|t| t.is_dir()))
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .find(|name| name != wanted && name.eq_ignore_ascii_case(wanted))
 }
 
 #[cfg(test)]
@@ -1091,5 +1108,16 @@ mod tests {
         assert!(misc.confirm_downloads);
         assert_eq!(misc.speed_limit, None);
         assert_eq!(misc.max_concurrent, 3);
+    }
+
+    #[test]
+    fn library_folder_problems_are_explained() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("Movies")).unwrap();
+        let err = check_library_dir(&root.path().join("movies")).unwrap_err();
+        assert!(err.contains("\"Movies\" does next to it"), "{err}");
+        let err = check_library_dir(&root.path().join("tv")).unwrap_err();
+        assert!(err.contains("volume mounts"), "{err}");
+        assert_eq!(check_library_dir(&root.path().join("Movies")), Ok(()));
     }
 }

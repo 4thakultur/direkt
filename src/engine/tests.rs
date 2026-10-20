@@ -823,6 +823,23 @@ async fn downloads_a_file() {
 }
 
 #[tokio::test]
+async fn missing_folders_are_recreated() {
+    let server = TestServer::start([127, 0, 0, 1], content(1000)).await;
+    let h = Harness::new(loopback_policy(), |_| {}).await;
+    // Removed while the service runs, e.g. by cleaning up the downloads folder.
+    std::fs::remove_dir(&h.incomplete_dir).unwrap();
+    std::fs::remove_dir(&h.download_dir).unwrap();
+    let d = h
+        .service
+        .submit(&server.url("/files/file.bin"), None, None)
+        .await
+        .unwrap();
+    let d = h.wait_state(d.id, TransferState::Completed).await;
+    assert_eq!(file_contents(&d), server.state.content);
+    assert!(h.incomplete_dir.is_dir());
+}
+
+#[tokio::test]
 async fn hostile_content_disposition_is_sanitized() {
     let server = TestServer::start([127, 0, 0, 1], content(1000)).await;
     let h = Harness::new(loopback_policy(), |_| {}).await;
