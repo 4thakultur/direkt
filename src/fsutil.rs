@@ -21,6 +21,7 @@ const MAX_FILENAME_BYTES: usize = 200;
 pub fn sanitize_filename(raw: &str) -> Option<String> {
     let cleaned: String = raw
         .chars()
+        .filter(|&c| !is_invisible_or_bidi(c))
         .map(|c| match c {
             '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
             c if c.is_control() => '_',
@@ -35,6 +36,23 @@ pub fn sanitize_filename(raw: &str) -> Option<String> {
         return None;
     }
     Some(truncate_keep_extension(trimmed, MAX_FILENAME_BYTES))
+}
+
+/// Invisible and bidirectional-control characters. They can disguise a name,
+/// e.g. U+202E (right-to-left override) makes `report\u{202E}vkm.exe` display
+/// as `reportexe.mkv`.
+fn is_invisible_or_bidi(c: char) -> bool {
+    matches!(
+        c,
+        '\u{00AD}'                 // soft hyphen
+            | '\u{061C}'           // Arabic letter mark
+            | '\u{180E}'           // Mongolian vowel separator
+            | '\u{200B}'..='\u{200F}' // zero-width space/joiners, LRM, RLM
+            | '\u{202A}'..='\u{202E}' // bidi embeddings and overrides
+            | '\u{2060}'..='\u{2064}' // word joiner, invisible operators
+            | '\u{2066}'..='\u{2069}' // bidi isolates
+            | '\u{FEFF}'           // zero-width no-break space / BOM
+    )
 }
 
 fn truncate_keep_extension(name: &str, max: usize) -> String {
@@ -137,6 +155,49 @@ pub fn copy_no_clobber(src: &Path, dst: &Path) -> io::Result<()> {
         drop(writer);
         let _ = fs::remove_file(dst);
         return Err(e);
+    }
+    Ok(())
+}
+
+/// Restrict a private directory to its owner (mode 0700), creating it if
+/// needed. Used for the data directory, which holds credentials.
+pub fn create_private_dir(dir: &Path) -> io::Result<()> {
+    fs::create_dir_all(dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+/// Make `path` readable only by its owner (mode 0600), creating it empty if
+/// it does not exist, so it is never world-readable even briefly. Existing
+/// companions with the given suffixes (e.g. SQLite's `-wal`, `-shm`) are
+/// restricted too.
+pub fn create_private_file(path: &Path, companions: &[&str]) -> io::Result<()> {
+    let mut options = OpenOptions::new();
+    options.write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    drop(options.open(path)?);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let private = || fs::Permissions::from_mode(0o600);
+        fs::set_permissions(path, private())?;
+        for suffix in companions {
+            let mut companion = path.as_os_str().to_owned();
+            companion.push(suffix);
+            match fs::set_permissions(Path::new(&companion), private()) {
+                Ok(()) => {}
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e),
+            }
+        }
     }
     Ok(())
 }
@@ -272,6 +333,40 @@ mod tests {
         assert_eq!(fs::read(&dst).unwrap(), b"data");
         let err = copy_no_clobber(&src, &dst).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_files_and_dirs_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        fs::create_dir(&data).unwrap();
+        fs::set_permissions(&data, fs::Permissions::from_mode(0o755)).unwrap();
+        create_private_dir(&data).unwrap();
+        assert_eq!(
+            fs::metadata(&data).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+
+        let db = data.join("x.db");
+        fs::write(&db, b"existing").unwrap();
+        fs::set_permissions(&db, fs::Permissions::from_mode(0o644)).unwrap();
+        let wal = data.join("x.db-wal");
+        fs::write(&wal, b"").unwrap();
+        fs::set_permissions(&wal, fs::Permissions::from_mode(0o644)).unwrap();
+        create_private_file(&db, &["-wal", "-shm"]).unwrap();
+        for f in [&db, &wal] {
+            assert_eq!(fs::metadata(f).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+        assert_eq!(fs::read(&db).unwrap(), b"existing", "content is kept");
+
+        let fresh = data.join("new.db");
+        create_private_file(&fresh, &[]).unwrap();
+        assert_eq!(
+            fs::metadata(&fresh).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 
     #[test]

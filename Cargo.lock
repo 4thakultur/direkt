@@ -493,6 +493,8 @@ dependencies = [
  "getrandom 0.4.3",
  "hex",
  "http-body-util",
+ "hyper",
+ "hyper-util",
  "ipnet",
  "percent-encoding",
  "regex",

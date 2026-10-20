@@ -67,7 +67,17 @@ pub struct RecoveryReport {
 
 impl Store {
     /// Open (creating if necessary) the database at `path` and run migrations.
+    /// The database holds credentials, so it and SQLite's companion files are
+    /// made readable by the owner only (SQLite creates `-wal`/`-shm` with the
+    /// database file's permissions).
     pub async fn open(path: &Path) -> AppResult<Self> {
+        crate::fsutil::create_private_file(path, &["-wal", "-shm"]).map_err(|e| {
+            tracing::error!(error = %e, path = %path.display(), "cannot secure database file");
+            AppError::new(
+                ErrorKind::Filesystem,
+                "cannot create or secure the database file",
+            )
+        })?;
         let options = SqliteConnectOptions::new()
             .filename(path)
             .create_if_missing(true)
@@ -995,6 +1005,23 @@ mod tests {
         let both = s.list_downloads(&[Paused, Queued], 50, 0).await.unwrap();
         assert_eq!(both.len(), 2);
         assert!(s.list_downloads(&[Failed], 50, 0).await.unwrap().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn database_files_are_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("direkt.db");
+        let s = Store::open(&path).await.unwrap();
+        s.insert_download(new_dl("a"), t(0)).await.unwrap();
+        for suffix in ["", "-wal", "-shm"] {
+            let file = dir.path().join(format!("direkt.db{suffix}"));
+            if file.exists() {
+                let mode = std::fs::metadata(&file).unwrap().permissions().mode() & 0o777;
+                assert_eq!(mode, 0o600, "{}", file.display());
+            }
+        }
     }
 
     #[tokio::test]

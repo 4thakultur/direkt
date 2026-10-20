@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use direkt::auth::AuthService;
 use direkt::config::{Config, LogFormat};
 use direkt::engine::{Engine, EngineSettings};
@@ -7,7 +9,6 @@ use direkt::service::DownloadService;
 use direkt::settings::SettingsService;
 use direkt::store::Store;
 use direkt::web::{self, AppState};
-use std::net::SocketAddr;
 use std::path::Path;
 use tracing_subscriber::EnvFilter;
 
@@ -62,7 +63,13 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn open_store(config: &Config) -> anyhow::Result<Store> {
-    ensure_dir(&config.storage.data_dir)?;
+    // Holds the database and setup token: owner-only.
+    direkt::fsutil::create_private_dir(&config.storage.data_dir).map_err(|e| {
+        anyhow::anyhow!(
+            "creating data directory {}: {e}",
+            config.storage.data_dir.display()
+        )
+    })?;
     Store::open(&config.storage.data_dir.join("direkt.db"))
         .await
         .map_err(|e| anyhow::anyhow!("opening database: {e}"))
@@ -152,12 +159,7 @@ async fn serve(config: Config, config_path: &Path) -> anyhow::Result<()> {
 
     let listener = tokio::net::TcpListener::bind(config.server.listen).await?;
     tracing::info!(addr = %config.server.listen, "listening");
-    axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .with_graceful_shutdown(shutdown_signal())
-    .await?;
+    web::server::serve(listener, app, shutdown_signal()).await?;
 
     engine.shutdown(dispatcher).await;
     store.close().await;

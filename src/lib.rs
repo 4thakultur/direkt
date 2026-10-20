@@ -1,5 +1,7 @@
 //! Direkt: a self-hostable direct download manager.
 
+#![forbid(unsafe_code)]
+
 pub mod auth;
 pub mod config;
 pub mod domain;

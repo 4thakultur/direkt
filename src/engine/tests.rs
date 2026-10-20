@@ -1837,7 +1837,12 @@ async fn account_without_premium_needs_attention() {
     let h = site_harness(&server, account, None, |_| {}).await;
     let d = h.service.submit(FILE_LINK, None).await.unwrap();
     let d = h.wait_state(d.id, TransferState::Blocked).await;
-    assert!(d.error.unwrap().message.contains("Use my credits for my own downloads"));
+    assert!(
+        d.error
+            .unwrap()
+            .message
+            .contains("Use my credits for my own downloads")
+    );
 }
 
 #[tokio::test]

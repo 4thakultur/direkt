@@ -33,9 +33,15 @@ Restart Direkt and complete setup again.
   `server.secure_cookies = true` when the UI is reached over HTTPS.
 - Session and API tokens are 256-bit random values. Only their SHA-256 hashes
   are stored.
-- After 5 failed login (or setup-token) attempts, a client is locked out for
-  15 minutes. Behind a reverse proxy every client shares the proxy's address,
-  so the lockout then applies to everyone.
+- Each client gets 5 unsuccessful login, setup-token, or password-change
+  attempts per 15 minutes. Attempts are counted *before* the password is
+  checked, so parallel requests cannot exceed the limit. IPv6 clients are
+  counted per /64. If the limiter is full of active clients (a distributed
+  attack), new clients are refused rather than tracked without bound. Behind
+  a reverse proxy every client shares the proxy's address, so the limit then
+  applies to everyone.
+- At most two password hashes (Argon2id) run at a time, so a burst of login
+  requests cannot exhaust CPU or memory.
 
 ## Provider credentials
 
@@ -48,6 +54,28 @@ database leaks, the 1fichier password leaks too: use a password that isn't
 used anywhere else. Once saved, keys and passwords are never shown again (the
 UI displays `************************`), returned by the API, or written to the
 logs.
+
+## Files on disk
+
+The data directory (`storage.data_dir`) holds the database and the setup
+token, so Direkt makes it owner-only (`0700`) at every start, and the database
+files (`direkt.db`, `-wal`, `-shm`) and setup token `0600`. Downloaded files
+use the normal umask so media servers can read them.
+
+## HTTP server limits
+
+- A connection with no traffic for 120 seconds is closed. Once a request has
+  started, its headers must arrive within 30 seconds.
+- At most 512 connections at once, and 64 per client address (IPv6: per
+  /64). Further connections wait (global limit) or are refused (per-client
+  limit).
+- Request bodies are limited to 2 MiB.
+
+## Code
+
+Direkt's own code contains no `unsafe` (`#![forbid(unsafe_code)]`).
+Dependencies are checked with `cargo audit` against the RustSec advisory
+database.
 
 ## Browser hardening
 

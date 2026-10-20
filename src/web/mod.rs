@@ -3,6 +3,7 @@
 
 pub mod api;
 mod error;
+pub mod server;
 mod ui;
 
 pub use error::{ApiError, ErrorBody};

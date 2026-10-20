@@ -29,7 +29,8 @@ const MAX_PASSWORD_BYTES: usize = 1024;
 const MAX_USERNAME_CHARS: usize = 64;
 const MAX_TOKEN_NAME_CHARS: usize = 64;
 
-const LOGIN_MAX_FAILURES: u32 = 5;
+/// Unsuccessful attempts allowed per client per window.
+const LOGIN_MAX_ATTEMPTS: u32 = 5;
 const LOGIN_WINDOW: Duration = Duration::from_secs(15 * 60);
 const LIMITER_MAX_ENTRIES: usize = 10_000;
 
@@ -96,14 +97,15 @@ impl AuthService {
         username: &str,
         password: &str,
     ) -> AppResult<Session> {
-        self.inner.limiter.check(client)?;
+        self.inner.limiter.attempt(client)?;
         let expected = self
             .setup_hash()
             .ok_or_else(|| AppError::conflict("setup has already been completed"))?;
         if sha256_hex(setup_token.trim()) != expected {
-            self.inner.limiter.record_failure(client);
             return Err(AppError::unauthorized("invalid setup token"));
         }
+        // The token proves control of the server; form mistakes don't count.
+        self.inner.limiter.succeeded(client);
         let username = validate_username(username)?;
         validate_password(password)?;
 
@@ -120,7 +122,6 @@ impl AuthService {
             .await?;
         *self.setup_slot() = None;
         self.remove_setup_token_file();
-        self.inner.limiter.reset(client);
         tracing::info!(username, "administrator account created");
         self.new_session().await
     }
@@ -131,9 +132,10 @@ impl AuthService {
         username: &str,
         password: &str,
     ) -> AppResult<Session> {
-        self.inner.limiter.check(client)?;
+        // Counted before verifying, so parallel guesses cannot all slip in
+        // before the first failure is recorded.
+        self.inner.limiter.attempt(client)?;
         if password.len() > MAX_PASSWORD_BYTES {
-            self.inner.limiter.record_failure(client);
             return Err(invalid_credentials());
         }
         let admin = self.inner.store.admin().await?;
@@ -145,11 +147,10 @@ impl AuthService {
         // the username exists.
         let password_ok = verify_password(password.to_owned(), hash).await?;
         if !(username_ok && password_ok) {
-            self.inner.limiter.record_failure(client);
             tracing::warn!(%client, "failed login attempt");
             return Err(invalid_credentials());
         }
-        self.inner.limiter.reset(client);
+        self.inner.limiter.succeeded(client);
         let _ = self.inner.store.prune_sessions(Utc::now()).await;
         tracing::info!(%client, "administrator logged in");
         self.new_session().await
@@ -176,7 +177,7 @@ impl AuthService {
         current: &str,
         new: &str,
     ) -> AppResult<Session> {
-        self.inner.limiter.check(client)?;
+        self.inner.limiter.attempt(client)?;
         let admin = self
             .inner
             .store
@@ -186,9 +187,9 @@ impl AuthService {
         if current.len() > MAX_PASSWORD_BYTES
             || !verify_password(current.to_owned(), admin.password_hash).await?
         {
-            self.inner.limiter.record_failure(client);
             return Err(AppError::invalid("current password is incorrect"));
         }
+        self.inner.limiter.succeeded(client);
         validate_password(new)?;
         let hash = hash_password(new.to_owned()).await?;
         self.inner
@@ -330,7 +331,15 @@ fn validate_password(password: &str) -> AppResult<()> {
     Ok(())
 }
 
+/// Argon2 takes ~19 MiB and noticeable CPU per call; cap concurrent hashes so
+/// a burst of login requests cannot exhaust memory or CPU.
+static HASHING_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+
 async fn hash_password(password: String) -> AppResult<String> {
+    let _slot = HASHING_SLOTS
+        .acquire()
+        .await
+        .map_err(|_| AppError::internal("password hashing unavailable"))?;
     tokio::task::spawn_blocking(move || {
         Argon2::default()
             .hash_password(password.as_bytes())
@@ -345,6 +354,10 @@ async fn hash_password(password: String) -> AppResult<String> {
 }
 
 async fn verify_password(password: String, hash: String) -> AppResult<bool> {
+    let _slot = HASHING_SLOTS
+        .acquire()
+        .await
+        .map_err(|_| AppError::internal("password verification unavailable"))?;
     tokio::task::spawn_blocking(move || {
         let parsed = PasswordHash::new(&hash).map_err(|e| {
             tracing::error!(error = %e, "stored password hash is invalid");
@@ -390,7 +403,14 @@ fn write_secret_file(path: &Path, contents: &str) -> std::io::Result<()> {
     file.sync_all()
 }
 
-/// Per-client failure counter for login and setup attempts.
+/// Per-client attempt counter for login, setup and password changes.
+///
+/// Every attempt is counted *before* the credentials are checked, and only
+/// a success clears the count, so concurrent requests cannot exceed the
+/// limit. IPv6 clients are grouped by /64 prefix, because a single host
+/// usually controls a whole /64. The table is bounded: if it is full of
+/// recently active clients, new clients are refused (fail closed) instead
+/// of growing it.
 ///
 /// Behind a reverse proxy every client shares the proxy's address, so the
 /// limit then applies to all clients together. That still bounds
@@ -405,39 +425,54 @@ impl LoginLimiter {
         self.entries.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    fn check(&self, client: IpAddr) -> AppResult<()> {
-        let entries = self.lock();
-        match entries.get(&client) {
-            Some(&(failures, since))
-                if failures >= LOGIN_MAX_FAILURES && since.elapsed() < LOGIN_WINDOW =>
-            {
-                let wait = LOGIN_WINDOW.saturating_sub(since.elapsed());
-                Err(AppError::new(
-                    ErrorKind::RateLimited,
-                    format!(
-                        "too many failed attempts; try again in {} minutes",
-                        wait.as_secs().div_ceil(60)
-                    ),
-                ))
-            }
-            _ => Ok(()),
-        }
-    }
-
-    fn record_failure(&self, client: IpAddr) {
+    /// Record an attempt, or refuse it if the client used up its budget.
+    fn attempt(&self, client: IpAddr) -> AppResult<()> {
+        let key = limiter_key(client);
         let mut entries = self.lock();
-        if entries.len() >= LIMITER_MAX_ENTRIES {
+        if entries.len() >= LIMITER_MAX_ENTRIES && !entries.contains_key(&key) {
             entries.retain(|_, (_, since)| since.elapsed() < LOGIN_WINDOW);
+            if entries.len() >= LIMITER_MAX_ENTRIES {
+                return Err(AppError::new(
+                    ErrorKind::RateLimited,
+                    "too many sign-in attempts from many addresses; try again later",
+                ));
+            }
         }
-        let entry = entries.entry(client).or_insert((0, Instant::now()));
+        let entry = entries.entry(key).or_insert((0, Instant::now()));
         if entry.1.elapsed() >= LOGIN_WINDOW {
             *entry = (0, Instant::now());
         }
+        if entry.0 >= LOGIN_MAX_ATTEMPTS {
+            let wait = LOGIN_WINDOW.saturating_sub(entry.1.elapsed());
+            return Err(AppError::new(
+                ErrorKind::RateLimited,
+                format!(
+                    "too many failed attempts; try again in {} minutes",
+                    wait.as_secs().div_ceil(60)
+                ),
+            ));
+        }
         entry.0 += 1;
+        Ok(())
     }
 
-    fn reset(&self, client: IpAddr) {
-        self.lock().remove(&client);
+    fn succeeded(&self, client: IpAddr) {
+        self.lock().remove(&limiter_key(client));
+    }
+}
+
+/// The address a client is counted under: IPv4 as is (including IPv4-mapped
+/// IPv6), IPv6 by its /64 network.
+pub(crate) fn limiter_key(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V4(_) => ip,
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => IpAddr::V4(v4),
+            None => {
+                let bits = u128::from(v6) & !((1u128 << 64) - 1);
+                IpAddr::V6(std::net::Ipv6Addr::from(bits))
+            }
+        },
     }
 }
 
@@ -549,7 +584,7 @@ mod tests {
         auth.setup(IP, &token, "admin", "correct horse battery")
             .await
             .unwrap();
-        for _ in 0..LOGIN_MAX_FAILURES {
+        for _ in 0..LOGIN_MAX_ATTEMPTS {
             auth.login(IP, "admin", "wrong password!")
                 .await
                 .unwrap_err();
@@ -564,6 +599,65 @@ mod tests {
         let other: IpAddr = "198.51.100.7".parse().unwrap();
         auth.login(other, "admin", "correct horse battery")
             .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn parallel_guesses_cannot_exceed_the_limit() {
+        let (auth, _dir) = service().await;
+        let token = auth.read_setup_token();
+        auth.setup(IP, &token, "admin", "correct horse battery")
+            .await
+            .unwrap();
+        let attempts: Vec<_> = (0..20)
+            .map(|i| {
+                let auth = auth.clone();
+                tokio::spawn(async move {
+                    auth.login(IP, "admin", &format!("wrong password {i}"))
+                        .await
+                })
+            })
+            .collect();
+        let mut checked = 0;
+        for attempt in attempts {
+            match attempt.await.unwrap().unwrap_err().kind {
+                ErrorKind::Unauthorized => checked += 1,
+                ErrorKind::RateLimited => {}
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+        assert_eq!(
+            checked, LOGIN_MAX_ATTEMPTS,
+            "only the budget reaches the password check"
+        );
+    }
+
+    #[test]
+    fn ipv6_clients_share_their_64_and_the_table_is_bounded() {
+        let limiter = LoginLimiter::default();
+        let a: IpAddr = "2001:db8:1:2::1".parse().unwrap();
+        let b: IpAddr = "2001:db8:1:2:ffff::9".parse().unwrap();
+        let other: IpAddr = "2001:db8:1:3::1".parse().unwrap();
+        for i in 0..LOGIN_MAX_ATTEMPTS {
+            limiter.attempt(if i % 2 == 0 { a } else { b }).unwrap();
+        }
+        assert!(limiter.attempt(a).is_err());
+        assert!(limiter.attempt(b).is_err(), "same /64");
+        limiter.attempt(other).unwrap();
+        assert_eq!(
+            limiter_key("::ffff:192.0.2.1".parse().unwrap()),
+            "192.0.2.1".parse::<IpAddr>().unwrap()
+        );
+
+        let full = LoginLimiter::default();
+        for i in 0..LIMITER_MAX_ENTRIES as u32 {
+            full.attempt(IpAddr::V4(std::net::Ipv4Addr::from(i)))
+                .unwrap();
+        }
+        let err = full.attempt("198.51.100.1".parse().unwrap()).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::RateLimited, "fails closed when full");
+        // Known clients keep working.
+        full.attempt(IpAddr::V4(std::net::Ipv4Addr::from(0)))
             .unwrap();
     }
 
