@@ -6,7 +6,7 @@ Direkt is a self-hostable direct download manager written in Rust.
 
 Its goal is to take the best features of JDownloader and improve upon them, with a particular focus on homelab users who want a reliable, automated, lightweight, and easy-to-maintain download service.
 
-Direkt runs as a long-lived service on a home server, NAS, mini-PC, or other self-hosted infrastructure. Users can submit download URLs from their local network or remotely, monitor downloads through a web interface or API, receive notifications, and automatically organize downloaded media into libraries compatible with Plex and Jellyfin.
+Direkt runs as a long-lived service on a home server, NAS, mini-PC, or other self-hosted infrastructure. Users can submit download URLs from their local network or remotely, monitor downloads through a web interface or API, and automatically organize downloaded media into libraries compatible with Plex and Jellyfin.
 
 The intended workflow is simple:
 
@@ -15,7 +15,7 @@ The intended workflow is simple:
 3. The download enters a persistent queue and runs according to configured limits.
 4. Direkt tracks progress, retries recoverable failures, and persists state.
 5. When the transfer succeeds, Direkt identifies the media when applicable and organizes it into the configured destination.
-6. Direkt notifies the user of completion or any failure requiring attention.
+6. Direkt reports completion or any failure requiring attention in the web UI and API. (Push notifications come after v1; see section 3.1.)
 
 The system should operate unattended wherever possible. Users should not need to manually copy, rename, or move files during normal operation.
 
@@ -47,7 +47,6 @@ The web UI should allow users to:
 - Pause, resume, retry, and cancel downloads where supported.
 - Inspect download details and relevant event history.
 - Configure essential application settings.
-- Configure Telegram notifications.
 - Configure media destinations and organization behavior.
 
 The API should expose the core operations required by the UI and future external integrations.
@@ -110,32 +109,9 @@ Do not implement fake or incomplete provider support merely to make an interface
 
 Do not build a dynamic third-party plugin marketplace or a complex plugin-loading framework for the MVP. A small, well-defined Rust interface is sufficient.
 
-### 2.4 Telegram notifications
+### 2.4 Notifications (deferred)
 
-Implement Telegram as the first notification channel.
-
-Support notifications for:
-
-- Successful download completion.
-- Permanent download failure.
-- A blocked download or one requiring user intervention.
-- Low disk space.
-- Media identification or organization failure when actionable.
-
-Notifications should be generated from application events rather than sent directly from arbitrary parts of the download engine.
-
-Requirements:
-
-- Configure the Telegram bot token and destination through secure configuration.
-- Never log bot tokens or expose them through the API.
-- Prevent notification failures from changing a successful download into a failed download.
-- Avoid duplicate notifications caused by ordinary state updates or restart recovery.
-- Include enough context to identify the affected download without unnecessarily exposing sensitive URLs.
-- Make notification behavior configurable.
-
-Keep the notification interface independent of Telegram so future channels can be added without changing the download lifecycle.
-
-Additional notification channels are not part of the MVP.
+Telegram notifications have been moved to after v1 (see section 3.1). The MVP reports download state, failures, and items needing attention through the web UI and API only.
 
 ### 2.5 Media identification and organization
 
@@ -198,7 +174,7 @@ Avoid introducing a distributed database, message broker, or external queue serv
 
 Keep the following features separate from MVP implementation requirements:
 
-- Additional notification providers beyond Telegram.
+- Notifications of any kind. Telegram is the first planned channel after v1 (section 3.1); other channels come later still.
 - Browser extensions, bookmarklets, and mobile applications.
 - Sonarr, Radarr, and other media automation integrations.
 - Archive extraction and password-protected archive management.
@@ -215,6 +191,35 @@ Design clean interfaces where appropriate, but do not implement future features 
 
 A future feature must not compromise the reliability, maintainability, or simplicity of the MVP.
 
+### 3.1 Planned after v1: Telegram notifications
+
+Not part of v1. Do not implement it until the project owner schedules it. When it is scheduled, these requirements apply.
+
+Implement Telegram as the first notification channel.
+
+Support notifications for:
+
+- Successful download completion.
+- Permanent download failure.
+- A blocked download or one requiring user intervention.
+- Low disk space.
+- Media identification or organization failure when actionable.
+
+Notifications should be generated from application events rather than sent directly from arbitrary parts of the download engine.
+
+Requirements:
+
+- Configure the Telegram bot token and destination through secure configuration.
+- Never log bot tokens or expose them through the API.
+- Prevent notification failures from changing a successful download into a failed download.
+- Avoid duplicate notifications caused by ordinary state updates or restart recovery.
+- Include enough context to identify the affected download without unnecessarily exposing sensitive URLs.
+- Make notification behavior configurable.
+
+Keep the notification interface independent of Telegram so future channels can be added without changing the download lifecycle.
+
+Additional notification channels are out of scope even then.
+
 ## 4. Architecture and Separation of Concerns
 
 Organize the application around clear responsibilities.
@@ -227,7 +232,7 @@ The following are logical components, not a mandate to create separate crates fo
 - **Download engine:** Queue processing, concurrency, transfers, retries, and recovery.
 - **Provider layer:** URL detection, resolution, authentication, and provider-specific behavior.
 - **Persistence layer:** Durable application state and migrations.
-- **Notification layer:** Event-driven notification delivery.
+- **Notification layer (after v1):** Event-driven notification delivery.
 - **Media processing layer:** Filename parsing, metadata lookup, and filesystem organization.
 - **Observability:** Logging, health checks, and operational diagnostics.
 
@@ -328,7 +333,6 @@ Provide documented configuration for:
 - Temporary and partial-download storage.
 - Download concurrency and retry behavior.
 - Provider credentials.
-- Telegram notifications.
 - Movie and television library destinations.
 - Metadata lookup settings.
 - Disk-space warning thresholds.
@@ -406,14 +410,13 @@ Prioritize:
 - API validation and error-response tests.
 - Media filename parsing and metadata matching tests.
 - Filesystem safety and destination collision tests.
-- Notification formatting and failure-handling tests.
 - Security tests for SSRF, redirects, path traversal, and unsafe filenames.
 
 Tests should be deterministic and must not require real provider accounts or personal credentials.
 
 Use mock providers and local test servers where practical.
 
-External metadata services and Telegram should be mocked in ordinary automated tests. Real integration tests must be explicitly opt-in.
+External metadata services (and Telegram, once implemented) should be mocked in ordinary automated tests. Real integration tests must be explicitly opt-in.
 
 A feature is not complete merely because the code compiles. Verify relevant failure cases and regression risks.
 

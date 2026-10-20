@@ -3,8 +3,8 @@
 A self-hostable direct download manager for homelabs, written in Rust.
 
 > **Status:** early development. HTTP/HTTPS downloads, 1fichier premium
-> downloads, the web UI, and the API work. Telegram notifications, media organization, and Docker packaging
-> are next.
+> downloads, the web UI, and the API work. Media organization and Docker
+> packaging are next. Telegram notifications are planned after v1.
 
 ## First run
 
