@@ -100,3 +100,22 @@
   go(current, false);
   paint();
 })();
+
+// While something downloads, show the overall speed in the tab title, so it
+// can be followed from another tab.
+(() => {
+  "use strict";
+
+  const base = document.title;
+  function update() {
+    const meta = document.querySelector("#dashboard .dash-count");
+    if (!meta) return;
+    const active = Number(meta.dataset.active) || 0;
+    document.title = active > 0 ? `↓ ${meta.dataset.speed} · ${base}` : base;
+  }
+
+  document.body.addEventListener("htmx:afterSwap", (event) => {
+    if (event.target.id === "dashboard") update();
+  });
+  update();
+})();

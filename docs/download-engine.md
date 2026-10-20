@@ -4,7 +4,8 @@
 
 1. **Submit.** `DownloadService::submit` validates the URL (see *Network
    security*), picks a provider and inserts the job as `queued`.
-2. **Claim.** The dispatcher runs at most `downloads.max_concurrent` transfers.
+2. **Claim.** The dispatcher runs at most `downloads.max_concurrent` transfers
+   (or the number set under *Settings → Miscellaneous*, see *Live limits*).
    It claims the oldest `queued` job, or a `retrying` job whose backoff has
    elapsed, with a single atomic `UPDATE`.
 3. **Resolve.** The job's provider turns the URL into a direct HTTP resource.
@@ -16,6 +17,24 @@
    `download_dir` and records it. Then it moves the partial file there without
    overwriting anything. Only after that is the job marked `completed` and
    post-processing set to `pending`.
+
+## Live limits
+
+Two limits can change while transfers run, from *Settings → Miscellaneous*
+or `PATCH /api/v1/settings/misc`. They are stored in the database and apply
+immediately.
+
+- **Simultaneous downloads.** Raising it starts queued jobs right away.
+  Lowering it never stops a running transfer: they finish, and no new one
+  starts until fewer than the limit run. A value equal to
+  `downloads.max_concurrent` is not stored, so a later change to the
+  configuration file applies again.
+- **Speed limit.** One limit for all transfers together. Each received chunk
+  reserves its share of time on a shared schedule (GCRA), and the transfer
+  sleeps until the reservation is due; reading slower makes TCP slow the
+  sender down. After idle time, up to 250 ms worth of data passes without
+  waiting. Pause and cancel interrupt the wait. Changing the limit discards
+  reservations made at the old rate. The minimum is 10 kB/s.
 
 ## Resuming
 

@@ -7,7 +7,7 @@ use crate::domain::{Download, DownloadError, DownloadEvent, MediaType, PostState
 use crate::engine::LiveSnapshot;
 use crate::error::{AppError, ErrorKind};
 use crate::service::Preview;
-use crate::settings::{OneFichierSettings, TmdbSettings};
+use crate::settings::{MiscSettings, MiscUpdate, OneFichierSettings, TmdbSettings};
 use crate::store::ApiToken;
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -53,6 +53,7 @@ pub fn routes() -> Router<AppState> {
             "/settings/onefichier/cdn/refresh",
             post(refresh_onefichier_cdn),
         )
+        .route("/settings/misc", get(get_misc).patch(patch_misc))
         .route(
             "/settings/tmdb",
             get(get_tmdb).put(put_tmdb).delete(delete_tmdb),
@@ -634,6 +635,33 @@ async fn delete_onefichier(State(state): State<AppState>) -> ApiResult<Json<OneF
     Ok(Json(state.settings.clear_onefichier_key().await?))
 }
 
+/// Miscellaneous settings: speed unit, speed limit, simultaneous downloads,
+/// and the web UI's download confirmation.
+#[utoipa::path(
+    get, path = "/api/v1/settings/misc", tag = "settings",
+    responses((status = 200, body = MiscSettings))
+)]
+async fn get_misc(State(state): State<AppState>) -> Json<MiscSettings> {
+    Json(state.settings.misc())
+}
+
+/// Change miscellaneous settings. Fields left out keep their value; changes
+/// apply to running downloads immediately.
+#[utoipa::path(
+    patch, path = "/api/v1/settings/misc", tag = "settings",
+    request_body = MiscUpdate,
+    responses(
+        (status = 200, body = MiscSettings),
+        (status = 400, description = "A value is out of range", body = ErrorBody),
+    )
+)]
+async fn patch_misc(
+    State(state): State<AppState>,
+    ApiJson(body): ApiJson<MiscUpdate>,
+) -> ApiResult<Json<MiscSettings>> {
+    Ok(Json(state.settings.update_misc(body).await?))
+}
+
 /// TMDB settings (artwork lookup). The key itself is never returned.
 #[utoipa::path(
     get, path = "/api/v1/settings/tmdb", tag = "settings",
@@ -775,7 +803,7 @@ async fn sign_out_onefichier(State(state): State<AppState>) -> ApiResult<Json<On
         list_tokens, create_token, revoke_token,
         get_onefichier, put_onefichier, delete_onefichier,
         sign_in_onefichier, sign_out_onefichier, refresh_onefichier_cdn,
-        get_tmdb, put_tmdb, delete_tmdb,
+        get_tmdb, put_tmdb, delete_tmdb, get_misc, patch_misc,
     ),
     components(schemas(ErrorBody, ErrorKind)),
     modifiers(&SecuritySchemes),

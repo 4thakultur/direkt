@@ -11,7 +11,7 @@ Every endpoint under `/api/v1` needs one of these:
   under *Settings*, or with `POST /api/v1/tokens`. A token is shown only once,
   and only its hash is stored.
 - **Session cookie**: set by logging in to the web UI. Requests that change
-  something (POST/DELETE) and are authenticated by cookie must come from the
+  something (POST/PUT/PATCH/DELETE) and are authenticated by cookie must come from the
   same origin, judged by `Sec-Fetch-Site`, or else `Origin` checked against
   `Host`. Cross-site requests are rejected with `403 forbidden`.
 
@@ -64,6 +64,8 @@ Every error uses the same body:
 | POST | `/api/v1/settings/onefichier/account` | Sign in to 1fichier: `{"email": "…", "password": "…", "code": "123456"}` (`code` only for two-factor accounts). Returns `two_factor_required: true` when a code is needed; repeat the request with `code` within 10 minutes. |
 | DELETE | `/api/v1/settings/onefichier/account` | Sign out and delete the stored email, password and session |
 | POST | `/api/v1/settings/onefichier/cdn/refresh` | Read the CDN credit balance again (shown as `cdn` in `GET /api/v1/settings/onefichier`). Returns `429` within 5 minutes of the last check, and `409` if neither signed in nor a key is set. |
+| GET | `/api/v1/settings/misc` | Miscellaneous settings: `speed_unit` (`binary`, `decimal` or `bits`: how the web UI writes speeds), `speed_limit` (bytes per second for all downloads together, `null` when unlimited), `max_concurrent`, `default_max_concurrent` (from the configuration file) and `confirm_downloads` (the web UI's confirmation menu). |
+| PATCH | `/api/v1/settings/misc` | Change any of `speed_unit`, `speed_limit` (at least 10000, or 0 to remove the limit), `max_concurrent` (1–32) and `confirm_downloads`. Fields left out keep their value; nothing changes if one is invalid. Applies to running downloads immediately. |
 | GET | `/api/v1/settings/tmdb` | Whether a TMDB key (for [artwork](artwork.md)) is configured, and its source. Masked like the 1fichier key. |
 | PUT | `/api/v1/settings/tmdb` | Set the key: `{"api_key": "…"}` (API key or read access token). Returns `409` if it comes from `DIREKT_TMDB_API_KEY`. |
 | DELETE | `/api/v1/settings/tmdb` | Remove the stored key. Cached artwork stays. |

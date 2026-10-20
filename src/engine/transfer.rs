@@ -269,6 +269,15 @@ impl Attempt<'_> {
                 ));
             }
 
+            let wait = self.inner.limits.reserve(len);
+            if !wait.is_zero() {
+                tokio::select! {
+                    biased;
+                    reason = wait_for_stop(self.stop) => return Ok(AttemptOutcome::Stopped(reason)),
+                    () = tokio::time::sleep(wait) => {}
+                }
+            }
+
             let elapsed = last_report.elapsed();
             if elapsed >= PROGRESS_INTERVAL {
                 let rate = (*written - bytes_at_last_report) as f64 / elapsed.as_secs_f64();

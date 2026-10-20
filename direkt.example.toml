@@ -25,7 +25,9 @@ incomplete_dir = "/downloads/.incomplete"
 min_free_space_mb = 1024
 
 [downloads]
-# Maximum simultaneous transfers (1-32).
+# Maximum simultaneous transfers (1-32). Settings → Miscellaneous in the web
+# UI can change it while Direkt runs; its value there wins until it is set
+# back to this one. The overall speed limit is set there too.
 max_concurrent = 3
 # Automatic retries for transient failures before a download is marked failed.
 max_retries = 5

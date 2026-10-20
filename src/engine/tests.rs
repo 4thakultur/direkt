@@ -1136,6 +1136,92 @@ async fn concurrency_is_bounded() {
 }
 
 #[tokio::test]
+async fn concurrency_limit_changes_while_running() {
+    let server = TestServer::start([127, 0, 0, 1], content(2_000_000)).await;
+    server.set_delay(Duration::from_millis(20));
+    let h = Harness::new(loopback_policy(), |s| s.max_concurrent = 1).await;
+    let first = h
+        .service
+        .submit(&server.url("/files/a.bin"), None, None)
+        .await
+        .unwrap();
+    let second = h
+        .service
+        .submit(&server.url("/files/b.bin"), None, None)
+        .await
+        .unwrap();
+    h.wait_progress(first.id, 1).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        h.service.get(second.id).await.unwrap().state,
+        TransferState::Queued
+    );
+
+    h.engine.inner.limits.set_max_concurrent(2);
+    h.wait_progress(second.id, 1).await;
+
+    // Lowering it again lets both finish their transfer, but nothing new
+    // starts while two still run.
+    h.engine.inner.limits.set_max_concurrent(1);
+    let third = h
+        .service
+        .submit(&server.url("/files/c.bin"), None, None)
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(h.engine.is_running(first.id) && h.engine.is_running(second.id));
+    assert_eq!(
+        h.service.get(third.id).await.unwrap().state,
+        TransferState::Queued
+    );
+    for id in [first.id, second.id, third.id] {
+        h.service.cancel(id).await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn speed_limit_slows_transfers_down() {
+    let data = content(200_000);
+    let server = TestServer::start([127, 0, 0, 1], data.clone()).await;
+    let h = Harness::new(loopback_policy(), |_| {}).await;
+    // 400 kB/s: at least (200 kB - 100 kB of burst) / 400 kB/s = 250 ms.
+    h.engine.inner.limits.set_speed_limit(Some(400_000));
+    let started = Instant::now();
+    let d = h
+        .service
+        .submit(&server.url("/files/limited.bin"), None, None)
+        .await
+        .unwrap();
+    let d = h.wait_state(d.id, TransferState::Completed).await;
+    assert!(
+        started.elapsed() >= Duration::from_millis(200),
+        "took {:?}",
+        started.elapsed()
+    );
+    assert_eq!(file_contents(&d), data);
+}
+
+#[tokio::test]
+async fn throttled_transfer_pauses_promptly() {
+    let server = TestServer::start([127, 0, 0, 1], content(2_000_000)).await;
+    let h = Harness::new(loopback_policy(), |_| {}).await;
+    // A few KB/s: the transfer spends nearly all its time waiting.
+    h.engine.inner.limits.set_speed_limit(Some(4_000));
+    let d = h
+        .service
+        .submit(&server.url("/files/slow.bin"), None, None)
+        .await
+        .unwrap();
+    h.wait_progress(d.id, 1).await;
+    let asked = Instant::now();
+    assert_eq!(
+        h.service.pause(d.id).await.unwrap().state,
+        TransferState::Paused
+    );
+    assert!(asked.elapsed() < Duration::from_secs(2));
+}
+
+#[tokio::test]
 async fn shutdown_requeues_running_transfers() {
     let server = TestServer::start([127, 0, 0, 1], content(2_000_000)).await;
     server.set_delay(Duration::from_millis(5));

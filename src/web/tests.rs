@@ -75,6 +75,7 @@ impl TestApp {
         };
         let client = crate::http_client::build_client(policy.clone()).unwrap();
         let account = crate::providers::unconfigured_onefichier_account().await;
+        let limits = crate::engine::Limits::new(1);
         let settings = crate::settings::SettingsService::load(
             store.clone(),
             crate::settings::EnvKeys {
@@ -82,6 +83,7 @@ impl TestApp {
                 tmdb: None,
             },
             account.clone(),
+            limits.clone(),
         )
         .await
         .unwrap();
@@ -95,12 +97,13 @@ impl TestApp {
             retry_max_delay: Duration::from_secs(1),
             min_free_bytes: 0,
         };
-        let engine = Engine::new(
+        let engine = Engine::with_limits(
             store.clone(),
             providers.clone(),
             client.clone(),
             policy.clone(),
             engine_settings,
+            limits,
         );
         // TMDB and Steam are mocked; the TMDB key starts unset.
         let (metadata, _) = crate::media::artwork_tests::mock_server().await;
@@ -1715,4 +1718,167 @@ async fn theme_is_chosen_per_browser() {
     // Changing the theme needs a session.
     let r = app.post_form("/settings/theme", &[], "theme=steve").await;
     assert_ne!(r.status, StatusCode::OK);
+}
+
+impl TestApp {
+    async fn patch_json(&self, uri: &str, cookie: &str, body: Value) -> Reply {
+        self.send(
+            HttpRequest::patch(uri)
+                .header("cookie", cookie)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+    }
+}
+
+#[tokio::test]
+async fn misc_settings_via_page_and_api() {
+    let (app, cookie) = TestApp::with_admin().await;
+    let auth = cookie_header(&cookie);
+    let page = app.get("/settings", &auth).await;
+    assert!(page.body.contains("Miscellaneous"));
+    assert!(page.body.contains("No speed limit"));
+    assert!(
+        page.body
+            .contains(r#"name="speed_unit" value="binary" checked"#)
+    );
+    assert!(
+        page.body
+            .contains(r#"name="confirm_downloads" value="on" checked"#)
+    );
+
+    let r = app
+        .post_form(
+            "/settings/misc",
+            &auth,
+            "speed_unit=decimal&speed_limit=2%2C5&speed_limit_unit=MB&max_concurrent=4\
+             &confirm_downloads=on",
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    assert!(r.body.contains("id=\"misc\" open"), "section stays open");
+    assert!(r.body.contains("Limited to 2.5 MB/s"));
+    assert!(r.body.contains(r#"value="2.5""#), "limit pre-filled");
+    assert!(
+        r.body
+            .contains(r#"<option value="MB" selected>MB/s</option>"#)
+    );
+
+    let misc = app.get("/api/v1/settings/misc", &auth).await.json();
+    assert_eq!(misc["speed_unit"], "decimal");
+    assert_eq!(misc["speed_limit"], 2_500_000);
+    assert_eq!(misc["max_concurrent"], 4);
+    assert_eq!(misc["default_max_concurrent"], 1);
+    assert_eq!(misc["confirm_downloads"], true);
+
+    let dash = app.get("/ui/dashboard", &auth).await;
+    assert!(dash.body.contains("Limited to 2.5 MB/s"));
+    assert!(dash.body.contains(r#"data-speed="0 B/s""#));
+
+    // Invalid input is reported in the section and changes nothing.
+    for (form, message) in [
+        (
+            "speed_unit=bits&speed_limit=fast&speed_limit_unit=MB&max_concurrent=4",
+            "enter the speed limit as a number",
+        ),
+        (
+            "speed_unit=bits&speed_limit=1&speed_limit_unit=kB&max_concurrent=4",
+            "at least 10 kB/s",
+        ),
+        (
+            "speed_unit=bits&speed_limit=&speed_limit_unit=MB&max_concurrent=99",
+            "between 1 and 32",
+        ),
+        (
+            "speed_unit=parsecs&speed_limit=&speed_limit_unit=MB&max_concurrent=2",
+            "unknown unit",
+        ),
+    ] {
+        let r = app.post_form("/settings/misc", &auth, form).await;
+        assert_eq!(r.status, StatusCode::BAD_REQUEST, "{form}");
+        assert!(r.body.contains(message), "{form}: {}", r.body);
+        assert!(r.body.contains("id=\"misc\" open"));
+    }
+    assert_eq!(
+        app.get("/api/v1/settings/misc", &auth).await.json(),
+        misc,
+        "unchanged"
+    );
+
+    // The API changes only the fields it is sent; 0 removes the limit.
+    let r = app
+        .patch_json(
+            "/api/v1/settings/misc",
+            &cookie,
+            serde_json::json!({"speed_limit": 0, "speed_unit": "bits"}),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    let after = r.json();
+    assert_eq!(after["speed_limit"], Value::Null);
+    assert_eq!(after["speed_unit"], "bits");
+    assert_eq!(after["max_concurrent"], 4);
+    let r = app
+        .patch_json(
+            "/api/v1/settings/misc",
+            &cookie,
+            serde_json::json!({"max_concurrent": 0}),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST);
+    assert_eq!(r.error_kind(), "invalid_request");
+    let r = app
+        .patch_json(
+            "/api/v1/settings/misc",
+            &cookie,
+            serde_json::json!({"turbo": true}),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::UNPROCESSABLE_ENTITY, "unknown field");
+}
+
+#[tokio::test]
+async fn download_starts_without_confirmation_when_turned_off() {
+    let (app, cookie) = TestApp::with_admin_local().await;
+    let auth = cookie_header(&cookie);
+    // The checkbox is left out of the form when unticked.
+    let r = app
+        .post_form(
+            "/settings/misc",
+            &auth,
+            "speed_unit=binary&speed_limit=&speed_limit_unit=MiB&max_concurrent=1",
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    assert!(
+        !r.body
+            .contains(r#"name="confirm_downloads" value="on" checked"#)
+    );
+
+    let url = format!("{}/files/{EDGERUNNERS}", app.files);
+    let r = app
+        .post_form(
+            "/ui/downloads/preview",
+            &auth,
+            &format!("url={}", encode(&url)),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    assert!(!r.body.contains("preview_id"), "no confirmation menu");
+    assert!(r.header("hx-trigger").contains("download-started"));
+
+    let list = app.get("/api/v1/downloads", &auth).await.json();
+    let items = list["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["media_type"], "tv", "the detected type");
+    assert_eq!(items[0]["filename"], EDGERUNNERS);
+
+    // A bad link still shows its error on the form.
+    let r = app
+        .post_form("/ui/downloads/preview", &auth, "url=ftp%3A%2F%2Fx")
+        .await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST);
+    assert!(r.body.contains("flash error"));
 }

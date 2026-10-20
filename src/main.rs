@@ -2,7 +2,7 @@
 
 use direkt::auth::AuthService;
 use direkt::config::{Config, LogFormat};
-use direkt::engine::{Engine, EngineSettings};
+use direkt::engine::{Engine, EngineSettings, Limits};
 use direkt::media::ArtworkService;
 use direkt::net::NetworkPolicy;
 use direkt::providers::{OneFichierAccount, Providers};
@@ -129,9 +129,16 @@ async fn serve(config: Config, config_path: &Path) -> anyhow::Result<()> {
     let onefichier_account = OneFichierAccount::open(store.clone(), policy.clone())
         .await
         .map_err(|e| anyhow::anyhow!("loading 1fichier account: {e}"))?;
-    let settings = SettingsService::load(store.clone(), env_keys, onefichier_account.clone())
-        .await
-        .map_err(|e| anyhow::anyhow!("loading settings: {e}"))?;
+    // Changed live from the settings page; starts from the configuration.
+    let limits = Limits::new(config.downloads.max_concurrent);
+    let settings = SettingsService::load(
+        store.clone(),
+        env_keys,
+        onefichier_account.clone(),
+        limits.clone(),
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("loading settings: {e}"))?;
 
     let client = direkt::http_client::build_client(policy.clone())?;
     let providers = Providers::standard(
@@ -139,12 +146,13 @@ async fn serve(config: Config, config_path: &Path) -> anyhow::Result<()> {
         settings.onefichier_key(),
         onefichier_account,
     );
-    let engine = Engine::new(
+    let engine = Engine::with_limits(
         store.clone(),
         providers.clone(),
         client.clone(),
         policy.clone(),
         EngineSettings::from_config(&config),
+        limits,
     );
     let dispatcher = engine.start();
     let artwork = ArtworkService::new(

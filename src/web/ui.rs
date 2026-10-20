@@ -10,7 +10,10 @@ use crate::domain::{Download, DownloadEvent, MediaType, PostState, TransferState
 use crate::engine::{HISTORY_SECS, LiveSnapshot, ThroughputSnapshot};
 use crate::error::{AppError, ErrorKind};
 use crate::service::Preview;
-use crate::settings::{OneFichierSettings, SECRET_MASK, TmdbSettings};
+use crate::settings::{
+    MiscSettings, MiscUpdate, OneFichierSettings, SECRET_MASK, SpeedUnit, TmdbSettings,
+    parse_speed_limit,
+};
 use crate::store::ApiToken;
 use askama::Template;
 use axum::Router;
@@ -54,6 +57,7 @@ pub fn protected_routes() -> Router<AppState> {
         .route("/settings/theme", post(change_theme))
         .route("/settings/tmdb", post(save_tmdb))
         .route("/settings/tmdb/remove", post(remove_tmdb))
+        .route("/settings/misc", post(save_misc))
         .route("/artwork/{id}", get(artwork_image))
         .route("/settings/onefichier", post(save_onefichier))
         .route("/settings/onefichier/remove", post(remove_onefichier))
@@ -197,10 +201,6 @@ fn human_duration(secs: u64) -> String {
     }
 }
 
-fn human_speed(bytes_per_sec: u64) -> String {
-    format!("{}/s", human_bytes(bytes_per_sec))
-}
-
 /// How long ago `t` was, coarsely; older than a day shows the date.
 fn human_ago(t: DateTime<Utc>, now: DateTime<Utc>) -> String {
     match (now - t).num_seconds().max(0) {
@@ -303,7 +303,7 @@ fn url_file_name(display_url: &str) -> Option<String> {
 }
 
 impl DownloadView {
-    fn new(d: Download, live: Option<LiveSnapshot>) -> Self {
+    fn new(d: Download, live: Option<LiveSnapshot>, unit: SpeedUnit) -> Self {
         use TransferState::*;
         let deletable_completed = d.state == Completed && d.post_state != PostState::Processing;
         let can_delete_file = deletable_completed && d.file_path.is_some();
@@ -321,7 +321,7 @@ impl DownloadView {
             None => String::new(),
         };
         let rate = live.map(|l| l.bytes_per_sec).filter(|&r| r > 0);
-        let speed = rate.map(human_speed);
+        let speed = rate.map(|r| unit.format(r));
         let eta = match (rate, total) {
             (Some(r), Some(t)) if t > downloaded => Some(human_duration((t - downloaded) / r)),
             _ => None,
@@ -611,6 +611,8 @@ struct StatsView {
     free: String,
     /// Speed at the top of the graph.
     scale: String,
+    /// The overall speed limit, if one is set.
+    limit: Option<String>,
     /// SVG path data for the filled area and its outline.
     area: String,
     line: String,
@@ -622,12 +624,12 @@ const GRAPH_HEIGHT: f64 = 100.0;
 const MIN_GRAPH_SCALE: u64 = 64 * 1024;
 
 /// SVG paths (area, line) for samples right-aligned in a fixed window, and the
-/// scale they are drawn against: the next power of two above the highest
-/// sample, so labels stay round.
-fn graph_paths(samples: &[u64]) -> (String, String, u64) {
+/// scale they are drawn against: the highest sample rounded up to a value
+/// that reads round in `unit`.
+fn graph_paths(samples: &[u64], unit: SpeedUnit) -> (String, String, u64) {
     let width = (HISTORY_SECS - 1) as f64;
     let max = samples.iter().copied().max().unwrap_or(0);
-    let scale = max.max(MIN_GRAPH_SCALE).next_power_of_two();
+    let scale = unit.round_up(max.max(MIN_GRAPH_SCALE));
     // Leave headroom so the line never touches the top edge.
     let y = |v: u64| GRAPH_HEIGHT - (v as f64 / scale as f64) * (GRAPH_HEIGHT * 0.94);
     let samples = &samples[samples.len().saturating_sub(HISTORY_SECS)..];
@@ -645,15 +647,17 @@ fn graph_paths(samples: &[u64]) -> (String, String, u64) {
     (area, line, scale)
 }
 
-impl From<ThroughputSnapshot> for StatsView {
-    fn from(t: ThroughputSnapshot) -> Self {
-        let (area, line, scale) = graph_paths(&t.samples);
+impl StatsView {
+    fn new(t: ThroughputSnapshot, misc: &MiscSettings) -> Self {
+        let unit = misc.speed_unit;
+        let (area, line, scale) = graph_paths(&t.samples, unit);
         Self {
-            current: human_speed(t.current),
-            peak: human_speed(t.peak),
+            current: unit.format(t.current),
+            peak: unit.format(t.peak),
             total: human_bytes(t.total),
             free: t.free_bytes.map(human_bytes).unwrap_or_else(|| "—".into()),
-            scale: human_speed(scale),
+            scale: unit.format(scale),
+            limit: misc.speed_limit.map(|l| unit.format(l)),
             area,
             line,
         }
@@ -795,9 +799,10 @@ async fn load_dashboard(state: &AppState) -> Dashboard {
         (history_truncated(&completed), history_truncated(&cancelled));
     completed.sort_by_key(|d| std::cmp::Reverse(d.completed_at));
 
+    let misc = state.settings.misc();
     let view = |d: Download| {
         let live = service.live(d.id);
-        DownloadView::new(d, live)
+        DownloadView::new(d, live, misc.speed_unit)
     };
     let mut downloading = Vec::new();
     let mut up_next = Vec::new();
@@ -849,7 +854,7 @@ async fn load_dashboard(state: &AppState) -> Dashboard {
     })
     .collect();
     Dashboard {
-        stats: service.throughput().into(),
+        stats: StatsView::new(service.throughput(), &misc),
         downloading,
         queued,
         groups,
@@ -888,9 +893,16 @@ async fn submit_fragment() -> Response {
     render(&SubmitForm::default())
 }
 
-/// Download clicked: look the link up and show the confirmation menu.
+/// Download clicked: look the link up and show the confirmation menu, or
+/// start it right away when confirmation is turned off.
 async fn preview_download(State(state): State<AppState>, Form(body): Form<SubmitBody>) -> Response {
     let password = body.password.as_deref().filter(|p| !p.is_empty());
+    if !state.settings.misc().confirm_downloads {
+        return match state.downloads.submit_detected(&body.url, password).await {
+            Ok(_) => download_started(),
+            Err(e) => submit_error(e, body.url),
+        };
+    }
     match state.downloads.preview(&body.url, password).await {
         Ok(preview) => render(&SubmitForm {
             value: body.url,
@@ -944,18 +956,20 @@ async fn confirm_download(
         Err(e) => Err(e),
     };
     match result {
-        // No message: the empty form and the new download in the list (on
-        // phones, the slide to Activity) say it started.
-        Ok(_) => {
-            let mut response = render(&SubmitForm::default());
-            response.headers_mut().insert(
-                "hx-trigger",
-                HeaderValue::from_static("downloads-changed, download-started"),
-            );
-            response
-        }
+        Ok(_) => download_started(),
         Err(e) => submit_error(e, body.url),
     }
+}
+
+/// An empty form. No message: the new download in the list (on phones, the
+/// slide to Activity) says it started.
+fn download_started() -> Response {
+    let mut response = render(&SubmitForm::default());
+    response.headers_mut().insert(
+        "hx-trigger",
+        HeaderValue::from_static("downloads-changed, download-started"),
+    );
+    response
 }
 
 fn submit_error(e: AppError, url: String) -> Response {
@@ -1168,7 +1182,7 @@ async fn load_detail(
     let download = state.downloads.get(id).await?;
     let events = state.downloads.events(id).await?;
     let live = state.downloads.live(id);
-    let mut view = DownloadView::new(download, live);
+    let mut view = DownloadView::new(download, live, state.settings.misc().speed_unit);
     view.can_delete = false;
     view.can_delete_file = false;
     Ok((
@@ -1232,6 +1246,7 @@ struct SettingsPage {
     theme: Theme,
     onefichier: OneFichierSettings,
     tmdb: TmdbSettings,
+    misc: MiscView,
     cdn: Option<CdnDisplay>,
     /// The account has CDN credits it uses for its own downloads.
     has_credits: bool,
@@ -1249,11 +1264,13 @@ const SECTION_TMDB: &str = "artwork";
 const SECTION_TOKENS: &str = "tokens";
 const SECTION_PASSWORD: &str = "password";
 const SECTION_APPEARANCE: &str = "appearance";
+const SECTION_MISC: &str = "misc";
 
 async fn settings_with(state: &AppState, theme: Theme, mut page: SettingsPage) -> SettingsPage {
     page.theme = theme;
     page.onefichier = state.settings.onefichier();
     page.tmdb = state.settings.tmdb();
+    page.misc = MiscView::from(&state.settings.misc());
     page.cdn = page.onefichier.cdn.as_ref().map(CdnDisplay::from);
     page.has_credits = page
         .onefichier
@@ -1503,6 +1520,115 @@ async fn section_result(
     }
 }
 
+/// Miscellaneous settings prepared for the settings page.
+#[derive(Default)]
+struct MiscView {
+    units: Vec<UnitOption>,
+    /// The speed limit in `limit_units`' selected unit; empty for none.
+    limit_value: String,
+    limit_units: Vec<UnitOption>,
+    /// The limit as the pill shows it.
+    limit: Option<String>,
+    max_concurrent: usize,
+    default_max_concurrent: usize,
+    confirm_downloads: bool,
+}
+
+struct UnitOption {
+    value: &'static str,
+    label: &'static str,
+    description: &'static str,
+    selected: bool,
+}
+
+impl From<&MiscSettings> for MiscView {
+    fn from(m: &MiscSettings) -> Self {
+        let unit = m.speed_unit;
+        let (limit_value, limit_unit) = match m.speed_limit {
+            Some(limit) => {
+                let (value, u) = unit.limit_parts(limit);
+                (value, Some(u))
+            }
+            None => (String::new(), None),
+        };
+        // Without a limit, offer the large unit (MB/s rather than kB/s).
+        let limit_unit = limit_unit.unwrap_or(unit.limit_units()[1]);
+        Self {
+            units: SpeedUnit::ALL
+                .into_iter()
+                .map(|u| UnitOption {
+                    value: u.as_str(),
+                    label: u.label(),
+                    description: u.description(),
+                    selected: u == unit,
+                })
+                .collect(),
+            limit_value,
+            limit_units: unit
+                .limit_units()
+                .into_iter()
+                .map(|u| UnitOption {
+                    value: u.id,
+                    label: u.id,
+                    description: "",
+                    selected: u == limit_unit,
+                })
+                .collect(),
+            limit: m.speed_limit.map(|l| unit.format(l)),
+            max_concurrent: m.max_concurrent,
+            default_max_concurrent: m.default_max_concurrent,
+            confirm_downloads: m.confirm_downloads,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct MiscForm {
+    speed_unit: String,
+    #[serde(default)]
+    speed_limit: String,
+    #[serde(default)]
+    speed_limit_unit: String,
+    max_concurrent: String,
+    /// A checkbox: present only when ticked.
+    #[serde(default)]
+    confirm_downloads: Option<String>,
+}
+
+impl MiscForm {
+    fn parse(&self) -> Result<MiscUpdate, AppError> {
+        let speed_unit =
+            SpeedUnit::parse(&self.speed_unit).ok_or_else(|| AppError::invalid("unknown unit"))?;
+        let speed_limit = parse_speed_limit(&self.speed_limit, &self.speed_limit_unit)
+            .map_err(AppError::invalid)?;
+        let max_concurrent = self.max_concurrent.trim().parse().map_err(|_| {
+            AppError::invalid("enter the number of simultaneous downloads as a whole number")
+        })?;
+        Ok(MiscUpdate {
+            speed_unit: Some(speed_unit),
+            speed_limit: Some(speed_limit),
+            max_concurrent: Some(max_concurrent),
+            confirm_downloads: Some(self.confirm_downloads.is_some()),
+        })
+    }
+}
+
+async fn save_misc(
+    State(state): State<AppState>,
+    theme: Theme,
+    Form(form): Form<MiscForm>,
+) -> Response {
+    let result = match form.parse() {
+        Ok(update) => state
+            .settings
+            .update_misc(update)
+            .await
+            .map(|_| "Settings saved. They apply to running downloads right away."),
+        Err(e) => Err(e),
+    };
+    section_result(&state, theme, SECTION_MISC, result).await
+}
+
 #[derive(Deserialize)]
 struct PasswordForm {
     current_password: String,
@@ -1656,20 +1782,20 @@ mod tests {
 
     #[test]
     fn graph_is_right_aligned_and_scaled() {
-        let (area, line, scale) = graph_paths(&[]);
+        let (area, line, scale) = graph_paths(&[], SpeedUnit::Binary);
         assert!(area.is_empty());
         assert_eq!(line, "M0,100H299");
         assert_eq!(scale, MIN_GRAPH_SCALE);
 
         let mib = 1024 * 1024;
-        let (area, line, scale) = graph_paths(&[0, 3 * mib]);
+        let (area, line, scale) = graph_paths(&[0, 3 * mib], SpeedUnit::Binary);
         assert_eq!(scale, 4 * mib, "rounded up to a power of two");
         assert!(line.starts_with("M298,100.0L299,"), "{line}");
         assert!(area.ends_with("L299,100L298,100Z"), "{area}");
 
         // Longer input than the window keeps only the newest samples.
         let many = vec![mib; HISTORY_SECS + 10];
-        let (_, line, _) = graph_paths(&many);
+        let (_, line, _) = graph_paths(&many, SpeedUnit::Binary);
         assert!(line.starts_with("M0,"));
         assert_eq!(line.matches('L').count(), HISTORY_SECS - 1);
     }

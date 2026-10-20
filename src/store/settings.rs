@@ -27,6 +27,38 @@ impl Store {
         Ok(())
     }
 
+    /// Set (`Some`) or delete (`None`) several settings at once: all or none.
+    pub async fn apply_settings(
+        &self,
+        changes: &[(&str, Option<String>)],
+        now: DateTime<Utc>,
+    ) -> AppResult<()> {
+        let mut tx = self.pool.begin().await?;
+        for (key, value) in changes {
+            match value {
+                Some(value) => {
+                    sqlx::query(
+                        "INSERT INTO settings (key, value, updated_at) VALUES (?1, ?2, ?3)
+                         ON CONFLICT (key) DO UPDATE SET value = ?2, updated_at = ?3",
+                    )
+                    .bind(key)
+                    .bind(value)
+                    .bind(now.timestamp_millis())
+                    .execute(&mut *tx)
+                    .await?;
+                }
+                None => {
+                    sqlx::query("DELETE FROM settings WHERE key = ?")
+                        .bind(key)
+                        .execute(&mut *tx)
+                        .await?;
+                }
+            }
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
     pub async fn delete_setting(&self, key: &str) -> AppResult<()> {
         sqlx::query("DELETE FROM settings WHERE key = ?")
             .bind(key)
@@ -50,5 +82,17 @@ mod tests {
         assert_eq!(s.get_setting("a").await.unwrap().as_deref(), Some("2"));
         s.delete_setting("a").await.unwrap();
         assert_eq!(s.get_setting("a").await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn settings_apply_together() {
+        let s = Store::open_in_memory().await.unwrap();
+        let now = Utc::now();
+        s.set_setting("gone", "x", now).await.unwrap();
+        s.apply_settings(&[("a", Some("1".into())), ("gone", None)], now)
+            .await
+            .unwrap();
+        assert_eq!(s.get_setting("a").await.unwrap().as_deref(), Some("1"));
+        assert_eq!(s.get_setting("gone").await.unwrap(), None);
     }
 }

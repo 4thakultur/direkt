@@ -241,4 +241,54 @@
     </p>
   </div>
 </details>
+<details class="panel" id="misc"{% if open == "misc" %} open{% endif %}>
+  <summary>
+    <span class="panel-icon tint-green" aria-hidden="true"><svg class="icon"><use href="#i-sliders"/></svg></span>
+    <span class="panel-title">
+      <span class="panel-name">Miscellaneous</span>
+      <span class="panel-desc">Speed unit, speed limit and download behaviour</span>
+    </span>
+    {% if let Some(limit) = misc.limit %}<span class="pill warn">Limited to {{ limit }}</span>{% else %}<span class="pill">No speed limit</span>{% endif %}
+    <svg class="icon chevron" aria-hidden="true"><use href="#i-chevron"/></svg>
+  </summary>
+  <div class="panel-body">
+    <form method="post" action="/settings/misc" class="stack misc">
+      <fieldset>
+        <legend>Show download speeds in</legend>
+        <div class="choices">
+          {% for u in misc.units %}
+          <label class="choice">
+            <input type="radio" name="speed_unit" value="{{ u.value }}"{% if u.selected %} checked{% endif %}>
+            <span><span class="choice-name">{{ u.label }}</span><span class="choice-desc">{{ u.description }}</span></span>
+          </label>
+          {% endfor %}
+        </div>
+      </fieldset>
+
+      <label for="speed-limit">Speed limit <span class="muted">(all downloads together; empty for no limit)</span></label>
+      <div class="with-unit">
+        <input id="speed-limit" name="speed_limit" inputmode="decimal" autocomplete="off"
+               placeholder="No limit" value="{{ misc.limit_value }}">
+        <select name="speed_limit_unit" aria-label="Speed limit unit">
+          {% for u in misc.limit_units %}<option value="{{ u.value }}"{% if u.selected %} selected{% endif %}>{{ u.label }}/s</option>{% endfor %}
+        </select>
+      </div>
+
+      <label>Simultaneous downloads <span class="muted">(1–32; {{ misc.default_max_concurrent }} in the configuration file)</span>
+        <input class="number" name="max_concurrent" type="number" min="1" max="32" step="1" required value="{{ misc.max_concurrent }}">
+      </label>
+
+      <label class="check">
+        <input type="checkbox" name="confirm_downloads" value="on"{% if misc.confirm_downloads %} checked{% endif %}>
+        <span><span class="choice-name">Confirm before downloading</span><span class="choice-desc">Show the type, title, artwork and size before a download starts. When off, Download starts it with the detected type.</span></span>
+      </label>
+
+      <p class="muted small">
+        Changes apply to running downloads right away. When fewer simultaneous
+        downloads are allowed, the running ones finish first.
+      </p>
+      <button type="submit" class="primary">Save</button>
+    </form>
+  </div>
+</details>
 {% endblock %}

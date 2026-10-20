@@ -282,6 +282,15 @@ button.htmx-request { opacity: 0.55; pointer-events: none; }
 }
 .graph-scale { top: -0.35rem; left: 0; }
 .graph-span { bottom: -1.1rem; right: 0; }
+.graph-limit {
+  position: absolute;
+  bottom: -1.1rem;
+  left: 0;
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--accent);
+  pointer-events: none;
+}
 
 .net-stats {
   display: grid;
@@ -771,6 +780,39 @@ th { font-size: 0.7rem; color: var(--dim); font-weight: 600; letter-spacing: 0.1
 .swatch-steve .sw-card + .sw-card { background: #1c1c1e; }
 .swatch-steve .sw-art { background: linear-gradient(135deg, #5ac8fa, #0071e3); border-radius: 3px; }
 .swatch-steve .sw-lines { background: linear-gradient(90deg, #0071e3 60%, rgba(120, 120, 128, 0.25) 60%); border-radius: 3px; }
+
+/* ---------------------------------------------------------------------------
+   Miscellaneous settings
+   ------------------------------------------------------------------------- */
+
+.misc fieldset { margin: 0; padding: 0; border: none; min-width: 0; }
+.misc legend { padding: 0; margin-bottom: 0.35rem; font-weight: 500; font-size: 0.85rem; color: var(--muted); }
+.choices { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+.choice, .check { display: flex; gap: 0.6rem; align-items: flex-start; cursor: pointer; }
+.choice {
+  flex: 1 1 12rem;
+  padding: 0.6rem 0.7rem;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--bg);
+  transition: border-color 0.15s, background 0.15s;
+}
+.choice:hover { border-color: var(--muted); }
+.choice:has(input:checked) { border-color: var(--accent); background: var(--accent-bg); }
+.choice > input, .check > input {
+  display: inline-block;
+  width: auto;
+  margin: 0.2rem 0 0;
+  padding: 0;
+  flex: none;
+  accent-color: var(--accent);
+}
+.choice-name { display: block; font-weight: 600; color: var(--text); }
+.choice-desc { display: block; font-size: 0.78rem; font-weight: 400; color: var(--muted); }
+.misc > label[for] { margin-bottom: -0.45rem; }
+.with-unit { display: flex; gap: 0.5rem; max-width: 20rem; }
+.with-unit input { flex: 1; }
+.misc .number { max-width: 8rem; }
 
 /* ---------------------------------------------------------------------------
    Small screens

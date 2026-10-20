@@ -236,6 +236,17 @@ impl DownloadService {
         .await
     }
 
+    /// Look a link up and queue it with the detected type, title and
+    /// artwork: the confirmation step, confirmed without asking.
+    pub async fn submit_detected(
+        &self,
+        raw_url: &str,
+        password: Option<&str>,
+    ) -> AppResult<Download> {
+        let preview = self.preview(raw_url, password).await?;
+        self.confirm(preview.id, None).await
+    }
+
     fn validate(
         &self,
         raw_url: &str,

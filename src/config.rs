@@ -152,6 +152,9 @@ impl Default for StorageConfig {
     }
 }
 
+/// Allowed simultaneous transfers, in the file and on the settings page.
+pub const MAX_CONCURRENT_RANGE: std::ops::RangeInclusive<usize> = 1..=32;
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct DownloadsConfig {
@@ -249,7 +252,7 @@ impl Config {
 
     pub fn validate(&self) -> Result<(), ConfigError> {
         let d = &self.downloads;
-        if !(1..=32).contains(&d.max_concurrent) {
+        if !MAX_CONCURRENT_RANGE.contains(&d.max_concurrent) {
             return Err(ConfigError::Invalid(
                 "downloads.max_concurrent must be between 1 and 32".into(),
             ));

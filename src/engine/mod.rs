@@ -2,6 +2,8 @@
 //! and runs at most `max_concurrent` transfers at a time.
 //!
 //! * Jobs are claimed with an atomic UPDATE, so a job never runs twice.
+//! * The concurrency and an overall speed limit can change while it runs
+//!   (see [`Limits`]).
 //! * Each running job has a stop channel (pause, cancel, shutdown) and a "done"
 //!   signal that callers can wait on.
 //! * Failures are classified by [`Disposition`]: transient errors are retried
@@ -11,6 +13,7 @@
 //!   from untrusted input. Once complete, it is moved without overwriting
 //!   into `download_dir` under a sanitized, collision-free name.
 
+mod limits;
 #[cfg(test)]
 mod tests;
 mod throughput;
@@ -24,6 +27,7 @@ use crate::net::NetworkPolicy;
 use crate::providers::{Providers, ResolveRequest};
 use crate::store::{Store, TransitionDetails};
 use chrono::Utc;
+pub use limits::Limits;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -31,7 +35,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use throughput::Throughput;
 pub use throughput::{HISTORY_SECS, ThroughputSnapshot};
-use tokio::sync::{Notify, Semaphore, watch};
+use tokio::sync::{Notify, watch};
 use tokio::task::{JoinHandle, JoinSet};
 use tokio_util::sync::CancellationToken;
 use transfer::{Attempt, AttemptOutcome, remove_if_exists};
@@ -52,6 +56,7 @@ const STOP_WAIT: Duration = Duration::from_secs(30);
 pub struct EngineSettings {
     pub download_dir: PathBuf,
     pub incomplete_dir: PathBuf,
+    /// Transfers at once, unless [`Engine::with_limits`] is given others.
     pub max_concurrent: usize,
     pub max_retries: u32,
     pub retry_base_delay: Duration,
@@ -161,6 +166,7 @@ struct Inner {
     client: reqwest::Client,
     policy: NetworkPolicy,
     settings: EngineSettings,
+    limits: Limits,
     wake: Notify,
     shutdown: CancellationToken,
     running: Mutex<HashMap<Uuid, RunningJob>>,
@@ -196,6 +202,20 @@ impl Engine {
         policy: NetworkPolicy,
         settings: EngineSettings,
     ) -> Self {
+        let limits = Limits::new(settings.max_concurrent);
+        Self::with_limits(store, providers, client, policy, settings, limits)
+    }
+
+    /// Like [`Engine::new`], with limits shared with the settings page, which
+    /// replace `settings.max_concurrent`.
+    pub fn with_limits(
+        store: Store,
+        providers: Providers,
+        client: reqwest::Client,
+        policy: NetworkPolicy,
+        settings: EngineSettings,
+        limits: Limits,
+    ) -> Self {
         Self {
             inner: Arc::new(Inner {
                 store,
@@ -203,6 +223,7 @@ impl Engine {
                 client,
                 policy,
                 settings,
+                limits,
                 wake: Notify::new(),
                 shutdown: CancellationToken::new(),
                 running: Mutex::new(HashMap::new()),
@@ -324,11 +345,11 @@ async fn wait_for_stop(stop: &mut watch::Receiver<Option<StopReason>>) -> StopRe
 }
 
 async fn dispatch(inner: Arc<Inner>) {
-    let slots = Arc::new(Semaphore::new(inner.settings.max_concurrent));
+    let mut max_concurrent = inner.limits.watch_max_concurrent();
     let mut workers = JoinSet::new();
     let mut tasks: HashMap<tokio::task::Id, Uuid> = HashMap::new();
     tracing::info!(
-        max_concurrent = inner.settings.max_concurrent,
+        max_concurrent = *max_concurrent.borrow(),
         "download engine started"
     );
 
@@ -337,14 +358,20 @@ async fn dispatch(inner: Arc<Inner>) {
             reap(&inner, &mut tasks, result).await;
         }
 
-        let permit = tokio::select! {
-            () = inner.shutdown.cancelled() => break,
-            Some(result) = workers.join_next_with_id(), if !workers.is_empty() => {
-                reap(&inner, &mut tasks, result).await;
-                continue;
+        // At the limit (or above it, after it was lowered): wait for a
+        // transfer to finish or the limit to rise.
+        if workers.len() >= *max_concurrent.borrow_and_update() {
+            tokio::select! {
+                () = inner.shutdown.cancelled() => break,
+                Some(result) = workers.join_next_with_id() => {
+                    reap(&inner, &mut tasks, result).await;
+                }
+                Ok(()) = max_concurrent.changed() => {
+                    tracing::info!(max_concurrent = *max_concurrent.borrow(), "concurrency limit changed");
+                }
             }
-            permit = slots.clone().acquire_owned() => permit.expect("semaphore is never closed"),
-        };
+            continue;
+        }
 
         match inner.store.claim_next(Utc::now()).await {
             Ok(Some(download)) => {
@@ -362,7 +389,6 @@ async fn dispatch(inner: Arc<Inner>) {
                 );
                 let inner = inner.clone();
                 let handle = workers.spawn(async move {
-                    let _permit = permit;
                     run_job(&inner, download, stop_rx, &live).await;
                     inner.running().remove(&id);
                     drop(done_tx);
@@ -371,7 +397,6 @@ async fn dispatch(inner: Arc<Inner>) {
                 tasks.insert(handle.id(), id);
             }
             Ok(None) => {
-                drop(permit);
                 let idle = match inner.store.next_retry_at().await {
                     Ok(Some(at)) => (at - Utc::now()).to_std().unwrap_or(Duration::ZERO),
                     _ => IDLE_POLL,
@@ -381,13 +406,13 @@ async fn dispatch(inner: Arc<Inner>) {
                     () = inner.shutdown.cancelled() => break,
                     () = inner.wake.notified() => {}
                     () = tokio::time::sleep(idle) => {}
+                    Ok(()) = max_concurrent.changed() => {}
                     Some(result) = workers.join_next_with_id(), if !workers.is_empty() => {
                         reap(&inner, &mut tasks, result).await;
                     }
                 }
             }
             Err(e) => {
-                drop(permit);
                 tracing::error!(error = %e, "failed to claim next download");
                 tokio::select! {
                     () = inner.shutdown.cancelled() => break,
