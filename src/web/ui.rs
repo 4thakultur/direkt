@@ -130,17 +130,17 @@ fn render_status(status: StatusCode, template: &impl Template) -> Response {
 /// it; fragments only use classes both stylesheets style.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) enum Theme {
-    /// Black and red, flat.
-    #[default]
+    /// "Beyond": black and red, flat.
     Classic,
     /// Light and dark, after Apple's iOS, macOS and apple.com.
+    #[default]
     Steve,
 }
 
 const THEME_COOKIE: &str = "direkt_theme";
 
 impl Theme {
-    const ALL: [Theme; 2] = [Theme::Classic, Theme::Steve];
+    const ALL: [Theme; 2] = [Theme::Steve, Theme::Classic];
 
     /// The cookie value, `data-theme` attribute and stylesheet name.
     fn id(self) -> &'static str {
@@ -152,7 +152,7 @@ impl Theme {
 
     fn label(self) -> &'static str {
         match self {
-            Theme::Classic => "Classic (red)",
+            Theme::Classic => "Beyond",
             Theme::Steve => "Steve",
         }
     }
@@ -2103,7 +2103,7 @@ mod tests {
         }
         assert_eq!(Theme::parse("Steve"), None);
         assert_eq!(Theme::parse(""), None);
-        assert_eq!(Theme::default(), Theme::Classic);
+        assert_eq!(Theme::default(), Theme::Steve);
     }
 
     #[test]

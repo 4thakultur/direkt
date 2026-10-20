@@ -80,9 +80,9 @@ API tokens. Sign in with the password and set it up again.
   `server.secure_cookies = true` when the UI is reached over HTTPS.
 - With two-factor authentication on, `direkt_2fa` holds a sign-in that
   waits for its code (see above).
-- The only other cookie, `direkt_theme`, holds the chosen UI theme (`classic`
-  or `steve`). It carries no secret, and an unknown value falls back to
-  Classic. Changing it requires a session.
+- The only other cookie, `direkt_theme`, holds the chosen UI theme (`steve`
+  or `classic` for Beyond). It carries no secret, and an unknown value falls back to
+  Steve. Changing it requires a session.
 - Session and API tokens are 256-bit random values. Only their SHA-256 hashes
   are stored.
 - Each client gets 5 unsuccessful login, setup-token, or password-change

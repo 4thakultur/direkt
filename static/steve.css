@@ -2,7 +2,7 @@
    Light and dark (follows the system), translucent bars, inset grouped
    lists, pill buttons and a Liquid Glass corner button on phones.
    No external assets: the system font (SF Pro on Apple devices), inline SVG
-   icons. Shares its markup with the Classic theme. */
+   icons. Shares its markup with the Beyond theme. */
 
 :root {
   color-scheme: light dark;

@@ -50,7 +50,7 @@ over HTTPS: `cargo test -- --ignored real_https`.
 |--------------|-----------------------------------------------------------|
 | Runtime      | tokio                                                     |
 | HTTP server  | axum, with OpenAPI via utoipa                             |
-| Web UI       | Server-rendered templates + htmx, embedded in the binary; two themes, chosen per browser under Settings → Appearance: "Classic (red)" (black and red, the default) and "Steve" (after iOS and macOS, light and dark); no external assets |
+| Web UI       | Server-rendered templates + htmx, embedded in the binary; two themes, chosen per browser under Settings → Appearance: "Steve" (after iOS and macOS, light and dark, the default) and "Beyond" (black and red); no external assets |
 | Persistence  | SQLite (sqlx, WAL mode, embedded migrations)              |
 | Outbound HTTP| reqwest with SSRF-checked DNS resolution and redirects    |
 | Config       | One TOML file; secrets may come from `DIREKT_*` env vars  |

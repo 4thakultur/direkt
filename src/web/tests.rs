@@ -2049,37 +2049,41 @@ async fn theme_is_chosen_per_browser() {
     let (app, cookie) = TestApp::with_admin().await;
     let auth = cookie_header(&cookie);
 
-    // Classic by default, on the app and on the login page.
+    // Steve by default, on the app and on the login page.
     let page = app.get("/", &auth).await;
-    assert!(page.body.contains("data-theme=\"classic\""));
-    assert!(page.body.contains("href=\"/static/classic.css\""));
+    assert!(page.body.contains("data-theme=\"steve\""));
+    assert!(page.body.contains("href=\"/static/steve.css\""));
     assert!(
         app.get("/login", &[])
             .await
             .body
-            .contains("/static/classic.css")
+            .contains("/static/steve.css")
     );
 
     // Switching answers with the new theme and remembers it in a cookie.
-    let r = app.post_form("/settings/theme", &auth, "theme=steve").await;
+    let r = app
+        .post_form("/settings/theme", &auth, "theme=classic")
+        .await;
     assert_eq!(r.status, StatusCode::OK);
-    assert!(r.body.contains("data-theme=\"steve\""));
+    assert!(r.body.contains("data-theme=\"classic\""));
     assert!(
         r.body
-            .contains("value=\"steve\" class=\"theme-choice\" aria-pressed=\"true\"")
+            .contains("value=\"classic\" class=\"theme-choice\" aria-pressed=\"true\"")
     );
     let set = r.header("set-cookie");
-    assert!(set.starts_with("direkt_theme=steve;"), "{set}");
+    assert!(set.starts_with("direkt_theme=classic;"), "{set}");
     assert!(set.contains("HttpOnly"), "{set}");
 
-    let both = format!("{cookie}; direkt_theme=steve");
+    let both = format!("{cookie}; direkt_theme=classic");
     for uri in ["/", "/settings"] {
         let page = app.get(uri, &cookie_header(&both)).await;
-        assert!(page.body.contains("href=\"/static/steve.css\""), "{uri}");
-        assert!(page.body.contains("viewport-fit=cover"), "{uri}");
+        assert!(page.body.contains("href=\"/static/classic.css\""), "{uri}");
+        assert!(!page.body.contains("viewport-fit=cover"), "{uri}");
     }
-    let login = app.get("/login", &[("cookie", "direkt_theme=steve")]).await;
-    assert!(login.body.contains("data-theme=\"steve\""));
+    let login = app
+        .get("/login", &[("cookie", "direkt_theme=classic")])
+        .await;
+    assert!(login.body.contains("data-theme=\"classic\""));
 
     // An unknown value in the cookie falls back; one in the form is refused.
     let odd = format!("{cookie}; direkt_theme=../evil");
@@ -2087,7 +2091,7 @@ async fn theme_is_chosen_per_browser() {
         app.get("/", &cookie_header(&odd))
             .await
             .body
-            .contains("data-theme=\"classic\"")
+            .contains("data-theme=\"steve\"")
     );
     let r = app.post_form("/settings/theme", &auth, "theme=evil").await;
     assert_eq!(r.status, StatusCode::BAD_REQUEST);
@@ -2095,7 +2099,7 @@ async fn theme_is_chosen_per_browser() {
     assert!(r.headers.get("set-cookie").is_none());
 
     // Changing the theme needs a session.
-    let r = app.post_form("/settings/theme", &[], "theme=steve").await;
+    let r = app.post_form("/settings/theme", &[], "theme=classic").await;
     assert_ne!(r.status, StatusCode::OK);
 }
 
