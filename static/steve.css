@@ -34,9 +34,11 @@
   --art-shadow: 0 6px 18px rgba(0, 0, 0, 0.18);
   --scrim: rgba(0, 0, 0, 0.32);
   --ring: rgba(0, 113, 227, 0.45);
-  --radius: 12px;
+  /* Two radii only: --radius for every card, sheet and list, --radius-sm
+     for everything inside one (fields, buttons, artwork). Round controls
+     (icon buttons, badges, progress) stay fully round. */
+  --radius: 18px;
   --radius-sm: 8px;
-  --radius-lg: 18px;
   --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Helvetica Neue", "Inter", system-ui, "Segoe UI", Roboto, Arial, sans-serif;
   --rounded: ui-rounded, "SF Pro Rounded", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
   --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
@@ -163,7 +165,7 @@ p { margin: 0 0 0.5rem; }
   height: 28px;
   display: grid;
   place-items: center;
-  border-radius: 7px;
+  border-radius: var(--radius-sm);
   color: #fff;
   background: linear-gradient(180deg, #3fa2ff 0%, #0071e3 100%);
   box-shadow: inset 0 0 0 0.5px rgba(0, 0, 0, 0.1);
@@ -212,7 +214,7 @@ input, select {
   letter-spacing: -0.01em;
   padding: 0.65rem 0.85rem;
   border: none;
-  border-radius: 10px;
+  border-radius: var(--radius-sm);
   background: var(--fill);
   color: var(--text);
   min-width: 0;
@@ -239,7 +241,7 @@ button {
   letter-spacing: -0.01em;
   padding: 0.5rem 1.05rem;
   border: none;
-  border-radius: 999px;
+  border-radius: var(--radius-sm);
   background: var(--fill);
   color: var(--accent-text);
   cursor: pointer;
@@ -291,7 +293,7 @@ button.htmx-request { opacity: 0.55; pointer-events: none; }
   margin-bottom: 1.25rem;
   padding: 0.6rem;
   background: var(--surface);
-  border-radius: var(--radius-lg);
+  border-radius: var(--radius);
   box-shadow: var(--shadow);
 }
 .field { position: relative; display: flex; align-items: center; color: var(--dim); }
@@ -317,7 +319,7 @@ button.htmx-request { opacity: 0.55; pointer-events: none; }
   margin: 0 0 1.25rem;
   padding: 1.25rem;
   background: var(--surface);
-  border-radius: var(--radius-lg);
+  border-radius: var(--radius);
   box-shadow: var(--shadow);
   animation: rise 0.4s var(--spring);
 }
@@ -339,9 +341,9 @@ button.htmx-request { opacity: 0.55; pointer-events: none; }
   gap: 2rem;
   align-items: stretch;
   margin-bottom: 1.5rem;
-  padding: 1.25rem 1.5rem 1.6rem;
+  padding: 1.25rem 1.25rem 1.6rem;
   background: var(--surface);
-  border-radius: var(--radius-lg);
+  border-radius: var(--radius);
   box-shadow: var(--shadow);
 }
 .graph { position: relative; height: 120px; min-width: 0; }
@@ -421,12 +423,9 @@ a.art:hover { text-decoration: none; }
   width: 300px;
   aspect-ratio: 460 / 215;
   font-size: 2.2rem;
-  border-radius: var(--radius);
   box-shadow: var(--art-shadow);
 }
-.art-sm { width: 92px; aspect-ratio: 460 / 215; font-size: 0.78rem; border-radius: 7px; }
-.art-idle { background: linear-gradient(180deg, #3fa2ff 0%, #0071e3 100%); box-shadow: none; }
-.art-idle .icon { width: 46px; height: 46px; }
+.art-sm { width: 92px; aspect-ratio: 460 / 215; font-size: 0.78rem; }
 
 /* File types get their own tint, as Files does. */
 .state-downloading .art:not(:has(img)), .state-retrying .art:not(:has(img)) { background: linear-gradient(160deg, #5ac8fa 0%, #0071e3 100%); }
@@ -447,7 +446,7 @@ a.art:hover { text-decoration: none; }
   margin-bottom: 1rem;
   padding: 1.25rem;
   background: var(--surface);
-  border-radius: var(--radius-lg);
+  border-radius: var(--radius);
   box-shadow: var(--shadow);
 }
 .hero-backdrop {
@@ -461,11 +460,6 @@ a.art:hover { text-decoration: none; }
   opacity: 0.22;
   pointer-events: none;
 }
-.hero.idle { padding: 1rem 1.25rem; }
-.hero.idle .art-lg { width: 64px; aspect-ratio: 1; border-radius: 15px; }
-.hero.idle .art-idle .icon { width: 30px; height: 30px; }
-.hero.idle .hero-name { font-size: 1.15rem; }
-.hero.idle .muted { margin: 0; }
 .hero-body { flex: 1; min-width: 0; display: flex; flex-direction: column; justify-content: center; gap: 0.3rem; }
 .hero-head { display: flex; gap: 1rem; align-items: flex-start; }
 .hero-title { flex: 1; min-width: 0; }
@@ -485,12 +479,12 @@ a.art:hover { text-decoration: none; }
   color: var(--accent-text);
 }
 .state-completed .eyebrow { color: var(--green); }
-.state-paused .eyebrow, .state-queued .eyebrow, .state-cancelled .eyebrow, .idle .eyebrow { color: var(--muted); }
+.state-paused .eyebrow, .state-queued .eyebrow, .state-cancelled .eyebrow { color: var(--muted); }
 .state-retrying .eyebrow, .state-blocked .eyebrow { color: var(--orange); }
 .state-failed .eyebrow { color: var(--red); }
 
-.hero-meta { display: flex; flex-wrap: wrap; gap: 0.5rem 2.25rem; margin: 0.4rem 0 0; }
-.hero-meta dt { font-size: 0.75rem; color: var(--muted); }
+.hero-meta { display: flex; flex-wrap: wrap; align-items: last baseline; gap: 0.5rem 2.25rem; margin: 0.4rem 0 0; }
+.hero-meta dt, .hero-meta dt label { font-size: 0.75rem; font-weight: 400; color: var(--muted); }
 .hero-meta dd { margin: 0; font-family: var(--rounded); font-weight: 600; font-variant-numeric: tabular-nums; }
 
 /* ---------------------------------------------------------------------------
@@ -546,7 +540,7 @@ progress.bar:indeterminate::-moz-progress-bar { background: transparent; }
    ------------------------------------------------------------------------- */
 
 .group { margin-top: 2rem; }
-.group-head { display: flex; align-items: baseline; gap: 1rem; margin: 0 0 0.6rem; padding: 0 0.25rem; }
+.group-head { display: flex; align-items: baseline; gap: 1rem; margin: 0 0 0.6rem; }
 .group-title {
   flex: 1;
   display: flex;
@@ -570,7 +564,7 @@ progress.bar:indeterminate::-moz-progress-bar { background: transparent; }
   line-height: 1.5rem;
   text-align: center;
 }
-.more { margin: 0.6rem 0.25rem 0; }
+.more { margin: 0.6rem 0 0; }
 
 .rows {
   list-style: none;
@@ -586,7 +580,7 @@ progress.bar:indeterminate::-moz-progress-bar { background: transparent; }
   display: flex;
   align-items: center;
   gap: 0.9rem;
-  padding: 0.7rem 0.9rem 0.7rem 0.75rem;
+  padding: 0.75rem;
   transition: background 0.15s;
 }
 /* The separator starts after the artwork, as in iOS lists. */
@@ -633,7 +627,7 @@ progress.bar:indeterminate::-moz-progress-bar { background: transparent; }
    Messages: tinted inline notes, and a capsule HUD for action results
    ------------------------------------------------------------------------- */
 
-.flash { margin: 0 0 1rem; padding: 0.7rem 0.95rem; border-radius: var(--radius); font-size: 0.9rem; }
+.flash { margin: 0 0 1rem; padding: 0.7rem 0.95rem; border-radius: var(--radius-sm); font-size: 0.9rem; }
 .flash.ok { background: var(--green-bg); color: var(--text); }
 .flash.error { background: var(--red-bg); color: var(--red); }
 
@@ -688,7 +682,7 @@ progress.bar:indeterminate::-moz-progress-bar { background: transparent; }
   background: var(--bar);
   -webkit-backdrop-filter: saturate(180%) blur(30px);
   backdrop-filter: saturate(180%) blur(30px);
-  border-radius: 14px;
+  border-radius: var(--radius);
   box-shadow: var(--shadow-lg);
   animation: pop 0.3s var(--spring);
 }
@@ -729,9 +723,9 @@ progress.bar:indeterminate::-moz-progress-bar { background: transparent; }
 
 .card {
   margin-bottom: 1.25rem;
-  padding: 1.25rem 1.4rem;
+  padding: 1.25rem;
   background: var(--surface);
-  border-radius: var(--radius-lg);
+  border-radius: var(--radius);
   box-shadow: var(--shadow);
 }
 .card h2 { font-size: 1.35rem; font-weight: 700; }
@@ -795,7 +789,7 @@ td button { padding: 0.3rem 0.85rem; font-size: 0.82rem; }
 
 .secret {
   padding: 0.85rem 1rem;
-  border-radius: var(--radius);
+  border-radius: var(--radius-sm);
   background: var(--accent-bg);
   overflow-wrap: anywhere;
   user-select: all;
@@ -812,7 +806,7 @@ td button { padding: 0.3rem 0.85rem; font-size: 0.82rem; }
   margin: 0 auto 1rem;
   display: grid;
   place-items: center;
-  border-radius: 19px;
+  border-radius: var(--radius);
   color: #fff;
   background: linear-gradient(180deg, #3fa2ff 0%, #0071e3 100%);
   box-shadow: 0 8px 24px rgba(0, 113, 227, 0.3);
@@ -822,7 +816,7 @@ td button { padding: 0.3rem 0.85rem; font-size: 0.82rem; }
 .narrow .card { padding: 1.5rem; }
 .narrow .card h2 { margin-bottom: 0.25rem; text-align: center; font-size: 1.3rem; }
 .narrow .card > .muted { text-align: center; font-size: 0.88rem; }
-.narrow .stack > button { align-self: stretch; padding: 0.75rem; font-size: 1rem; font-weight: 600; border-radius: var(--radius); }
+.narrow .stack > button { align-self: stretch; padding: 0.75rem; font-size: 1rem; font-weight: 600; }
 
 /* ---------------------------------------------------------------------------
    Settings: an inset grouped list with tinted icon tiles
@@ -857,7 +851,7 @@ td button { padding: 0.3rem 0.85rem; font-size: 0.82rem; }
   height: 30px;
   display: grid;
   place-items: center;
-  border-radius: 7px;
+  border-radius: var(--radius-sm);
   color: #fff;
 }
 .panel-icon .icon { width: 18px; height: 18px; }
@@ -900,7 +894,7 @@ td button { padding: 0.3rem 0.85rem; font-size: 0.82rem; }
 .choice {
   flex: 1 1 12rem;
   padding: 0.7rem 0.85rem;
-  border-radius: 12px;
+  border-radius: var(--radius-sm);
   background: var(--fill);
   transition: box-shadow 0.2s var(--ease), background 0.2s var(--ease);
 }
@@ -957,7 +951,7 @@ td button { padding: 0.3rem 0.85rem; font-size: 0.82rem; }
   aspect-ratio: 16 / 10;
   padding: 0 8px 8px;
   overflow: hidden;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
 }
 .sw-bar { height: 10px; margin: 0 -8px 2px; }
 .sw-card { display: flex; gap: 6px; align-items: center; padding: 5px; }
@@ -996,7 +990,7 @@ td button { padding: 0.3rem 0.85rem; font-size: 0.82rem; }
   .topbar-inner { gap: 1rem; }
   .nav { display: none; }
   .brand { font-size: 1rem; }
-  .brand-mark { width: 26px; height: 26px; border-radius: 6px; }
+  .brand-mark { width: 26px; height: 26px; }
   .logout .link { font-size: 1rem; }
 
   main { padding-top: 0.5rem; }
@@ -1040,18 +1034,17 @@ td button { padding: 0.3rem 0.85rem; font-size: 0.82rem; }
   .net-stats { grid-template-columns: repeat(2, 1fr); gap: 0.85rem 1rem; }
 
   .hero, .confirm { flex-direction: column; align-items: stretch; gap: 1rem; padding: 1rem; }
-  .hero.idle { flex-direction: row; align-items: center; }
   .art-lg { width: 100%; font-size: 2.6rem; }
   /* Without artwork the file-type tile is a short banner, not a poster. */
   .art-lg:not(:has(img)) { aspect-ratio: 3 / 1; font-size: 2rem; }
   .hero-name, .confirm-title { font-size: 1.3rem; }
   /* Now Playing: the controls sit centered under the progress. */
-  .hero:not(.idle) .hero-head { display: contents; }
-  .hero:not(.idle) .actions { order: 1; justify-content: center; gap: 1.5rem; margin-top: 0.5rem; }
-  .hero:not(.idle) .icon-btn { width: 52px; height: 52px; }
-  .hero:not(.idle) .icon-btn .icon { width: 20px; height: 20px; }
+  .hero .hero-head { display: contents; }
+  .hero .actions { order: 1; justify-content: center; gap: 1.5rem; margin-top: 0.5rem; }
+  .hero .icon-btn { width: 52px; height: 52px; }
+  .hero .icon-btn .icon { width: 20px; height: 20px; }
   .confirm .actions { flex-direction: column-reverse; align-items: stretch; }
-  .confirm .actions button { padding: 0.8rem; font-size: 1.05rem; border-radius: 14px; }
+  .confirm .actions button { padding: 0.8rem; font-size: 1.05rem; }
 
   .events li { grid-template-columns: 1fr; gap: 0; }
   .details { grid-template-columns: 1fr; }
@@ -1078,7 +1071,7 @@ td button { padding: 0.3rem 0.85rem; font-size: 0.82rem; }
     display: flex;
     margin: 0 1rem 0.25rem;
     padding: 2px;
-    border-radius: 9px;
+    border-radius: var(--radius-sm);
     background: var(--fill);
   }
   .pager-tab {
@@ -1091,7 +1084,7 @@ td button { padding: 0.3rem 0.85rem; font-size: 0.82rem; }
     gap: 0.4rem;
     height: 28px;
     padding: 0;
-    border-radius: 7px;
+    border-radius: calc(var(--radius-sm) - 2px);
     background: none;
     color: var(--text);
     font-size: 0.82rem;
@@ -1106,7 +1099,7 @@ td button { padding: 0.3rem 0.85rem; font-size: 0.82rem; }
     left: 0;
     width: 50%;
     height: 28px;
-    border-radius: 7px;
+    border-radius: calc(var(--radius-sm) - 2px);
     background: var(--thumb);
     box-shadow: 0 3px 8px rgba(0, 0, 0, 0.12), 0 3px 1px rgba(0, 0, 0, 0.04), 0 0 0 0.5px rgba(0, 0, 0, 0.04);
     will-change: transform, width;
@@ -1154,7 +1147,7 @@ td button { padding: 0.3rem 0.85rem; font-size: 0.82rem; }
   .pane-intro { display: block; margin: 0.75rem 0.25rem 1rem; }
   .pane-intro h2 { margin-bottom: 0.25rem; font-size: 1.35rem; font-weight: 700; }
   .pane-intro p { margin: 0; color: var(--muted); font-size: 0.95rem; }
-  .add { flex-direction: column; gap: 0; padding: 0; overflow: hidden; border-radius: var(--radius); }
+  .add { flex-direction: column; gap: 0; padding: 0; overflow: hidden; }
   .add .field input { border-radius: 0; background: none; padding-block: 0.9rem; font-size: 1.05rem; }
   .add .field input:focus { box-shadow: none; }
   .add .field.password { border-top: 1px solid var(--separator); margin-left: 2.6rem; }
@@ -1165,7 +1158,6 @@ td button { padding: 0.3rem 0.85rem; font-size: 0.82rem; }
     margin: 0.75rem;
     padding: 0.85rem;
     font-size: 1.05rem;
-    border-radius: 14px;
   }
   .add .flash { margin: 0 0.75rem 0.75rem; }
 
@@ -1188,7 +1180,7 @@ td button { padding: 0.3rem 0.85rem; font-size: 0.82rem; }
   .topbar-inner { padding-inline: max(1rem, env(safe-area-inset-left)); }
   main { padding-inline: max(1rem, env(safe-area-inset-left)); }
   .brand-text { display: inline; }
-  .art-sm { width: 64px; font-size: 0.62rem; border-radius: 6px; }
+  .art-sm { width: 64px; font-size: 0.62rem; }
   .row { gap: 0.7rem; padding: 0.65rem 0.75rem 0.65rem 0.7rem; }
   .row + .row::before { left: calc(0.7rem + 64px + 0.7rem); }
   .row .actions { gap: 0.35rem; }

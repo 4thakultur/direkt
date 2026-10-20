@@ -25,18 +25,7 @@
   </dl>
 </section>
 
-{% if downloading.is_empty() %}
-<section class="hero idle">
-  <div class="art art-lg art-idle" aria-hidden="true"><svg class="icon"><use href="#i-logo"/></svg></div>
-  <div class="hero-body">
-    <p class="eyebrow">Idle</p>
-    <h2 class="hero-name">Nothing downloading</h2>
-    <p class="muted">{% if queued > 0 %}{{ queued }} waiting in the queue.{% else %}Paste a link above to start a download.{% endif %}</p>
-  </div>
-</section>
-{% else %}
 {% for d in downloading %}{% include "_hero.html" %}{% endfor %}
-{% endif %}
 
 {% for group in groups %}
 <section class="group">

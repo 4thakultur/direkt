@@ -338,8 +338,6 @@ button.htmx-request { opacity: 0.55; pointer-events: none; }
 a.art:hover { color: var(--text); }
 .art-lg { width: 280px; aspect-ratio: 460 / 215; font-size: 2rem; }
 .art-sm { width: 96px; aspect-ratio: 460 / 215; font-size: 0.75rem; letter-spacing: 0.06em; }
-.art-idle { background: var(--surface-2); color: var(--dim); }
-.art-idle .icon { width: 44px; height: 44px; position: relative; z-index: 1; }
 
 
 /* ---------------------------------------------------------------------------
@@ -357,10 +355,9 @@ a.art:hover { color: var(--text); }
   border-left: 3px solid var(--accent);
   border-radius: var(--radius-lg);
 }
-.hero.idle, .hero.state-completed, .hero.state-paused, .hero.state-queued, .hero.state-cancelled {
+.hero.state-completed, .hero.state-paused, .hero.state-queued, .hero.state-cancelled {
   border-left-color: var(--border-strong);
 }
-.hero.idle { align-items: center; }
 .hero-body { flex: 1; min-width: 0; display: flex; flex-direction: column; justify-content: center; gap: 0.35rem; }
 .hero-head { display: flex; gap: 1rem; align-items: flex-start; }
 .hero-title { flex: 1; min-width: 0; }
@@ -384,7 +381,7 @@ a.art:hover { color: var(--text); }
   color: var(--accent);
 }
 .state-completed .eyebrow { color: var(--text); }
-.state-paused .eyebrow, .state-queued .eyebrow, .state-cancelled .eyebrow, .idle .eyebrow { color: var(--muted); }
+.state-paused .eyebrow, .state-queued .eyebrow, .state-cancelled .eyebrow { color: var(--muted); }
 .state-retrying .eyebrow, .state-blocked .eyebrow { color: var(--warn); }
 .state-failed .eyebrow { color: var(--error); }
 
