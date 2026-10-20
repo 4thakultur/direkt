@@ -752,6 +752,11 @@ async fn ui_token_management() {
     let auth = cookie_header(&cookie);
     let r = app.post_form("/settings/tokens", &auth, "name=phone").await;
     assert_eq!(r.status, StatusCode::OK);
+    assert!(
+        r.body.contains(r#"id="tokens" open>"#),
+        "the section the action came from is expanded"
+    );
+    assert!(!r.body.contains(r#"id="password" open>"#));
     let secret = r
         .body
         .split("<code>")
@@ -770,6 +775,10 @@ async fn ui_token_management() {
     let page = app.get("/settings", &auth).await;
     assert!(page.body.contains("phone"));
     assert!(!page.body.contains(&secret), "secret is not shown again");
+    assert!(
+        !page.body.contains(" open>"),
+        "settings sections start collapsed"
+    );
 }
 
 #[tokio::test]

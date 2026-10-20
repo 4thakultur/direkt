@@ -799,7 +799,14 @@ struct SettingsPage {
     new_token: Option<String>,
     message: Option<String>,
     error: Option<String>,
+    /// The section to show expanded: the one the last action came from.
+    open: &'static str,
 }
+
+/// Collapsible sections of the settings page, by element id.
+const SECTION_ONEFICHIER: &str = "onefichier";
+const SECTION_TOKENS: &str = "tokens";
+const SECTION_PASSWORD: &str = "password";
 
 async fn settings_with(state: &AppState, mut page: SettingsPage) -> SettingsPage {
     page.onefichier = state.settings.onefichier();
@@ -833,10 +840,12 @@ async fn create_token(State(state): State<AppState>, Form(form): Form<TokenForm>
                 "Created token \u{201c}{}\u{201d}. Copy it now; it will not be shown again.",
                 token.name
             )),
+            open: SECTION_TOKENS,
             ..Default::default()
         },
         Err(e) => SettingsPage {
             error: Some(e.message),
+            open: SECTION_TOKENS,
             ..Default::default()
         },
     };
@@ -847,10 +856,12 @@ async fn revoke_token(State(state): State<AppState>, Path(id): Path<Uuid>) -> Re
     let page = match state.auth.revoke_api_token(id).await {
         Ok(()) => SettingsPage {
             message: Some("Token revoked.".into()),
+            open: SECTION_TOKENS,
             ..Default::default()
         },
         Err(e) => SettingsPage {
             error: Some(e.message),
+            open: SECTION_TOKENS,
             ..Default::default()
         },
     };
@@ -962,6 +973,7 @@ async fn remove_onefichier(State(state): State<AppState>) -> Response {
     settings_result(&state, result).await
 }
 
+/// Render the settings page after a 1fichier action, with that section open.
 async fn settings_result(state: &AppState, result: Result<&str, AppError>) -> Response {
     match result {
         Ok(message) => render(
@@ -969,6 +981,7 @@ async fn settings_result(state: &AppState, result: Result<&str, AppError>) -> Re
                 state,
                 SettingsPage {
                     message: Some(message.to_owned()),
+                    open: SECTION_ONEFICHIER,
                     ..Default::default()
                 },
             )
@@ -978,6 +991,7 @@ async fn settings_result(state: &AppState, result: Result<&str, AppError>) -> Re
             let status = status_for(&e);
             let page = SettingsPage {
                 error: Some(e.message),
+                open: SECTION_ONEFICHIER,
                 ..Default::default()
             };
             render_status(status, &settings_with(state, page).await)
@@ -1000,6 +1014,7 @@ async fn change_password(
     if form.new_password != form.new_password_confirm {
         let page = SettingsPage {
             error: Some("new passwords do not match".into()),
+            open: SECTION_PASSWORD,
             ..Default::default()
         };
         return render_status(StatusCode::BAD_REQUEST, &settings_with(&state, page).await);
@@ -1016,6 +1031,7 @@ async fn change_password(
         Ok(session) => {
             let page = SettingsPage {
                 message: Some("Password changed. Other sessions have been logged out.".into()),
+                open: SECTION_PASSWORD,
                 ..Default::default()
             };
             let mut response = render(&settings_with(&state, page).await);
@@ -1029,6 +1045,7 @@ async fn change_password(
             let status = status_for(&e);
             let page = SettingsPage {
                 error: Some(e.message),
+                open: SECTION_PASSWORD,
                 ..Default::default()
             };
             render_status(status, &settings_with(&state, page).await)

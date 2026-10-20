@@ -5,137 +5,166 @@
 {% if let Some(message) = message %}<p class="flash ok">{{ message }}</p>{% endif %}
 {% if let Some(error) = error %}<p class="flash error">{{ error }}</p>{% endif %}
 
-<section class="card stack">
-  <h2>1fichier</h2>
-  <p class="muted">
-    A premium account is required. Sign in with your 1fichier account, or use
-    an API key. When both are set, downloads use the account.
-  </p>
+<details class="panel" id="onefichier"{% if open == "onefichier" || onefichier.account.attention.is_some() %} open{% endif %}>
+  <summary>
+    <span class="panel-title">
+      <span class="panel-name">1fichier</span>
+      <span class="panel-desc">Premium account, CDN credits and API key</span>
+    </span>
+    {% if onefichier.account.attention.is_some() %}<span class="pill warn">Needs attention</span>
+    {% else if onefichier.account.signed_in %}<span class="pill ok">Signed in{% if let Some(cdn) = cdn %} · {{ cdn.balance }}{% endif %}</span>
+    {% else if onefichier.configured %}<span class="pill ok">API key set</span>
+    {% else %}<span class="pill">Not set up</span>{% endif %}
+    <svg class="icon chevron" aria-hidden="true"><use href="#i-chevron"/></svg>
+  </summary>
+  <div class="panel-body stack">
+    <p class="muted">
+      A premium account is required. Sign in with your 1fichier account, or use
+      an API key. When both are set, downloads use the account.
+    </p>
 
-  <h3>CDN credits</h3>
-  {% if let Some(cdn) = cdn %}
-  <p>
-    <strong>{{ cdn.balance }}</strong> · {{ cdn.usage }}
-    <span class="muted">· from the {{ cdn.source }}, checked {{ cdn.checked }}</span>
-  </p>
-  {% else %}
-  <p class="muted">Not checked yet.</p>
-  {% endif %}
-  {% if onefichier.account.signed_in || onefichier.configured %}
-  <form method="post" action="/settings/onefichier/cdn/refresh" class="inline">
-    <button type="submit">Refresh credits</button>
-  </form>
-  <p class="muted">1fichier allows checking credits once every 5 minutes.</p>
-  {% endif %}
-
-  <h3>Account</h3>
-  {% if onefichier.account.signed_in %}
-  <p>
-    Signed in as <strong>{% if let Some(email) = onefichier.account.email %}{{ email }}{% endif %}</strong>
-    {% if let Some(until) = onefichier.account.premium_until %}· Premium until {{ until }}{% else if has_credits %}· No subscription, downloads use CDN credits{% else %}· <span class="note">No premium subscription or CDN credits found</span>{% endif %}
-    {% if onefichier.account.two_factor %}· two-factor authentication{% endif %}
-  </p>
-  {% endif %}
-  {% if let Some(attention) = onefichier.account.attention %}<p class="flash error">{{ attention }}</p>{% endif %}
-  <form method="post" action="/settings/onefichier/sign-in" class="stack">
-    <label>Email
-      <input name="email" type="email" autocomplete="off" required
-             value="{% if let Some(email) = onefichier.account.email %}{{ email }}{% endif %}">
-    </label>
-    <label>Password
-      <input name="password" type="password" autocomplete="new-password" required
-             value="{% if let Some(mask) = onefichier.account.password %}{{ mask }}{% endif %}">
-    </label>
-    {% if onefichier.account.two_factor_pending || onefichier.account.two_factor %}
-    <label>Two-factor code
-      <input name="code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code"
-             {% if onefichier.account.two_factor_pending %}required autofocus{% endif %}>
-    </label>
+    <h3>CDN credits</h3>
+    {% if let Some(cdn) = cdn %}
+    <p>
+      <strong>{{ cdn.balance }}</strong> · {{ cdn.usage }}
+      <span class="muted">· from the {{ cdn.source }}, checked {{ cdn.checked }}</span>
+    </p>
+    {% else %}
+    <p class="muted">Not checked yet.</p>
     {% endif %}
-    <div class="actions">
-      <button type="submit" class="primary">{% if onefichier.account.signed_in %}Sign in again{% else %}Sign in{% endif %}</button>
-    </div>
-  </form>
-  {% if onefichier.account.signed_in %}
-  <form method="post" action="/settings/onefichier/sign-out" class="inline">
-    <button type="submit" class="danger">Sign out</button>
-  </form>
-  {% endif %}
-  <p class="muted">
-    Direkt stores the email and password so it can sign in again when 1fichier
-    ends the session. Accounts with two-factor authentication must sign in here
-    again when that happens.
-  </p>
+    {% if onefichier.account.signed_in || onefichier.configured %}
+    <form method="post" action="/settings/onefichier/cdn/refresh" class="inline-row">
+      <button type="submit">Refresh credits</button>
+      <span class="muted small">1fichier allows checking credits once every 5 minutes.</span>
+    </form>
+    {% endif %}
 
-  <h3>API key</h3>
-  {% if !onefichier.editable %}
-  <p class="note">
-    The key is set by the <code>DIREKT_ONEFICHIER_API_KEY</code> environment
-    variable. Change or remove it there.
-  </p>
-  {% endif %}
-  <form method="post" action="/settings/onefichier" class="submit">
-    <input name="api_key" type="text" value="{% if let Some(mask) = onefichier.api_key %}{{ mask }}{% endif %}"
-           placeholder="Paste your 1fichier API key" autocomplete="off" spellcheck="false"
-           aria-label="1fichier API key"{% if !onefichier.editable %} disabled{% endif %}>
-    {% if onefichier.editable %}<button type="submit" class="primary">Save</button>{% endif %}
-  </form>
-  {% if onefichier.editable && onefichier.configured %}
-  <form method="post" action="/settings/onefichier/remove" class="inline">
-    <button type="submit" class="danger">Remove key</button>
-  </form>
-  {% endif %}
-</section>
+    <h3>Account</h3>
+    {% if onefichier.account.signed_in %}
+    <p>
+      Signed in as <strong>{% if let Some(email) = onefichier.account.email %}{{ email }}{% endif %}</strong>
+      {% if let Some(until) = onefichier.account.premium_until %}· Premium until {{ until }}{% else if has_credits %}· No subscription, downloads use CDN credits{% else %}· <span class="note">No premium subscription or CDN credits found</span>{% endif %}
+      {% if onefichier.account.two_factor %}· two-factor authentication{% endif %}
+    </p>
+    {% endif %}
+    {% if let Some(attention) = onefichier.account.attention %}<p class="flash error">{{ attention }}</p>{% endif %}
+    <form method="post" action="/settings/onefichier/sign-in" class="stack">
+      <label>Email
+        <input name="email" type="email" autocomplete="off" required
+               value="{% if let Some(email) = onefichier.account.email %}{{ email }}{% endif %}">
+      </label>
+      <label>Password
+        <input name="password" type="password" autocomplete="new-password" required
+               value="{% if let Some(mask) = onefichier.account.password %}{{ mask }}{% endif %}">
+      </label>
+      {% if onefichier.account.two_factor_pending || onefichier.account.two_factor %}
+      <label>Two-factor code
+        <input name="code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code"
+               {% if onefichier.account.two_factor_pending %}required autofocus{% endif %}>
+      </label>
+      {% endif %}
+      <div class="actions">
+        <button type="submit" class="primary">{% if onefichier.account.signed_in %}Sign in again{% else %}Sign in{% endif %}</button>
+        {% if onefichier.account.signed_in %}<button type="submit" class="danger" form="onefichier-sign-out">Sign out</button>{% endif %}
+      </div>
+    </form>
+    {% if onefichier.account.signed_in %}
+    <form method="post" action="/settings/onefichier/sign-out" id="onefichier-sign-out" hidden></form>
+    {% endif %}
+    <p class="muted small">
+      Direkt stores the email and password so it can sign in again when 1fichier
+      ends the session. Accounts with two-factor authentication must sign in here
+      again when that happens.
+    </p>
 
-<section class="card stack">
-  <h2>API tokens</h2>
-  <p class="muted">
-    Tokens let scripts and integrations use the <a href="/api/openapi.json">API</a>.
-    Send one as <code>Authorization: Bearer &lt;token&gt;</code>.
-  </p>
-  {% if let Some(secret) = new_token %}
-  <div class="secret">
-    <code>{{ secret }}</code>
+    <h3>API key</h3>
+    {% if !onefichier.editable %}
+    <p class="note">
+      The key is set by the <code>DIREKT_ONEFICHIER_API_KEY</code> environment
+      variable. Change or remove it there.
+    </p>
+    {% endif %}
+    <form method="post" action="/settings/onefichier" class="submit">
+      <input name="api_key" type="text" value="{% if let Some(mask) = onefichier.api_key %}{{ mask }}{% endif %}"
+             placeholder="Paste your 1fichier API key" autocomplete="off" spellcheck="false"
+             aria-label="1fichier API key"{% if !onefichier.editable %} disabled{% endif %}>
+      {% if onefichier.editable %}<button type="submit" class="primary">Save</button>{% endif %}
+      {% if onefichier.editable && onefichier.configured %}<button type="submit" class="danger" form="onefichier-remove">Remove key</button>{% endif %}
+    </form>
+    {% if onefichier.editable && onefichier.configured %}
+    <form method="post" action="/settings/onefichier/remove" id="onefichier-remove" hidden></form>
+    {% endif %}
   </div>
-  {% endif %}
-  {% if !tokens.is_empty() %}
-  <table>
-    <thead><tr><th>Name</th><th>Created</th><th>Last used</th><th></th></tr></thead>
-    <tbody>
-    {% for t in tokens %}
-      <tr>
-        <td>{{ t.name }}</td>
-        <td class="muted">{{ t.created }}</td>
-        <td class="muted">{{ t.last_used }}</td>
-        <td>
-          <form method="post" action="/settings/tokens/{{ t.id }}/revoke" class="inline">
-            <button type="submit" class="danger">Revoke</button>
-          </form>
-        </td>
-      </tr>
-    {% endfor %}
-    </tbody>
-  </table>
-  {% endif %}
-  <form method="post" action="/settings/tokens" class="submit">
-    <input name="name" placeholder="Token name, e.g. phone shortcut" maxlength="64" required aria-label="Token name">
-    <button type="submit">Create token</button>
-  </form>
-</section>
+</details>
 
-<section class="card">
-  <form method="post" action="/settings/password" class="stack">
-    <h2>Change password</h2>
-    <label>Current password
-      <input name="current_password" type="password" autocomplete="current-password" required>
-    </label>
-    <label>New password <span class="muted">(at least 10 characters)</span>
-      <input name="new_password" type="password" autocomplete="new-password" minlength="10" required>
-    </label>
-    <label>Confirm new password
-      <input name="new_password_confirm" type="password" autocomplete="new-password" minlength="10" required>
-    </label>
-    <button type="submit">Change password</button>
-  </form>
-</section>
+<details class="panel" id="tokens"{% if open == "tokens" %} open{% endif %}>
+  <summary>
+    <span class="panel-title">
+      <span class="panel-name">API tokens</span>
+      <span class="panel-desc">Access for scripts and integrations</span>
+    </span>
+    <span class="pill{% if !tokens.is_empty() %} ok{% endif %}">{% if tokens.is_empty() %}None{% else %}{{ tokens.len() }} active{% endif %}</span>
+    <svg class="icon chevron" aria-hidden="true"><use href="#i-chevron"/></svg>
+  </summary>
+  <div class="panel-body stack">
+    <p class="muted">
+      Tokens let scripts and integrations use the <a href="/api/openapi.json">API</a>.
+      Send one as <code>Authorization: Bearer &lt;token&gt;</code>.
+    </p>
+    {% if let Some(secret) = new_token %}
+    <div class="secret">
+      <code>{{ secret }}</code>
+    </div>
+    {% endif %}
+    {% if !tokens.is_empty() %}
+    <div class="table-wrap">
+    <table>
+      <thead><tr><th>Name</th><th>Created</th><th>Last used</th><th></th></tr></thead>
+      <tbody>
+      {% for t in tokens %}
+        <tr>
+          <td>{{ t.name }}</td>
+          <td class="muted">{{ t.created }}</td>
+          <td class="muted">{{ t.last_used }}</td>
+          <td>
+            <form method="post" action="/settings/tokens/{{ t.id }}/revoke" class="inline">
+              <button type="submit" class="danger">Revoke</button>
+            </form>
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    </div>
+    {% endif %}
+    <form method="post" action="/settings/tokens" class="submit">
+      <input name="name" placeholder="Token name, e.g. phone shortcut" maxlength="64" required aria-label="Token name">
+      <button type="submit">Create token</button>
+    </form>
+  </div>
+</details>
+
+<details class="panel" id="password"{% if open == "password" %} open{% endif %}>
+  <summary>
+    <span class="panel-title">
+      <span class="panel-name">Change password</span>
+      <span class="panel-desc">Administrator login for the web UI</span>
+    </span>
+    <svg class="icon chevron" aria-hidden="true"><use href="#i-chevron"/></svg>
+  </summary>
+  <div class="panel-body">
+    <form method="post" action="/settings/password" class="stack">
+      <label>Current password
+        <input name="current_password" type="password" autocomplete="current-password" required>
+      </label>
+      <label>New password <span class="muted">(at least 10 characters)</span>
+        <input name="new_password" type="password" autocomplete="new-password" minlength="10" required>
+      </label>
+      <label>Confirm new password
+        <input name="new_password_confirm" type="password" autocomplete="new-password" minlength="10" required>
+      </label>
+      <button type="submit">Change password</button>
+    </form>
+  </div>
+</details>
 {% endblock %}
