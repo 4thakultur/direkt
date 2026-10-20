@@ -31,6 +31,7 @@ pub fn routes() -> Router<AppState> {
         .route("/downloads/{id}/resume", post(resume_download))
         .route("/downloads/{id}/cancel", post(cancel_download))
         .route("/downloads/{id}/retry", post(retry_download))
+        .route("/stats", get(get_stats))
         .route("/tokens", get(list_tokens).post(create_token))
         .route("/tokens/{id}", delete(revoke_token))
         .route(
@@ -108,6 +109,22 @@ impl DownloadDto {
             completed_at: d.completed_at,
         }
     }
+}
+
+/// Aggregate transfer throughput since the service started.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct StatsDto {
+    /// Bytes per second during the last second.
+    pub current_bytes_per_sec: u64,
+    /// Highest one-second rate since start.
+    pub peak_bytes_per_sec: u64,
+    /// Bytes transferred since start.
+    pub total_bytes: u64,
+    /// Free space in the download directory; absent until first checked.
+    pub free_bytes: Option<u64>,
+    /// Bytes per second for each of the last seconds (up to five minutes),
+    /// oldest first.
+    pub history: Vec<u64>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -269,6 +286,25 @@ async fn download_events(
     ApiPath(id): ApiPath<Uuid>,
 ) -> ApiResult<Json<Vec<DownloadEvent>>> {
     Ok(Json(state.downloads.events(id).await?))
+}
+
+/// Transfer throughput and free disk space.
+#[utoipa::path(
+    get, path = "/api/v1/stats", tag = "downloads",
+    responses(
+        (status = 200, body = StatsDto),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+    )
+)]
+async fn get_stats(State(state): State<AppState>) -> Json<StatsDto> {
+    let t = state.downloads.throughput();
+    Json(StatsDto {
+        current_bytes_per_sec: t.current,
+        peak_bytes_per_sec: t.peak,
+        total_bytes: t.total,
+        free_bytes: t.free_bytes,
+        history: t.samples,
+    })
 }
 
 /// Pause a queued, retrying, or running download. Partial data is kept.
@@ -541,7 +577,7 @@ async fn sign_out_onefichier(State(state): State<AppState>) -> ApiResult<Json<On
     ),
     paths(
         create_download, list_downloads, get_download, download_events,
-        pause_download, resume_download, cancel_download, retry_download,
+        pause_download, resume_download, cancel_download, retry_download, get_stats,
         list_tokens, create_token, revoke_token,
         get_onefichier, put_onefichier, delete_onefichier,
         sign_in_onefichier, sign_out_onefichier, refresh_onefichier_cdn,

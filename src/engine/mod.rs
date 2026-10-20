@@ -13,6 +13,7 @@
 
 #[cfg(test)]
 mod tests;
+mod throughput;
 mod transfer;
 
 use crate::config::Config;
@@ -28,6 +29,8 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use throughput::Throughput;
+pub use throughput::{HISTORY_SECS, ThroughputSnapshot};
 use tokio::sync::{Notify, Semaphore, watch};
 use tokio::task::{JoinHandle, JoinSet};
 use tokio_util::sync::CancellationToken;
@@ -160,6 +163,7 @@ struct Inner {
     wake: Notify,
     shutdown: CancellationToken,
     running: Mutex<HashMap<Uuid, RunningJob>>,
+    throughput: Mutex<Throughput>,
 }
 
 impl Inner {
@@ -171,6 +175,10 @@ impl Inner {
         // A poisoned lock only means a worker panicked mid-update of a plain
         // map; the data is still consistent.
         self.running.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn throughput(&self) -> std::sync::MutexGuard<'_, Throughput> {
+        self.throughput.lock().unwrap_or_else(|e| e.into_inner())
     }
 }
 
@@ -197,6 +205,7 @@ impl Engine {
                 wake: Notify::new(),
                 shutdown: CancellationToken::new(),
                 running: Mutex::new(HashMap::new()),
+                throughput: Mutex::new(Throughput::default()),
             }),
         }
     }
@@ -204,6 +213,8 @@ impl Engine {
     /// Spawn the dispatcher. Call [`Engine::shutdown`] with the returned
     /// handle to stop it.
     pub fn start(&self) -> JoinHandle<()> {
+        // The sampler exits on its own when shutdown is signalled.
+        tokio::spawn(sample_throughput(self.inner.clone()));
         tokio::spawn(dispatch(self.inner.clone()))
     }
 
@@ -229,6 +240,11 @@ impl Engine {
         self.inner.running().get(&id).map(|job| job.live.snapshot())
     }
 
+    /// Aggregate throughput since the engine started.
+    pub fn throughput(&self) -> ThroughputSnapshot {
+        self.inner.throughput().snapshot()
+    }
+
     /// Ask a running transfer to stop and wait until its worker has recorded
     /// the resulting state. Returns `false` if the job is not running here.
     pub async fn stop_running(&self, id: Uuid, reason: StopReason) -> bool {
@@ -251,6 +267,37 @@ impl Engine {
     /// Delete the partial file of a job that is not running.
     pub async fn remove_partial(&self, id: Uuid) -> Result<(), TransferError> {
         remove_if_exists(&self.inner.part_path(id)).await
+    }
+}
+
+/// Sample aggregate throughput once per second until shutdown.
+async fn sample_throughput(inner: Arc<Inner>) {
+    let mut ticker = tokio::time::interval(throughput::SAMPLE_INTERVAL);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut previous = tokio::time::Instant::now();
+    let mut tick: u32 = 0;
+    loop {
+        tokio::select! {
+            () = inner.shutdown.cancelled() => break,
+            now = ticker.tick() => {
+                let running: Vec<(Uuid, u64)> = inner
+                    .running()
+                    .iter()
+                    .map(|(id, job)| (*id, job.live.snapshot().downloaded_bytes))
+                    .collect();
+                inner.throughput().record(&running, now - previous);
+                previous = now;
+            }
+        }
+        if tick.is_multiple_of(throughput::DISK_EVERY) {
+            let dir = inner.settings.download_dir.clone();
+            let free = tokio::task::spawn_blocking(move || fsutil::available_space(&dir))
+                .await
+                .ok()
+                .and_then(Result::ok);
+            inner.throughput().set_free_bytes(free);
+        }
+        tick = tick.wrapping_add(1);
     }
 }
 

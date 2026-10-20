@@ -49,6 +49,7 @@ Every error uses the same body:
 | POST | `/api/v1/downloads/{id}/resume` | Resume a paused download |
 | POST | `/api/v1/downloads/{id}/cancel` | Cancel and delete partial data |
 | POST | `/api/v1/downloads/{id}/retry` | Re-queue a failed, blocked, or cancelled download. Optional body `{"password": "…"}` replaces the download password. |
+| GET | `/api/v1/stats` | Transfer throughput since start: current, peak and total bytes, free space in the download directory, and a per-second speed history of up to 5 minutes (the web UI's graph). Counters reset when Direkt restarts. |
 | GET | `/api/v1/tokens` | List API tokens (no secrets) |
 | POST | `/api/v1/tokens` | Create `{"name": "…"}`. The secret is in this response only. |
 | DELETE | `/api/v1/tokens/{id}` | Revoke a token |

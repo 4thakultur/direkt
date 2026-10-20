@@ -1,19 +1,9 @@
 {% extends "app.html" %}
 {% block title %}Downloads · Direkt{% endblock %}
+{% block nav_downloads %} active{% endblock %}
 {% block content %}
-<section class="card">
-  {{ submit|safe }}
-</section>
-
-<div id="flash" aria-live="polite"></div>
-
-<nav class="tabs">
-  {% for tab in tabs %}
-  <a href="/?f={{ tab.key }}"{% if tab.active %} class="active" aria-current="page"{% endif %}>{{ tab.label }}</a>
-  {% endfor %}
-</nav>
-
-<div id="rows" hx-get="/ui/rows?f={{ filter }}" hx-trigger="every 2s, downloads-changed from:body">
-  {% include "_rows.html" %}
+{{ submit|safe }}
+<div id="dashboard" hx-get="/ui/dashboard" hx-trigger="every 2s, downloads-changed from:body">
+{{ dash|safe }}
 </div>
 {% endblock %}

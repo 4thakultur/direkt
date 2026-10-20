@@ -1,0 +1,22 @@
+<section class="hero state-{{ d.state }}">
+  <a class="art art-lg hue-{{ d.hue }}" href="/downloads/{{ d.id }}" tabindex="-1" aria-hidden="true"><span>{{ d.badge }}</span></a>
+  <div class="hero-body">
+    <div class="hero-head">
+      <div class="hero-title">
+        <p class="eyebrow">{{ d.state_label }}{% if let Some(percent) = d.percent %} · {{ percent }}%{% endif %}{% if let Some(post) = d.post_label %} · {{ post }}{% endif %}</p>
+        <h2 class="hero-name"><a href="/downloads/{{ d.id }}" title="{{ d.display_url }}">{{ d.name }}</a></h2>
+        <p class="muted small">{{ d.provider }}</p>
+      </div>
+      {% include "_actions.html" %}
+    </div>
+    {% if d.indeterminate %}<progress class="bar"></progress>
+    {% else if let Some(percent) = d.percent %}<progress class="bar" max="100" value="{{ percent }}">{{ percent }}%</progress>{% endif %}
+    <dl class="hero-meta">
+      <div><dt>{% if d.state == "completed" %}Size{% else %}Downloaded{% endif %}</dt><dd>{% if d.progress.is_empty() %}—{% else %}{{ d.progress }}{% endif %}</dd></div>
+      <div><dt>Speed</dt><dd>{% if let Some(speed) = d.speed %}{{ speed }}{% else %}—{% endif %}</dd></div>
+      <div><dt>Time left</dt><dd>{% if let Some(eta) = d.eta %}{{ eta }}{% else %}—{% endif %}</dd></div>
+    </dl>
+    {% if let Some(note) = d.note %}<p class="note {{ d.state }}">{{ note }}</p>{% endif %}
+    {% if let Some(note) = d.post_note %}<p class="note">{{ note }}</p>{% endif %}
+  </div>
+</section>

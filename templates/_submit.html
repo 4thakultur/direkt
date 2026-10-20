@@ -1,7 +1,13 @@
-<form class="submit" hx-post="/ui/downloads" hx-swap="outerHTML">
-  <input name="url" type="url" placeholder="https://example.com/file.mkv" value="{{ value }}" required aria-label="URL to download">
-  <input name="password" type="password" placeholder="File password (optional)" autocomplete="off" aria-label="File password (optional)" class="password">
-  <button type="submit" class="primary">Download</button>
+<form class="add" hx-post="/ui/downloads" hx-swap="outerHTML">
+  <label class="field url">
+    <svg class="icon" aria-hidden="true"><use href="#i-link"/></svg>
+    <input name="url" type="url" placeholder="Paste a download link" value="{{ value }}" required aria-label="URL to download" autocomplete="off" spellcheck="false">
+  </label>
+  <label class="field password">
+    <svg class="icon" aria-hidden="true"><use href="#i-lock"/></svg>
+    <input name="password" type="password" placeholder="File password" autocomplete="off" aria-label="File password (optional)">
+  </label>
+  <button type="submit" class="primary big">Download</button>
   {% if let Some(message) = message %}<p class="flash ok">{{ message }}</p>{% endif %}
   {% if let Some(error) = error %}<p class="flash error">{{ error }}</p>{% endif %}
 </form>

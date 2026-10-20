@@ -4,7 +4,7 @@
 //! web UI and future integrations share the same validation and state rules.
 
 use crate::domain::{Download, DownloadEvent, TransferState};
-use crate::engine::{Engine, LiveSnapshot, StopReason};
+use crate::engine::{Engine, LiveSnapshot, StopReason, ThroughputSnapshot};
 use crate::error::{AppError, AppResult, ErrorKind};
 use crate::net::{NetworkPolicy, redact_url, validate_submission_url};
 use crate::providers::Providers;
@@ -93,6 +93,11 @@ impl DownloadService {
     pub async fn events(&self, id: Uuid) -> AppResult<Vec<DownloadEvent>> {
         self.get(id).await?;
         self.store.list_events(id).await
+    }
+
+    /// Aggregate transfer throughput since the service started.
+    pub fn throughput(&self) -> ThroughputSnapshot {
+        self.engine.throughput()
     }
 
     /// Live progress of a running transfer, if it is running.

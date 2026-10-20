@@ -210,6 +210,7 @@ async fn openapi_document_is_valid() {
         "/api/v1/downloads/{id}/resume",
         "/api/v1/downloads/{id}/cancel",
         "/api/v1/downloads/{id}/retry",
+        "/api/v1/stats",
         "/api/v1/tokens",
         "/api/v1/tokens/{id}",
     ] {
@@ -285,7 +286,7 @@ async fn ui_redirects_to_login_or_setup() {
     assert_eq!(r.status, StatusCode::OK);
     assert!(r.body.contains("setup-token"));
     // htmx requests get a client-side redirect instead.
-    let r = app.get("/ui/rows", &[("hx-request", "true")]).await;
+    let r = app.get("/ui/dashboard", &[("hx-request", "true")]).await;
     assert_eq!(r.status, StatusCode::UNAUTHORIZED);
     assert_eq!(r.header("hx-redirect"), "/login");
 }
@@ -693,7 +694,7 @@ async fn ui_submit_and_actions() {
     assert!(r.body.contains("Queued https://example.com/movie.mkv"));
     assert_eq!(r.header("hx-trigger"), "downloads-changed");
 
-    let rows = app.get("/ui/rows?f=active", &auth).await;
+    let rows = app.get("/ui/dashboard", &auth).await;
     assert!(rows.body.contains("movie.mkv"));
     assert!(rows.body.contains("Pause"));
     let id = rows
@@ -789,7 +790,7 @@ async fn download_passwords_are_write_only() {
         format!("/api/v1/downloads/{id}"),
         format!("/api/v1/downloads/{id}/events"),
         "/api/v1/downloads".to_owned(),
-        "/ui/rows".to_owned(),
+        "/ui/dashboard".to_owned(),
         format!("/downloads/{id}"),
     ] {
         let r = app.get(&uri, &auth).await;

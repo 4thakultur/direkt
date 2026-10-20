@@ -1,0 +1,47 @@
+{% if let Some(error) = error %}<p class="flash error">{{ error }}</p>{% endif %}
+<section class="network" aria-label="Download speed">
+  <div class="graph">
+    <svg viewBox="0 0 299 100" preserveAspectRatio="none" role="img" aria-label="Download speed over the last 5 minutes, currently {{ stats.current }}">
+      <defs>
+        <linearGradient id="net-fill" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" class="stop-top"/>
+          <stop offset="1" class="stop-bottom"/>
+        </linearGradient>
+      </defs>
+      <path class="grid" d="M0,25H299M0,50H299M0,75H299"/>
+      {% if !stats.area.is_empty() %}<path class="area" d="{{ stats.area }}"/>{% endif %}
+      <path class="line" d="{{ stats.line }}"/>
+    </svg>
+    <span class="graph-scale">{{ stats.scale }}</span>
+    <span class="graph-span">5 min</span>
+  </div>
+  <dl class="net-stats">
+    <div class="net-stat current"><dt>Current</dt><dd>{{ stats.current }}</dd></div>
+    <div class="net-stat"><dt>Peak</dt><dd>{{ stats.peak }}</dd></div>
+    <div class="net-stat"><dt title="Since Direkt started">Total</dt><dd>{{ stats.total }}</dd></div>
+    <div class="net-stat"><dt>Free space</dt><dd>{{ stats.free }}</dd></div>
+  </dl>
+</section>
+
+{% if downloading.is_empty() %}
+<section class="hero idle">
+  <div class="art art-lg art-idle" aria-hidden="true"><svg class="icon"><use href="#i-logo"/></svg></div>
+  <div class="hero-body">
+    <p class="eyebrow">Idle</p>
+    <h2 class="hero-name">Nothing downloading</h2>
+    <p class="muted">{% if queued > 0 %}{{ queued }} waiting in the queue.{% else %}Paste a link above to start a download.{% endif %}</p>
+  </div>
+</section>
+{% else %}
+{% for d in downloading %}{% include "_hero.html" %}{% endfor %}
+{% endif %}
+
+{% for group in groups %}
+<section class="group">
+  <h2 class="group-title">{{ group.title }} <span class="count">{{ group.rows.len() }}{% if group.truncated %}+{% endif %}</span></h2>
+  <ul class="rows">
+  {% for d in group.rows %}{% include "_row.html" %}{% endfor %}
+  </ul>
+  {% if group.truncated %}<p class="muted small more">Showing the latest {{ group.rows.len() }}. Older ones are available through the API.</p>{% endif %}
+</section>
+{% endfor %}

@@ -1,19 +1,6 @@
+{% include "_hero.html" %}
 <section class="card">
-  <div class="row-main">
-    <h2 class="name">{{ d.name }}</h2>
-    <span class="badge {{ d.state }}">{{ d.state_label }}</span>
-    {% if let Some(post) = d.post_label %}<span class="badge post">{{ post }}</span>{% endif %}
-  </div>
-  {% if let Some(percent) = d.percent %}
-  <progress max="100" value="{{ percent }}">{{ percent }}%</progress>
-  {% endif %}
-  <div class="row-meta muted">
-    {% if !d.progress.is_empty() %}<span>{{ d.progress }}</span>{% endif %}
-    {% if let Some(speed) = d.speed %}<span>{{ speed }}</span>{% endif %}
-    {% if let Some(eta) = d.eta %}<span>{{ eta }} left</span>{% endif %}
-  </div>
-  {% if let Some(note) = d.note %}<p class="note">{{ note }}</p>{% endif %}
-  {% if let Some(note) = d.post_note %}<p class="note">{{ note }}</p>{% endif %}
+  <h3 class="card-title">Details</h3>
   <dl class="details">
     <dt>URL</dt><dd class="break">{{ d.display_url }}</dd>
     <dt>Provider</dt><dd>{{ d.provider }}</dd>
@@ -22,18 +9,12 @@
     <dt>Updated</dt><dd>{{ d.updated }}</dd>
     {% if let Some(completed) = d.completed %}<dt>Completed</dt><dd>{{ completed }}</dd>{% endif %}
   </dl>
-  <div class="actions">
-    {% if d.can_pause %}<button hx-post="/ui/downloads/{{ d.id }}/pause" hx-target="#flash">Pause</button>{% endif %}
-    {% if d.can_resume %}<button hx-post="/ui/downloads/{{ d.id }}/resume" hx-target="#flash">Resume</button>{% endif %}
-    {% if d.can_retry %}<button hx-post="/ui/downloads/{{ d.id }}/retry" hx-target="#flash">Retry</button>{% endif %}
-    {% if d.can_cancel %}<button class="danger" hx-post="/ui/downloads/{{ d.id }}/cancel" hx-target="#flash" hx-confirm="Cancel this download and delete its partial data?">Cancel</button>{% endif %}
-  </div>
 </section>
 <section class="card">
-  <h3>History</h3>
+  <h3 class="card-title">History</h3>
   <ol class="events">
   {% for e in events %}
-    <li><time class="muted">{{ e.at }}</time> <span class="event-kind">{{ e.kind }}</span> {{ e.message }}</li>
+    <li><time>{{ e.at }}</time><span class="event-kind">{{ e.kind }}</span><span class="event-msg">{{ e.message }}</span></li>
   {% endfor %}
   </ol>
 </section>

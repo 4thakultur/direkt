@@ -1,5 +1,6 @@
 {% extends "app.html" %}
 {% block title %}Settings · Direkt{% endblock %}
+{% block nav_settings %} active{% endblock %}
 {% block content %}
 {% if let Some(message) = message %}<p class="flash ok">{{ message }}</p>{% endif %}
 {% if let Some(error) = error %}<p class="flash error">{{ error }}</p>{% endif %}

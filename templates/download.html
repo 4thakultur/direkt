@@ -1,8 +1,8 @@
 {% extends "app.html" %}
 {% block title %}{{ d.name }} · Direkt{% endblock %}
+{% block nav_downloads %} active{% endblock %}
 {% block content %}
-<p><a href="/">&larr; All downloads</a></p>
-<div id="flash" aria-live="polite"></div>
+<p class="back"><a href="/"><svg class="icon" aria-hidden="true"><use href="#i-back"/></svg>All downloads</a></p>
 <div id="detail" hx-get="/ui/downloads/{{ d.id }}/detail" hx-trigger="every 2s, downloads-changed from:body">
   {% include "_detail.html" %}
 </div>

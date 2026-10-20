@@ -40,7 +40,7 @@ over HTTPS: `cargo test -- --ignored real_https`.
 |--------------|-----------------------------------------------------------|
 | Runtime      | tokio                                                     |
 | HTTP server  | axum, with OpenAPI via utoipa                             |
-| Web UI       | Server-rendered templates + htmx, embedded in the binary  |
+| Web UI       | Server-rendered templates + htmx, embedded in the binary; AMOLED (pure black) theme, no external assets |
 | Persistence  | SQLite (sqlx, WAL mode, embedded migrations)              |
 | Outbound HTTP| reqwest with SSRF-checked DNS resolution and redirects    |
 | Config       | One TOML file; secrets may come from `DIREKT_*` env vars  |

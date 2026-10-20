@@ -1,0 +1,6 @@
+<div class="actions">
+  {% if d.can_resume %}<button class="icon-btn primary" hx-post="/ui/downloads/{{ d.id }}/resume" hx-target="#flash" title="Resume" aria-label="Resume {{ d.name }}"><svg class="icon" aria-hidden="true"><use href="#i-play"/></svg></button>{% endif %}
+  {% if d.can_pause %}<button class="icon-btn" hx-post="/ui/downloads/{{ d.id }}/pause" hx-target="#flash" title="Pause" aria-label="Pause {{ d.name }}"><svg class="icon" aria-hidden="true"><use href="#i-pause"/></svg></button>{% endif %}
+  {% if d.can_retry %}<button class="icon-btn primary" hx-post="/ui/downloads/{{ d.id }}/retry" hx-target="#flash" title="Retry" aria-label="Retry {{ d.name }}"><svg class="icon" aria-hidden="true"><use href="#i-retry"/></svg></button>{% endif %}
+  {% if d.can_cancel %}<button class="icon-btn danger" hx-post="/ui/downloads/{{ d.id }}/cancel" hx-target="#flash" hx-confirm="Cancel this download and delete its partial data?" title="Cancel" aria-label="Cancel {{ d.name }}"><svg class="icon" aria-hidden="true"><use href="#i-close"/></svg></button>{% endif %}
+</div>

@@ -1,0 +1,17 @@
+<li class="row state-{{ d.state }}">
+  <a class="art art-sm hue-{{ d.hue }}" href="/downloads/{{ d.id }}" tabindex="-1" aria-hidden="true"><span>{{ d.badge }}</span></a>
+  <div class="row-body">
+    <a class="row-name" href="/downloads/{{ d.id }}" title="{{ d.display_url }}">{{ d.name }}</a>
+    <div class="row-meta">
+      <span class="status {{ d.state }}">{{ d.state_label }}</span>
+      {% if let Some(post) = d.post_label %}<span class="status post">{{ post }}</span>{% endif %}
+      {% if !d.progress.is_empty() %}<span>{{ d.progress }}</span>{% endif %}
+      <span>{{ d.provider }}</span>
+      {% if let Some(finished) = d.finished %}<span>{{ finished }}</span>{% endif %}
+    </div>
+    {% if d.state != "completed" %}{% if let Some(percent) = d.percent %}<progress class="bar thin" max="100" value="{{ percent }}">{{ percent }}%</progress>{% endif %}{% endif %}
+    {% if let Some(note) = d.note %}<p class="note {{ d.state }}">{{ note }}</p>{% endif %}
+    {% if let Some(note) = d.post_note %}<p class="note">{{ note }}</p>{% endif %}
+  </div>
+  {% include "_actions.html" %}
+</li>

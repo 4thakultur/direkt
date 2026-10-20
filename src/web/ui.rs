@@ -7,23 +7,27 @@
 
 use super::{AppState, clear_session_cookie, client_ip, read_cookie, session_cookie};
 use crate::domain::{Download, DownloadEvent, PostState, TransferState};
-use crate::engine::LiveSnapshot;
+use crate::engine::{HISTORY_SECS, LiveSnapshot, ThroughputSnapshot};
 use crate::error::{AppError, ErrorKind};
 use crate::settings::{OneFichierSettings, SECRET_MASK};
 use crate::store::ApiToken;
 use askama::Template;
 use axum::Router;
-use axum::extract::{Form, Path, Query, State};
+use axum::extract::{Form, Path, State};
 use axum::http::{Extensions, HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
+use std::fmt::Write as _;
 use uuid::Uuid;
 
 const HTMX_JS: &str = include_str!("../../static/htmx-2.0.4.min.js");
 const APP_CSS: &str = include_str!("../../static/app.css");
-const LIST_LIMIT: i64 = 200;
+/// Most downloads shown in the queue sections (everything not finished).
+const QUEUE_LIMIT: i64 = 500;
+/// Most finished downloads shown per history section.
+const HISTORY_LIMIT: i64 = 50;
 
 pub fn public_routes() -> Router<AppState> {
     Router::new()
@@ -50,7 +54,7 @@ pub fn protected_routes() -> Router<AppState> {
             post(refresh_onefichier_cdn),
         )
         .route("/logout", post(logout))
-        .route("/ui/rows", get(rows_fragment))
+        .route("/ui/dashboard", get(dashboard_fragment))
         .route("/ui/downloads", post(submit_download))
         .route("/ui/downloads/{id}/detail", get(detail_fragment))
         .route("/ui/downloads/{id}/{action}", post(download_action))
@@ -105,6 +109,20 @@ fn human_duration(secs: u64) -> String {
     }
 }
 
+fn human_speed(bytes_per_sec: u64) -> String {
+    format!("{}/s", human_bytes(bytes_per_sec))
+}
+
+/// How long ago `t` was, coarsely; older than a day shows the date.
+fn human_ago(t: DateTime<Utc>, now: DateTime<Utc>) -> String {
+    match (now - t).num_seconds().max(0) {
+        0..60 => "just now".into(),
+        s @ 60..3600 => format!("{} min ago", s / 60),
+        s @ 3600..86400 => format!("{} h ago", s / 3600),
+        _ => t.format("%Y-%m-%d").to_string(),
+    }
+}
+
 fn fmt_time(t: DateTime<Utc>) -> String {
     t.format("%Y-%m-%d %H:%M:%S UTC").to_string()
 }
@@ -156,6 +174,38 @@ struct DownloadView {
     can_resume: bool,
     can_retry: bool,
     can_cancel: bool,
+    /// Downloading without a known size: show an indeterminate bar.
+    indeterminate: bool,
+    /// Short label on the cover tile, e.g. the file extension.
+    badge: String,
+    /// Cover tile color, `0..TILE_HUES`.
+    hue: u8,
+    /// When it finished, for the completed list.
+    finished: Option<String>,
+}
+
+/// Number of `.hue-N` cover tile colors in the stylesheet.
+const TILE_HUES: u128 = 8;
+
+/// The file extension in capitals if it looks like one, else `FILE`.
+fn tile_badge(name: &str) -> String {
+    name.rsplit_once('.')
+        .filter(|(stem, ext)| {
+            !stem.is_empty()
+                && (1..=4).contains(&ext.len())
+                && ext.bytes().all(|b| b.is_ascii_alphanumeric())
+        })
+        .map(|(_, ext)| ext.to_ascii_uppercase())
+        .unwrap_or_else(|| "FILE".into())
+}
+
+/// The last path segment of a URL, as a stand-in name until the provider
+/// reports the real file name.
+fn url_file_name(display_url: &str) -> Option<String> {
+    let url = url::Url::parse(display_url).ok()?;
+    let last = url.path_segments()?.rfind(|s| !s.is_empty())?;
+    let name = percent_encoding::percent_decode_str(last).decode_utf8_lossy();
+    (!name.trim().is_empty()).then(|| name.into_owned())
 }
 
 impl DownloadView {
@@ -169,12 +219,13 @@ impl DownloadView {
             .filter(|&t| t > 0)
             .map(|t| (downloaded.min(t) * 100) / t);
         let progress = match total {
+            Some(t) if d.state == Completed => human_bytes(t),
             Some(t) => format!("{} / {}", human_bytes(downloaded), human_bytes(t)),
             None if downloaded > 0 => human_bytes(downloaded),
             None => String::new(),
         };
         let rate = live.map(|l| l.bytes_per_sec).filter(|&r| r > 0);
-        let speed = rate.map(|r| format!("{}/s", human_bytes(r)));
+        let speed = rate.map(human_speed);
         let eta = match (rate, total) {
             (Some(r), Some(t)) if t > downloaded => Some(human_duration((t - downloaded) / r)),
             _ => None,
@@ -193,9 +244,18 @@ impl DownloadView {
             (_, Some(e), _) => Some(e.message.clone()),
             _ => None,
         };
+        let name = d
+            .filename
+            .clone()
+            .or_else(|| url_file_name(&d.display_url))
+            .unwrap_or_else(|| d.display_url.clone());
         Self {
             id: d.id.to_string(),
-            name: d.filename.clone().unwrap_or_else(|| d.display_url.clone()),
+            badge: tile_badge(&name),
+            hue: (d.id.as_u128() % TILE_HUES) as u8,
+            indeterminate: d.state == Downloading && percent.is_none(),
+            finished: d.completed_at.map(|t| human_ago(t, Utc::now())),
+            name,
             display_url: d.display_url,
             provider: d.provider,
             state: d.state.as_str(),
@@ -406,61 +466,86 @@ async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Response {
 // Downloads
 // ---------------------------------------------------------------------------
 
-/// List filters shown as tabs: (key, label, states).
-const FILTERS: &[(&str, &str, &[TransferState])] = &[
-    ("all", "All", &[]),
-    (
-        "active",
-        "Active",
-        &[
-            TransferState::Queued,
-            TransferState::Downloading,
-            TransferState::Retrying,
-        ],
-    ),
-    ("paused", "Paused", &[TransferState::Paused]),
-    (
-        "attention",
-        "Needs attention",
-        &[TransferState::Blocked, TransferState::Failed],
-    ),
-    ("completed", "Completed", &[TransferState::Completed]),
-    ("cancelled", "Cancelled", &[TransferState::Cancelled]),
-];
-
-#[derive(Deserialize)]
-struct FilterQuery {
-    f: Option<String>,
+/// Network graph and counters for the dashboard header.
+struct StatsView {
+    current: String,
+    peak: String,
+    total: String,
+    free: String,
+    /// Speed at the top of the graph.
+    scale: String,
+    /// SVG path data for the filled area and its outline.
+    area: String,
+    line: String,
 }
 
-fn filter_states(key: &str) -> (&'static str, &'static [TransferState]) {
-    FILTERS
-        .iter()
-        .find(|(k, _, _)| *k == key)
-        .map(|(k, _, states)| (*k, *states))
-        .unwrap_or(("all", &[]))
+/// Graph height in SVG units; the width is one unit per second of history.
+const GRAPH_HEIGHT: f64 = 100.0;
+/// Lowest graph scale, so an idle graph does not amplify noise.
+const MIN_GRAPH_SCALE: u64 = 64 * 1024;
+
+/// SVG paths (area, line) for samples right-aligned in a fixed window, and the
+/// scale they are drawn against: the next power of two above the highest
+/// sample, so labels stay round.
+fn graph_paths(samples: &[u64]) -> (String, String, u64) {
+    let width = (HISTORY_SECS - 1) as f64;
+    let max = samples.iter().copied().max().unwrap_or(0);
+    let scale = max.max(MIN_GRAPH_SCALE).next_power_of_two();
+    // Leave headroom so the line never touches the top edge.
+    let y = |v: u64| GRAPH_HEIGHT - (v as f64 / scale as f64) * (GRAPH_HEIGHT * 0.94);
+    let samples = &samples[samples.len().saturating_sub(HISTORY_SECS)..];
+    if samples.is_empty() {
+        let flat = format!("M0,{GRAPH_HEIGHT}H{width}");
+        return (String::new(), flat, scale);
+    }
+    let first_x = width - (samples.len() - 1) as f64;
+    let mut line = String::with_capacity(samples.len() * 12);
+    for (i, &v) in samples.iter().enumerate() {
+        let cmd = if i == 0 { 'M' } else { 'L' };
+        let _ = write!(line, "{cmd}{:.0},{:.1}", first_x + i as f64, y(v));
+    }
+    let area = format!("{line}L{width},{GRAPH_HEIGHT}L{first_x},{GRAPH_HEIGHT}Z");
+    (area, line, scale)
 }
 
-struct Tab {
-    key: &'static str,
-    label: &'static str,
-    active: bool,
+impl From<ThroughputSnapshot> for StatsView {
+    fn from(t: ThroughputSnapshot) -> Self {
+        let (area, line, scale) = graph_paths(&t.samples);
+        Self {
+            current: human_speed(t.current),
+            peak: human_speed(t.peak),
+            total: human_bytes(t.total),
+            free: t.free_bytes.map(human_bytes).unwrap_or_else(|| "—".into()),
+            scale: human_speed(scale),
+            area,
+            line,
+        }
+    }
+}
+
+/// A titled list of downloads below the "now downloading" cards.
+struct Group {
+    title: &'static str,
+    rows: Vec<DownloadView>,
+    /// The list was cut at its limit; older entries exist.
+    truncated: bool,
 }
 
 #[derive(Template)]
 #[template(path = "downloads.html")]
 struct DownloadsPage {
-    tabs: Vec<Tab>,
-    filter: &'static str,
-    rows: Vec<DownloadView>,
-    error: Option<String>,
+    dash: Dashboard,
     submit: SubmitForm,
 }
 
 #[derive(Template)]
-#[template(path = "_rows.html")]
-struct RowsFragment {
-    rows: Vec<DownloadView>,
+#[template(path = "_dashboard.html")]
+struct Dashboard {
+    stats: StatsView,
+    downloading: Vec<DownloadView>,
+    /// How many are queued behind the running transfers.
+    queued: usize,
+    groups: Vec<Group>,
     error: Option<String>,
 }
 
@@ -472,47 +557,93 @@ struct SubmitForm {
     error: Option<String>,
 }
 
-async fn load_rows(
-    state: &AppState,
-    states: &[TransferState],
-) -> (Vec<DownloadView>, Option<String>) {
-    match state.downloads.list(states, LIST_LIMIT, 0).await {
-        Ok(list) => (
-            list.into_iter()
-                .map(|d| {
-                    let live = state.downloads.live(d.id);
-                    DownloadView::new(d, live)
-                })
-                .collect(),
-            None,
+async fn load_dashboard(state: &AppState) -> Dashboard {
+    use TransferState::*;
+    let service = &state.downloads;
+    let (unfinished, completed, cancelled) = tokio::join!(
+        service.list(
+            &[Queued, Downloading, Retrying, Paused, Blocked, Failed],
+            QUEUE_LIMIT,
+            0
         ),
-        Err(e) => (Vec::new(), Some(e.message)),
+        service.list(&[Completed], HISTORY_LIMIT, 0),
+        service.list(&[Cancelled], HISTORY_LIMIT, 0),
+    );
+    let mut error = None;
+    let mut take = |result: Result<Vec<Download>, AppError>| match result {
+        Ok(list) => list,
+        Err(e) => {
+            error.get_or_insert(e.message);
+            Vec::new()
+        }
+    };
+    let (unfinished, mut completed, cancelled) =
+        (take(unfinished), take(completed), take(cancelled));
+    let history_truncated = |list: &[Download]| list.len() as i64 >= HISTORY_LIMIT;
+    let (completed_more, cancelled_more) =
+        (history_truncated(&completed), history_truncated(&cancelled));
+    completed.sort_by_key(|d| std::cmp::Reverse(d.completed_at));
+
+    let view = |d: Download| {
+        let live = service.live(d.id);
+        DownloadView::new(d, live)
+    };
+    let mut downloading = Vec::new();
+    let mut up_next = Vec::new();
+    let mut attention = Vec::new();
+    let mut paused = Vec::new();
+    // Oldest first, the order the engine claims queued work in.
+    for d in unfinished.into_iter().rev() {
+        let bucket = match d.state {
+            Downloading => &mut downloading,
+            Queued | Retrying => &mut up_next,
+            Paused => &mut paused,
+            _ => &mut attention,
+        };
+        bucket.push(view(d));
+    }
+    let queued = up_next.len();
+    let groups = [
+        ("Up next", up_next, false),
+        ("Needs attention", attention, false),
+        ("Paused", paused, false),
+        (
+            "Completed",
+            completed.into_iter().map(view).collect(),
+            completed_more,
+        ),
+        (
+            "Cancelled",
+            cancelled.into_iter().map(view).collect(),
+            cancelled_more,
+        ),
+    ]
+    .into_iter()
+    .filter(|(_, rows, _)| !rows.is_empty())
+    .map(|(title, rows, truncated)| Group {
+        title,
+        rows,
+        truncated,
+    })
+    .collect();
+    Dashboard {
+        stats: service.throughput().into(),
+        downloading,
+        queued,
+        groups,
+        error,
     }
 }
 
-async fn downloads_page(State(state): State<AppState>, Query(q): Query<FilterQuery>) -> Response {
-    let (filter, states) = filter_states(q.f.as_deref().unwrap_or("all"));
-    let (rows, error) = load_rows(&state, states).await;
+async fn downloads_page(State(state): State<AppState>) -> Response {
     render(&DownloadsPage {
-        tabs: FILTERS
-            .iter()
-            .map(|(key, label, _)| Tab {
-                key,
-                label,
-                active: *key == filter,
-            })
-            .collect(),
-        filter,
-        rows,
-        error,
+        dash: load_dashboard(&state).await,
         submit: SubmitForm::default(),
     })
 }
 
-async fn rows_fragment(State(state): State<AppState>, Query(q): Query<FilterQuery>) -> Response {
-    let (_, states) = filter_states(q.f.as_deref().unwrap_or("all"));
-    let (rows, error) = load_rows(&state, states).await;
-    render(&RowsFragment { rows, error })
+async fn dashboard_fragment(State(state): State<AppState>) -> Response {
+    render(&load_dashboard(&state).await)
 }
 
 #[derive(Deserialize)]
@@ -908,7 +1039,6 @@ async fn change_password(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::web::api::parse_states;
 
     #[test]
     fn formatting() {
@@ -922,16 +1052,61 @@ mod tests {
     }
 
     #[test]
-    fn unknown_filter_falls_back_to_all() {
-        assert_eq!(filter_states("bogus").0, "all");
-        assert_eq!(filter_states("active").1.len(), 3);
+    fn relative_times() {
+        let now = Utc::now();
+        assert_eq!(human_ago(now, now), "just now");
+        assert_eq!(
+            human_ago(now - chrono::Duration::minutes(5), now),
+            "5 min ago"
+        );
+        assert_eq!(human_ago(now - chrono::Duration::hours(3), now), "3 h ago");
+        assert_eq!(
+            human_ago(now + chrono::Duration::minutes(5), now),
+            "just now"
+        );
     }
 
     #[test]
-    fn filters_are_valid_states() {
-        for (_, _, states) in FILTERS {
-            let joined: Vec<_> = states.iter().map(|s| s.as_str()).collect();
-            assert_eq!(parse_states(Some(&joined.join(","))).unwrap(), *states);
-        }
+    fn tile_badges() {
+        assert_eq!(tile_badge("Movie.2024.1080p.mkv"), "MKV");
+        assert_eq!(tile_badge("archive.tar.gz"), "GZ");
+        assert_eq!(tile_badge("noext"), "FILE");
+        assert_eq!(tile_badge(".hidden"), "FILE");
+        assert_eq!(tile_badge("weird.ext!"), "FILE");
+        assert_eq!(tile_badge("long.extension"), "FILE");
+        assert_eq!(tile_badge(""), "FILE");
+    }
+
+    #[test]
+    fn url_file_names() {
+        let name = |u| url_file_name(u);
+        assert_eq!(
+            name("https://h/a/Movie%20Name.mkv?…").as_deref(),
+            Some("Movie Name.mkv")
+        );
+        assert_eq!(name("https://h/dir/").as_deref(), Some("dir"));
+        assert_eq!(name("https://h/"), None);
+        assert_eq!(name("https://1fichier.com/?…"), None);
+        assert_eq!(name("not a url"), None);
+    }
+
+    #[test]
+    fn graph_is_right_aligned_and_scaled() {
+        let (area, line, scale) = graph_paths(&[]);
+        assert!(area.is_empty());
+        assert_eq!(line, "M0,100H299");
+        assert_eq!(scale, MIN_GRAPH_SCALE);
+
+        let mib = 1024 * 1024;
+        let (area, line, scale) = graph_paths(&[0, 3 * mib]);
+        assert_eq!(scale, 4 * mib, "rounded up to a power of two");
+        assert!(line.starts_with("M298,100.0L299,"), "{line}");
+        assert!(area.ends_with("L299,100L298,100Z"), "{area}");
+
+        // Longer input than the window keeps only the newest samples.
+        let many = vec![mib; HISTORY_SECS + 10];
+        let (_, line, _) = graph_paths(&many);
+        assert!(line.starts_with("M0,"));
+        assert_eq!(line.matches('L').count(), HISTORY_SECS - 1);
     }
 }
