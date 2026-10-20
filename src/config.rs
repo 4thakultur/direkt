@@ -35,8 +35,46 @@ pub struct Config {
     pub storage: StorageConfig,
     pub downloads: DownloadsConfig,
     pub network: NetworkConfig,
+    pub providers: ProvidersConfig,
     pub log: LogConfig,
 }
+
+/// A secret value (API key, token). `Debug` never prints it.
+#[derive(Clone, PartialEq, Eq, Deserialize)]
+#[serde(transparent)]
+pub struct Secret(String);
+
+impl Secret {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for Secret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Secret([redacted])")
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ProvidersConfig {
+    pub onefichier: OneFichierConfig,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct OneFichierConfig {
+    /// Premium API key (1fichier.com → Settings → API key). The environment
+    /// variable `DIREKT_ONEFICHIER_API_KEY` takes precedence.
+    pub api_key: Option<Secret>,
+}
+
+pub const ONEFICHIER_API_KEY_ENV: &str = "DIREKT_ONEFICHIER_API_KEY";
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -145,7 +183,8 @@ impl Config {
         let path = std::env::var_os("DIREKT_CONFIG")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("direkt.toml"));
-        let config = Self::load_from(&path)?;
+        let mut config = Self::load_from(&path)?;
+        config.apply_env(|name| std::env::var(name).ok())?;
         Ok((config, path))
     }
 
@@ -177,7 +216,27 @@ impl Config {
         })
     }
 
+    /// Apply secret overrides from the environment, then re-validate them.
+    pub fn apply_env(&mut self, var: impl Fn(&str) -> Option<String>) -> Result<(), ConfigError> {
+        if let Some(key) = var(ONEFICHIER_API_KEY_ENV).filter(|k| !k.trim().is_empty()) {
+            self.providers.onefichier.api_key = Some(Secret::new(key.trim()));
+        }
+        self.validate()
+    }
+
     pub fn validate(&self) -> Result<(), ConfigError> {
+        if let Some(key) = &self.providers.onefichier.api_key {
+            let key = key.expose();
+            let valid_chars = key
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '='));
+            if !(16..=128).contains(&key.len()) || !valid_chars {
+                return Err(ConfigError::Invalid(format!(
+                    "providers.onefichier.api_key (or {ONEFICHIER_API_KEY_ENV}) does not look like \
+                     a 1fichier API key: expected 16-128 characters of A-Z, a-z, 0-9, '-', '_' or '='"
+                )));
+            }
+        }
         let d = &self.downloads;
         if !(1..=32).contains(&d.max_concurrent) {
             return Err(ConfigError::Invalid(
@@ -275,6 +334,56 @@ mod tests {
         ] {
             let config = Config::parse(text).unwrap();
             assert!(config.validate().is_err(), "{text}");
+        }
+    }
+
+    #[test]
+    fn onefichier_api_key_from_file_and_env() {
+        let key = "AbCdEfGhIjKlMnOpQrStUvWxYz012345";
+        let mut config =
+            Config::parse(&format!("[providers.onefichier]\napi_key = \"{key}\"\n")).unwrap();
+        config.validate().unwrap();
+        assert_eq!(
+            config
+                .providers
+                .onefichier
+                .api_key
+                .as_ref()
+                .unwrap()
+                .expose(),
+            key
+        );
+        assert!(
+            !format!("{config:?}").contains(key),
+            "Debug must not leak the key"
+        );
+
+        let env_key = "ZyXwVuTsRqPoNmLkJiHgFeDcBa987654";
+        config
+            .apply_env(|name| (name == ONEFICHIER_API_KEY_ENV).then(|| env_key.to_owned()))
+            .unwrap();
+        assert_eq!(
+            config.providers.onefichier.api_key.unwrap().expose(),
+            env_key
+        );
+
+        let mut config = Config::default();
+        config.apply_env(|_| Some("   ".into())).unwrap();
+        assert!(
+            config.providers.onefichier.api_key.is_none(),
+            "blank env is ignored"
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_api_keys() {
+        for bad in [
+            "short",
+            "has spaces in the key 1234567890",
+            "quote\"key1234567890123",
+        ] {
+            let mut config = Config::default();
+            assert!(config.apply_env(|_| Some(bad.into())).is_err(), "{bad}");
         }
     }
 

@@ -40,6 +40,13 @@ retry_max_delay_secs = 3600
 allowed_private_networks = []
 # allowed_private_networks = ["192.168.1.0/24"]
 
+[providers.onefichier]
+# 1fichier premium API key (1fichier.com: My account > Settings > API key).
+# Without it, 1fichier links are accepted but wait in "needs attention".
+# Prefer the DIREKT_ONEFICHIER_API_KEY environment variable over writing the
+# key here; the variable takes precedence.
+# api_key = ""
+
 [log]
 # Log filter; the RUST_LOG environment variable overrides it.
 level = "info"

@@ -41,17 +41,19 @@ Every error uses the same body:
 
 | Method | Path | Description |
 |--------|------|-------------|
-| POST | `/api/v1/downloads` | Submit `{"url": "https://…"}`. Returns `201` with the download. |
+| POST | `/api/v1/downloads` | Submit `{"url": "https://…", "password": "…"}` (`password` is optional and only for providers that support it, such as 1fichier). Returns `201` with the download. |
 | GET | `/api/v1/downloads?state=queued,downloading&limit=50&offset=0` | List downloads, newest first |
 | GET | `/api/v1/downloads/{id}` | One download, with live speed while running |
 | GET | `/api/v1/downloads/{id}/events` | Event history |
 | POST | `/api/v1/downloads/{id}/pause` | Pause (keeps partial data) |
 | POST | `/api/v1/downloads/{id}/resume` | Resume a paused download |
 | POST | `/api/v1/downloads/{id}/cancel` | Cancel and delete partial data |
-| POST | `/api/v1/downloads/{id}/retry` | Re-queue a failed, blocked, or cancelled download |
+| POST | `/api/v1/downloads/{id}/retry` | Re-queue a failed, blocked, or cancelled download. Optional body `{"password": "…"}` replaces the download password. |
 | GET | `/api/v1/tokens` | List API tokens (no secrets) |
 | POST | `/api/v1/tokens` | Create `{"name": "…"}`. The secret is in this response only. |
 | DELETE | `/api/v1/tokens/{id}` | Revoke a token |
+
+Download passwords are write-only: no endpoint ever returns them.
 
 Download states are described in [state-machine.md](state-machine.md).
 Responses contain only a redacted form of the submitted URL (`display_url`).

@@ -509,6 +509,8 @@ async fn rows_fragment(State(state): State<AppState>, Query(q): Query<FilterQuer
 #[derive(Deserialize)]
 struct SubmitBody {
     url: String,
+    #[serde(default)]
+    password: Option<String>,
 }
 
 fn with_refresh(mut response: Response) -> Response {
@@ -519,7 +521,11 @@ fn with_refresh(mut response: Response) -> Response {
 }
 
 async fn submit_download(State(state): State<AppState>, Form(body): Form<SubmitBody>) -> Response {
-    match state.downloads.submit(&body.url).await {
+    match state
+        .downloads
+        .submit(&body.url, body.password.as_deref())
+        .await
+    {
         Ok(d) => with_refresh(render(&SubmitForm {
             value: String::new(),
             message: Some(format!("Queued {}", d.display_url)),
@@ -551,7 +557,7 @@ async fn download_action(
     let result = match action.as_str() {
         "pause" => service.pause(id).await.map(|_| "Paused"),
         "resume" => service.resume(id).await.map(|_| "Resumed"),
-        "retry" => service.retry(id).await.map(|_| "Queued for retry"),
+        "retry" => service.retry(id, None).await.map(|_| "Queued for retry"),
         "cancel" => service.cancel(id).await.map(|_| "Cancelled"),
         _ => Err(AppError::not_found("unknown action")),
     };

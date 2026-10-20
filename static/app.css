@@ -104,6 +104,7 @@ button.htmx-request { opacity: 0.6; }
 
 .submit { display: flex; flex-wrap: wrap; gap: 0.5rem; }
 .submit input { flex: 1 1 18rem; }
+.submit input.password { flex: 0 1 12rem; }
 .submit .flash { flex-basis: 100%; }
 
 .flash { margin: 0 0 0.75rem; padding: 0.5rem 0.75rem; border-radius: 6px; }

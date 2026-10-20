@@ -35,8 +35,9 @@ impl DownloadService {
         }
     }
 
-    /// Validate a URL, pick its provider, and queue it.
-    pub async fn submit(&self, raw_url: &str) -> AppResult<Download> {
+    /// Validate a URL, pick its provider, and queue it. `password` is for
+    /// password-protected files on providers that support it.
+    pub async fn submit(&self, raw_url: &str, password: Option<&str>) -> AppResult<Download> {
         let url = validate_submission_url(raw_url, &self.policy)?;
         let provider = self.providers.for_url(&url).ok_or_else(|| {
             AppError::new(
@@ -44,6 +45,13 @@ impl DownloadService {
                 "no download provider supports this URL",
             )
         })?;
+        let url = provider.canonicalize(&url)?;
+        let password = normalize_password(password)?;
+        if password.is_some() && !provider.supports_password() {
+            return Err(AppError::invalid(
+                "this kind of link does not use a download password",
+            ));
+        }
         let download = self
             .store
             .insert_download(
@@ -51,6 +59,7 @@ impl DownloadService {
                     display_url: redact_url(&url),
                     url: url.into(),
                     provider: provider.id().to_owned(),
+                    password: password.map(str::to_owned),
                 },
                 Utc::now(),
             )
@@ -108,8 +117,31 @@ impl DownloadService {
         self.requeue(id, &[TransferState::Paused], "resume").await
     }
 
-    /// Retry a failed, blocked or cancelled download from the queue.
-    pub async fn retry(&self, id: Uuid) -> AppResult<Download> {
+    /// Retry a failed, blocked or cancelled download from the queue,
+    /// optionally with a new download password.
+    pub async fn retry(&self, id: Uuid, password: Option<&str>) -> AppResult<Download> {
+        if let Some(password) = normalize_password(password)? {
+            let download = self.get(id).await?;
+            let supported = self
+                .providers
+                .get(&download.provider)
+                .is_some_and(|p| p.supports_password());
+            if !supported {
+                return Err(AppError::invalid(
+                    "this kind of link does not use a download password",
+                ));
+            }
+            if !self
+                .store
+                .set_download_password(id, password, Utc::now())
+                .await?
+            {
+                return Err(AppError::conflict(format!(
+                    "cannot retry a download that is {}",
+                    download.state.as_str()
+                )));
+            }
+        }
         self.requeue(
             id,
             &[
@@ -201,4 +233,24 @@ impl DownloadService {
         self.engine.wake();
         Ok(updated)
     }
+}
+
+const MAX_PASSWORD_CHARS: usize = 256;
+
+/// Treat an empty password as none and reject unusable ones.
+fn normalize_password(password: Option<&str>) -> AppResult<Option<&str>> {
+    let Some(password) = password.filter(|p| !p.is_empty()) else {
+        return Ok(None);
+    };
+    if password.chars().count() > MAX_PASSWORD_CHARS {
+        return Err(AppError::invalid(format!(
+            "download password must be at most {MAX_PASSWORD_CHARS} characters"
+        )));
+    }
+    if password.chars().any(char::is_control) {
+        return Err(AppError::invalid(
+            "download password must not contain control characters",
+        ));
+    }
+    Ok(Some(password))
 }

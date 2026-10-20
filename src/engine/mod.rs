@@ -20,7 +20,7 @@ use crate::domain::{Download, DownloadError, TransferState};
 use crate::error::{Disposition, ErrorKind, TransferError};
 use crate::fsutil;
 use crate::net::NetworkPolicy;
-use crate::providers::Providers;
+use crate::providers::{Providers, ResolveRequest};
 use crate::store::{Store, TransitionDetails};
 use chrono::Utc;
 use std::collections::HashMap;
@@ -545,7 +545,10 @@ async fn attempt(
     let resource = tokio::select! {
         biased;
         reason = wait_for_stop(stop) => return Ok(JobEnd::Stopped(reason)),
-        r = provider.resolve(&url) => r?,
+        r = provider.resolve(ResolveRequest {
+            url: &url,
+            password: download.download_password.as_deref(),
+        }) => r?,
     };
 
     let outcome = Attempt {

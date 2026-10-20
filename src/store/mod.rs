@@ -31,6 +31,7 @@ pub struct NewDownload {
     pub url: String,
     pub display_url: String,
     pub provider: String,
+    pub password: Option<String>,
 }
 
 /// Optional data recorded atomically with a transfer state change.
@@ -116,14 +117,16 @@ impl Store {
         let ts = now.timestamp_millis();
         let mut tx = self.pool.begin().await?;
         let row: DownloadRow = sqlx::query_as(
-            "INSERT INTO downloads (id, url, display_url, provider, state, created_at, updated_at)
-             VALUES (?, ?, ?, ?, 'queued', ?, ?)
+            "INSERT INTO downloads
+                (id, url, display_url, provider, download_password, state, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, 'queued', ?, ?)
              RETURNING *",
         )
         .bind(id.to_string())
         .bind(&new.url)
         .bind(&new.display_url)
         .bind(&new.provider)
+        .bind(&new.password)
         .bind(ts)
         .bind(ts)
         .fetch_one(&mut *tx)
@@ -372,6 +375,26 @@ impl Store {
         Ok(result.rows_affected() == 1)
     }
 
+    /// Replace the download password of a download that is not running or
+    /// queued (it takes effect on the next attempt). Returns whether it applied.
+    pub async fn set_download_password(
+        &self,
+        id: Uuid,
+        password: &str,
+        now: DateTime<Utc>,
+    ) -> AppResult<bool> {
+        let result = sqlx::query(
+            "UPDATE downloads SET download_password = ?1, updated_at = ?2
+             WHERE id = ?3 AND state IN ('paused', 'blocked', 'failed', 'cancelled')",
+        )
+        .bind(password)
+        .bind(now.timestamp_millis())
+        .bind(id.to_string())
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
     /// Record the final destination before the completed file is moved there.
     pub async fn set_file_path(&self, id: Uuid, path: &str, now: DateTime<Utc>) -> AppResult<bool> {
         let result = sqlx::query(
@@ -543,6 +566,7 @@ struct DownloadRow {
     resume_etag: Option<String>,
     resume_last_modified: Option<String>,
     file_path: Option<String>,
+    download_password: Option<String>,
     created_at: i64,
     updated_at: i64,
     completed_at: Option<i64>,
@@ -570,6 +594,7 @@ impl TryFrom<DownloadRow> for Download {
             file_path: r.file_path,
             resume_etag: r.resume_etag,
             resume_last_modified: r.resume_last_modified,
+            download_password: r.download_password,
             created_at: from_millis(r.created_at)?,
             updated_at: from_millis(r.updated_at)?,
             completed_at: r.completed_at.map(from_millis).transpose()?,
@@ -615,6 +640,7 @@ mod tests {
             url: format!("https://example.com/{name}?token=secret"),
             display_url: format!("https://example.com/{name}?…"),
             provider: "http".into(),
+            password: None,
         }
     }
 

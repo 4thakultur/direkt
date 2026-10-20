@@ -112,7 +112,7 @@ async fn serve(config: Config, config_path: &Path) -> anyhow::Result<()> {
 
     let policy = NetworkPolicy::new(config.network.allowed_private_networks.clone());
     let client = direkt::http_client::build_client(policy.clone())?;
-    let providers = Providers::default();
+    let providers = Providers::standard(&config, client.clone());
     let engine = Engine::new(
         store.clone(),
         providers.clone(),

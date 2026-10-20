@@ -107,6 +107,16 @@ pub struct CreateDownload {
     /// An http or https URL.
     #[schema(example = "https://example.com/files/movie.mkv")]
     pub url: String,
+    /// Password for a password-protected file (1fichier). Write-only: never
+    /// returned or logged.
+    pub password: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RetryDownload {
+    /// New download password to use from this retry on.
+    pub password: Option<String>,
 }
 
 #[derive(Debug, Deserialize, IntoParams)]
@@ -154,7 +164,10 @@ async fn create_download(
     State(state): State<AppState>,
     ApiJson(body): ApiJson<CreateDownload>,
 ) -> ApiResult<impl IntoResponse> {
-    let download = state.downloads.submit(&body.url).await?;
+    let download = state
+        .downloads
+        .submit(&body.url, body.password.as_deref())
+        .await?;
     Ok((StatusCode::CREATED, Json(DownloadDto::new(download, None))))
 }
 
@@ -303,12 +316,15 @@ async fn cancel_download(
     )))
 }
 
-/// Re-queue a failed, blocked, or cancelled download.
+/// Re-queue a failed, blocked, or cancelled download. The optional body sets
+/// a new download password first (e.g. after "password required").
 #[utoipa::path(
     post, path = "/api/v1/downloads/{id}/retry", tag = "downloads",
     params(("id" = Uuid, Path, description = "Download ID")),
+    request_body(content = Option<RetryDownload>, description = "Optional"),
     responses(
         (status = 200, body = DownloadDto),
+        (status = 400, body = ErrorBody),
         (status = 404, body = ErrorBody),
         (status = 409, description = "Not retryable in its current state", body = ErrorBody),
     )
@@ -316,9 +332,17 @@ async fn cancel_download(
 async fn retry_download(
     State(state): State<AppState>,
     ApiPath(id): ApiPath<Uuid>,
+    body: axum::body::Bytes,
 ) -> ApiResult<Json<DownloadDto>> {
+    let body: RetryDownload = if body.iter().all(u8::is_ascii_whitespace) {
+        RetryDownload::default()
+    } else {
+        serde_json::from_slice::<Option<RetryDownload>>(&body)
+            .map_err(|e| AppError::invalid(format!("invalid JSON body: {e}")))?
+            .unwrap_or_default()
+    };
     Ok(Json(DownloadDto::new(
-        state.downloads.retry(id).await?,
+        state.downloads.retry(id, body.password.as_deref()).await?,
         None,
     )))
 }

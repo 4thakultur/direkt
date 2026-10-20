@@ -1,6 +1,6 @@
 //! Generic provider for ordinary HTTP/HTTPS direct-download URLs.
 
-use super::{BoxFuture, Provider, ResolvedResource};
+use super::{BoxFuture, Provider, ResolveRequest, ResolvedResource};
 use crate::error::TransferError;
 use url::Url;
 
@@ -17,13 +17,15 @@ impl Provider for HttpProvider {
 
     fn resolve<'a>(
         &'a self,
-        url: &'a Url,
+        request: ResolveRequest<'a>,
     ) -> BoxFuture<'a, Result<ResolvedResource, TransferError>> {
         Box::pin(async move {
             Ok(ResolvedResource {
-                url: url.clone(),
+                url: request.url.clone(),
                 filename_hint: None,
                 resumable: true,
+                stable_identity: false,
+                reject_html: false,
             })
         })
     }

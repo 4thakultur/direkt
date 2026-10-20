@@ -2,8 +2,8 @@
 
 A self-hostable direct download manager for homelabs, written in Rust.
 
-> **Status:** early development. HTTP/HTTPS downloads, the web UI, and the
-> API work. Telegram notifications, media organization, and Docker packaging
+> **Status:** early development. HTTP/HTTPS downloads, 1fichier premium
+> downloads, the web UI, and the API work. Telegram notifications, media organization, and Docker packaging
 > are next.
 
 ## First run
@@ -28,7 +28,8 @@ cargo clippy --all-targets
 See [`direkt.example.toml`](direkt.example.toml) for every configuration option, and
 [`docs/state-machine.md`](docs/state-machine.md) for the download lifecycle, and
 [`docs/download-engine.md`](docs/download-engine.md) for resume, retry, and
-network-security behavior, and [`docs/api.md`](docs/api.md) for the HTTP API.
+network-security behavior, [`docs/api.md`](docs/api.md) for the HTTP API, and
+[`docs/providers/1fichier.md`](docs/providers/1fichier.md) for 1fichier.
 
 `cargo test` needs no network access. One opt-in test downloads a real file
 over HTTPS: `cargo test -- --ignored real_https`.

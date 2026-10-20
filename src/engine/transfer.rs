@@ -33,6 +33,8 @@ use url::Url;
 const PROGRESS_INTERVAL: Duration = Duration::from_secs(1);
 const DISK_CHECK_INTERVAL_BYTES: u64 = 64 * 1024 * 1024;
 const WRITE_BUFFER: usize = 256 * 1024;
+/// Wait after a provider link answered with an error page instead of a file.
+const HTML_RESPONSE_RETRY: Duration = Duration::from_secs(5 * 60);
 
 pub(super) enum AttemptOutcome {
     /// The partial file now holds the complete resource.
@@ -74,12 +76,12 @@ impl Attempt<'_> {
         let dl = self.download;
         let policy = &self.inner.policy;
         let existing = partial_len(self.part_path).await?;
-        let validator = if existing > 0 && self.resource.resumable {
-            if_range_validator(dl)
+        let resume = if existing > 0 && self.resource.resumable {
+            resume_mode(dl, self.resource.stable_identity)
         } else {
             None
         };
-        let offset = if validator.is_some() { existing } else { 0 };
+        let offset = if resume.is_some() { existing } else { 0 };
 
         check_destination(&self.resource.url, policy).map_err(|_| {
             TransferError::fail(
@@ -88,10 +90,16 @@ impl Attempt<'_> {
             )
         })?;
         let mut request = self.inner.client.get(self.resource.url.clone());
-        if let Some(validator) = &validator {
-            request = request
-                .header(header::RANGE, format!("bytes={offset}-"))
-                .header(header::IF_RANGE, validator);
+        match &resume {
+            Some(Resume::IfRange(validator)) => {
+                request = request
+                    .header(header::RANGE, format!("bytes={offset}-"))
+                    .header(header::IF_RANGE, validator);
+            }
+            Some(Resume::SameSize(_)) => {
+                request = request.header(header::RANGE, format!("bytes={offset}-"));
+            }
+            None => {}
         }
 
         let response = tokio::select! {
@@ -105,7 +113,9 @@ impl Attempt<'_> {
         let headers = response.headers().clone();
         let start = match status {
             StatusCode::PARTIAL_CONTENT if offset > 0 => match parse_content_range(&headers) {
-                Some(range) if range.start == offset => offset,
+                Some(range) if range.start == offset && resume_total_ok(&resume, range.total) => {
+                    offset
+                }
                 _ => {
                     return Ok(Step::RestartFromZero(
                         "server returned an unexpected byte range",
@@ -114,9 +124,11 @@ impl Attempt<'_> {
             },
             StatusCode::OK => 0,
             StatusCode::RANGE_NOT_SATISFIABLE if offset > 0 => {
-                // With a matching If-Range, a 416 whose total equals our
-                // partial length means the file was already fully received.
-                if unsatisfied_range_total(&headers) == Some(offset) {
+                // With a matching If-Range (or the same known size), a 416
+                // whose total equals our partial length means the file was
+                // already fully received.
+                let total = unsatisfied_range_total(&headers);
+                if total == Some(offset) && resume_total_ok(&resume, total) {
                     let filename = self.choose_filename(&headers, response.url());
                     return Ok(Step::Done(AttemptOutcome::Finished {
                         bytes: offset,
@@ -139,6 +151,14 @@ impl Attempt<'_> {
                 return Err(classify_status(s, retry_after));
             }
         };
+
+        if self.resource.reject_html && is_html(&headers) {
+            return Err(TransferError::retry_after(
+                ErrorKind::RemoteUnavailable,
+                "server returned a web page instead of the file",
+                Some(HTML_RESPONSE_RETRY),
+            ));
+        }
 
         let total = if status == StatusCode::PARTIAL_CONTENT {
             parse_content_range(&headers)
@@ -329,6 +349,43 @@ fn header_str(headers: &HeaderMap, name: header::HeaderName) -> Option<String> {
         .get(name)
         .and_then(|v| v.to_str().ok())
         .map(str::to_owned)
+}
+
+/// How an existing partial file may be resumed.
+#[derive(Debug, PartialEq, Eq)]
+enum Resume {
+    /// `Range` + `If-Range`: the server only honors the range if the file
+    /// still matches this validator.
+    IfRange(String),
+    /// The provider guarantees the file's identity; the range is accepted only
+    /// if the server reports exactly this total size.
+    SameSize(u64),
+}
+
+fn resume_mode(dl: &Download, stable_identity: bool) -> Option<Resume> {
+    if stable_identity {
+        // Validators may differ between the servers a provider's links point
+        // to, so rely on the provider's identity guarantee plus the size.
+        return dl
+            .total_bytes
+            .and_then(|t| u64::try_from(t).ok())
+            .map(Resume::SameSize);
+    }
+    if_range_validator(dl).map(Resume::IfRange)
+}
+
+fn resume_total_ok(resume: &Option<Resume>, total: Option<u64>) -> bool {
+    match resume {
+        Some(Resume::SameSize(expected)) => total == Some(*expected),
+        _ => true,
+    }
+}
+
+fn is_html(headers: &HeaderMap) -> bool {
+    headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.trim_start().to_ascii_lowercase().starts_with("text/html"))
 }
 
 /// The `If-Range` value to resume with: a strong ETag, or else Last-Modified.
@@ -590,6 +647,7 @@ mod tests {
             file_path: None,
             resume_etag: Some("W/\"weak\"".into()),
             resume_last_modified: Some("Wed, 21 Oct 2015 07:28:00 GMT".into()),
+            download_password: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
             completed_at: None,
@@ -603,5 +661,18 @@ mod tests {
         dl.resume_etag = None;
         dl.resume_last_modified = None;
         assert_eq!(if_range_validator(&dl), None);
+
+        // Stable provider identity: resume by size, never by validator.
+        dl.resume_etag = Some("\"strong\"".into());
+        assert_eq!(resume_mode(&dl, true), None, "size unknown");
+        dl.total_bytes = Some(1000);
+        assert_eq!(resume_mode(&dl, true), Some(Resume::SameSize(1000)));
+        assert_eq!(
+            resume_mode(&dl, false),
+            Some(Resume::IfRange("\"strong\"".into()))
+        );
+        assert!(resume_total_ok(&Some(Resume::SameSize(1000)), Some(1000)));
+        assert!(!resume_total_ok(&Some(Resume::SameSize(1000)), Some(999)));
+        assert!(!resume_total_ok(&Some(Resume::SameSize(1000)), None));
     }
 }

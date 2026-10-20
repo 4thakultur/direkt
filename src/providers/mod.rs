@@ -6,16 +6,28 @@
 //! queue and transfer lifecycle in [`crate::engine`] stays provider-agnostic.
 
 mod http;
+mod onefichier;
 
 pub use http::HttpProvider;
+pub use onefichier::OneFichierProvider;
 
-use crate::error::TransferError;
+use crate::config::Config;
+use crate::error::{AppError, TransferError};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use url::Url;
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+/// Input to [`Provider::resolve`].
+#[derive(Debug, Clone, Copy)]
+pub struct ResolveRequest<'a> {
+    /// The URL as stored at submission (already canonicalized).
+    pub url: &'a Url,
+    /// Password for a protected file, if the user supplied one.
+    pub password: Option<&'a str>,
+}
 
 /// A resource the engine can fetch with a plain HTTP GET.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,6 +40,14 @@ pub struct ResolvedResource {
     /// Whether the provider allows resuming with byte ranges. The engine still
     /// checks that the server actually honors ranges and validators.
     pub resumable: bool,
+    /// The provider guarantees that every resolution of this download refers
+    /// to the same file, even though the direct URL may change (e.g. a new
+    /// token per attempt). The engine may then resume without an ETag or
+    /// Last-Modified validator, provided the total size matches exactly.
+    pub stable_identity: bool,
+    /// The direct URL must return a file. An HTML response is an error page
+    /// and is treated as a failed attempt instead of being saved.
+    pub reject_html: bool,
 }
 
 pub trait Provider: Send + Sync {
@@ -37,13 +57,24 @@ pub trait Provider: Send + Sync {
     /// Whether this provider handles `url`.
     fn matches(&self, url: &Url) -> bool;
 
+    /// Validate a submitted URL and return the form to store. Called once at
+    /// submission so malformed links are rejected before any request is made.
+    fn canonicalize(&self, url: &Url) -> Result<Url, AppError> {
+        Ok(url.clone())
+    }
+
+    /// Whether this provider can use a download password.
+    fn supports_password(&self) -> bool {
+        false
+    }
+
     /// Resolve a submitted URL into a downloadable resource. Errors carry a
     /// [`Disposition`](crate::error::Disposition): a provider can signal
     /// temporary restrictions (retry), required user action (block), or
     /// permanent failure.
     fn resolve<'a>(
         &'a self,
-        url: &'a Url,
+        request: ResolveRequest<'a>,
     ) -> BoxFuture<'a, Result<ResolvedResource, TransferError>>;
 }
 
@@ -59,6 +90,18 @@ impl Providers {
         Self { list }
     }
 
+    /// All built-in providers, configured from `config`. `client` must be the
+    /// policy-enforcing client from [`crate::http_client::build_client`].
+    pub fn standard(config: &Config, client: reqwest::Client) -> Self {
+        Self::new(vec![
+            Arc::new(OneFichierProvider::new(
+                client,
+                config.providers.onefichier.api_key.clone(),
+            )),
+            Arc::new(HttpProvider),
+        ])
+    }
+
     pub fn for_url(&self, url: &Url) -> Option<&Arc<dyn Provider>> {
         self.list.iter().find(|p| p.matches(url))
     }
@@ -68,29 +111,34 @@ impl Providers {
     }
 }
 
-impl Default for Providers {
-    fn default() -> Self {
-        Self::new(vec![Arc::new(HttpProvider)])
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn providers() -> Providers {
+        let client = crate::http_client::build_client(Default::default()).unwrap();
+        Providers::standard(&Config::default(), client)
+    }
+
     #[test]
-    fn http_is_the_fallback() {
-        let providers = Providers::default();
-        let url = Url::parse("https://example.com/file.zip").unwrap();
-        assert_eq!(providers.for_url(&url).unwrap().id(), "http");
+    fn hosters_take_precedence_over_http() {
+        let providers = providers();
+        let p = |s: &str| providers.for_url(&Url::parse(s).unwrap()).map(|p| p.id());
+        assert_eq!(p("https://example.com/file.zip"), Some("http"));
+        assert_eq!(p("https://1fichier.com/?abcde12345"), Some("1fichier"));
+        assert_eq!(
+            p("https://www.alterupload.com/?abcde12345"),
+            Some("1fichier")
+        );
+        // A direct CDN link from 1fichier is an ordinary HTTP download.
+        assert_eq!(p("https://a-12.1fichier.com/c123456"), Some("http"));
         assert_eq!(providers.get("http").unwrap().id(), "http");
         assert!(providers.get("nope").is_none());
     }
 
     #[test]
     fn non_http_urls_have_no_provider() {
-        let providers = Providers::default();
         let url = Url::parse("ftp://example.com/file.zip").unwrap();
-        assert!(providers.for_url(&url).is_none());
+        assert!(providers().for_url(&url).is_none());
     }
 }

@@ -178,6 +178,9 @@ pub struct Download {
     pub resume_etag: Option<String>,
     #[serde(skip)]
     pub resume_last_modified: Option<String>,
+    /// Password for a protected provider file. Never serialized or logged.
+    #[serde(skip)]
+    pub download_password: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,

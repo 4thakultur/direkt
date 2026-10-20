@@ -50,7 +50,8 @@ impl TestApp {
         let store = Store::open_in_memory().await.unwrap();
         let auth = AuthService::new(store.clone(), dir.path()).await.unwrap();
         let policy = NetworkPolicy::default();
-        let providers = Providers::default();
+        let client = crate::http_client::build_client(policy.clone()).unwrap();
+        let providers = Providers::standard(&crate::config::Config::default(), client.clone());
         let settings = EngineSettings {
             download_dir: dir.path().join("dl"),
             incomplete_dir: dir.path().join("inc"),
@@ -60,7 +61,6 @@ impl TestApp {
             retry_max_delay: Duration::from_secs(1),
             min_free_bytes: 0,
         };
-        let client = crate::http_client::build_client(policy.clone()).unwrap();
         let engine = Engine::new(
             store.clone(),
             providers.clone(),
@@ -200,6 +200,8 @@ async fn openapi_document_is_valid() {
     }
     assert!(doc["components"]["securitySchemes"]["bearer"].is_object());
     assert!(doc["components"]["schemas"]["DownloadDto"].is_object());
+    assert!(doc["components"]["schemas"]["RetryDownload"].is_object());
+    assert!(doc["components"]["schemas"]["CreateDownload"]["properties"]["password"].is_object());
 }
 
 #[tokio::test]
@@ -744,4 +746,70 @@ async fn ui_token_management() {
     let page = app.get("/settings", &auth).await;
     assert!(page.body.contains("phone"));
     assert!(!page.body.contains(&secret), "secret is not shown again");
+}
+
+#[tokio::test]
+async fn download_passwords_are_write_only() {
+    let (app, cookie) = TestApp::with_admin().await;
+    let auth = cookie_header(&cookie);
+    let r = app
+        .post_json(
+            "/api/v1/downloads",
+            &auth,
+            serde_json::json!({"url": "https://1fichier.com/?abcde12345", "password": "hunter2-secret"}),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::CREATED, "{}", r.body);
+    assert_eq!(r.json()["provider"], "1fichier");
+    let id = r.json()["id"].as_str().unwrap().to_owned();
+    for uri in [
+        format!("/api/v1/downloads/{id}"),
+        format!("/api/v1/downloads/{id}/events"),
+        "/api/v1/downloads".to_owned(),
+        "/ui/rows".to_owned(),
+        format!("/downloads/{id}"),
+    ] {
+        let r = app.get(&uri, &auth).await;
+        assert!(
+            !r.body.contains("hunter2-secret"),
+            "{uri} leaks the password"
+        );
+    }
+
+    // Plain HTTP links reject passwords.
+    let r = app
+        .post_json(
+            "/api/v1/downloads",
+            &auth,
+            serde_json::json!({"url": "https://example.com/f", "password": "x"}),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST);
+
+    // Retry accepts an optional password; unknown fields are rejected.
+    app.post_json(&format!("/api/v1/downloads/{id}/pause"), &auth, Value::Null)
+        .await;
+    app.post_json(
+        &format!("/api/v1/downloads/{id}/cancel"),
+        &auth,
+        Value::Null,
+    )
+    .await;
+    let r = app
+        .post_json(
+            &format!("/api/v1/downloads/{id}/retry"),
+            &auth,
+            serde_json::json!({"password": "new-secret"}),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    assert!(!r.body.contains("new-secret"));
+    let r = app
+        .post_json(
+            &format!("/api/v1/downloads/{id}/retry"),
+            &auth,
+            serde_json::json!({"pasword": "typo"}),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST);
 }

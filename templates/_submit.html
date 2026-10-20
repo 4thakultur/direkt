@@ -1,5 +1,6 @@
 <form class="submit" hx-post="/ui/downloads" hx-swap="outerHTML">
   <input name="url" type="url" placeholder="https://example.com/file.mkv" value="{{ value }}" required aria-label="URL to download">
+  <input name="password" type="password" placeholder="File password (optional)" autocomplete="off" aria-label="File password (optional)" class="password">
   <button type="submit" class="primary">Download</button>
   {% if let Some(message) = message %}<p class="flash ok">{{ message }}</p>{% endif %}
   {% if let Some(error) = error %}<p class="flash error">{{ error }}</p>{% endif %}

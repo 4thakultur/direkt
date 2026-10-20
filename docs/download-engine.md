@@ -27,7 +27,13 @@ A partial file is resumed only when all of these hold:
   starts exactly at the end of the partial file.
 
 If the remote file changed, the server answers `200` and the download starts
-over. Without a validator the download always starts over, because appending
+over.
+
+Some providers (such as 1fichier) issue a new direct link for every attempt.
+They guarantee that the link is the same file, but their links carry no
+reliable validator. For these, the engine resumes with a plain `Range` request
+and accepts the `206` only if `Content-Range` reports exactly the total size
+recorded earlier. Otherwise it starts over. Without a validator the download always starts over, because appending
 bytes from a possibly different file would silently corrupt it. On startup,
 the partial file on disk is the source of truth for the resume offset, not the
 stored progress counter.
