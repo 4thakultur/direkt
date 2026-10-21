@@ -20,8 +20,12 @@ docker compose exec direkt cat /data/setup-token
 Then:
 
 1. Open `http://<host>:9877`.
-2. Enter the one-time setup token and create the administrator account.
+2. Enter the one-time setup token and create the first administrator account.
 3. Paste a URL and download.
+4. Optionally, add accounts for other people under **Users**: choose what
+   each may do, and hand over the temporary password Direkt shows. At their
+   first sign-in they choose their own password, and set up two-factor
+   authentication if you required it.
 
 [`docs/docker.md`](docs/docker.md) covers volumes, permissions, upgrades,
 backups and troubleshooting.
@@ -30,9 +34,11 @@ To require a code from an authenticator app (Google Authenticator,
 Microsoft Authenticator, …) at sign-in, turn on two-factor authentication
 under Settings.
 
-Forgot the password? Run `direkt reset-admin` and set up again. Lost the
-authenticator app and its recovery codes? Run `direkt reset-2fa`. See
-[`docs/security.md`](docs/security.md).
+Forgot a password? An administrator issues a new temporary one from the
+account's page, or run `direkt reset-password <username>` on the server. Lost
+the authenticator app and its recovery codes? An administrator resets it, or
+run `direkt reset-2fa <username>`. See [`docs/security.md`](docs/security.md)
+for roles, permissions and recovery.
 
 ## Development
 
@@ -63,11 +69,11 @@ over HTTPS: `cargo test -- --ignored real_https`.
 |--------------|-----------------------------------------------------------|
 | Runtime      | tokio                                                     |
 | HTTP server  | axum, with OpenAPI via utoipa                             |
-| Web UI       | Server-rendered templates + htmx, embedded in the binary; two themes, chosen per browser under Settings → Appearance: "Steve" (after iOS and macOS, light and dark, the default) and "Beyond" (black and red); no external assets |
+| Web UI       | Server-rendered templates + htmx, embedded in the binary; two themes after iOS and macOS, chosen per browser under Settings → Appearance: Dark (the default) and Light; no external assets |
 | Persistence  | SQLite (sqlx, WAL mode, embedded migrations)              |
 | Outbound HTTP| reqwest with SSRF-checked DNS resolution and redirects    |
 | Config       | One TOML file; secrets may come from `DIREKT_*` env vars  |
-| Auth         | Admin login (session cookie) + revocable API tokens       |
+| Auth         | Accounts with two roles (administrator, user) and per-user permissions; session cookie + per-account API tokens; optional or required TOTP |
 | Deployment   | Docker Compose; Debian slim runtime image, non-root       |
 
 ## License

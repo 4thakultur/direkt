@@ -1,5 +1,12 @@
 //! HTTP layer: JSON API, web UI, authentication middleware, and security
 //! headers. Handlers stay thin; business rules live in the services.
+//!
+//! Authentication puts the signed-in [`User`] in the request extensions.
+//! Until an account has replaced its temporary password (and set up
+//! two-factor authentication, when required), it can only reach the
+//! first-sign-in pages. Route groups that need a permission, or an
+//! administrator, are guarded as a whole by `require` and `admin_only`; the
+//! services check the same rules again.
 
 pub mod api;
 mod api_docs;
@@ -15,7 +22,8 @@ use crate::media::ArtworkService;
 use crate::service::DownloadService;
 use crate::settings::SettingsService;
 use crate::store::Store;
-use axum::extract::{ConnectInfo, Request, State};
+use crate::users::{Permission, User};
+use axum::extract::{ConnectInfo, OriginalUri, Request, State};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Redirect, Response};
@@ -74,8 +82,9 @@ async fn not_found(request: Request) -> Response {
     }
 }
 
-/// Accept either an API bearer token or a valid session cookie.
-async fn require_auth(State(state): State<AppState>, request: Request, next: Next) -> Response {
+/// Accept either an API bearer token or a valid session cookie, and attach
+/// the account to the request.
+async fn require_auth(State(state): State<AppState>, mut request: Request, next: Next) -> Response {
     if let Some(value) = request.headers().get(header::AUTHORIZATION) {
         let token = value
             .to_str()
@@ -83,9 +92,15 @@ async fn require_auth(State(state): State<AppState>, request: Request, next: Nex
             .and_then(|v| v.strip_prefix("Bearer "))
             .map(str::trim);
         return match token {
-            Some(token) => match state.auth.api_token_valid(token).await {
-                Ok(true) => next.run(request).await,
-                Ok(false) => unauthenticated(&request, "invalid API token"),
+            Some(token) => match state.auth.token_user(token).await {
+                Ok(Some(user)) => {
+                    if let Some(refused) = onboarding_gate(&request, &user) {
+                        return refused;
+                    }
+                    request.extensions_mut().insert(user);
+                    next.run(request).await
+                }
+                Ok(None) => unauthenticated(&request, "invalid API token"),
                 Err(e) => ApiError::from(e).into_response(),
             },
             None => unauthenticated(&request, "unsupported Authorization scheme; use Bearer"),
@@ -93,15 +108,89 @@ async fn require_auth(State(state): State<AppState>, request: Request, next: Nex
     }
 
     if let Some(session) = read_cookie(request.headers(), SESSION_COOKIE) {
-        match state.auth.session_valid(session).await {
-            Ok(true) => {
+        match state.auth.session_user(session).await {
+            Ok(Some(user)) => {
+                if let Some(refused) = onboarding_gate(&request, &user) {
+                    return refused;
+                }
+                request.extensions_mut().insert(user);
                 return reject_cross_site(request, next).await;
             }
-            Ok(false) => {}
+            Ok(None) => {}
             Err(e) => return ApiError::from(e).into_response(),
         }
     }
     unauthenticated(&request, "authentication required")
+}
+
+/// Pages an account that must still choose a password or set up two-factor
+/// authentication can reach.
+fn onboarding_path(path: &str) -> bool {
+    path == "/welcome" || path.starts_with("/welcome/") || path == "/logout"
+}
+
+/// Keep an account on the first-sign-in pages until it is done there.
+fn onboarding_gate(request: &Request, user: &User) -> Option<Response> {
+    let path = request.uri().path();
+    if !user.needs_onboarding() || onboarding_path(path) {
+        return None;
+    }
+    if path.starts_with("/api/") {
+        let message = if user.must_change_password {
+            "sign in to the web UI and replace the temporary password first"
+        } else {
+            "sign in to the web UI and set up two-factor authentication first"
+        };
+        return Some(ApiError::from(AppError::new(ErrorKind::Forbidden, message)).into_response());
+    }
+    Some(redirect_to(request, "/welcome"))
+}
+
+/// Refuse the request unless the account has the permission. Use as
+/// `middleware::from_fn_with_state(permission, require)`.
+pub(crate) async fn require(
+    State(permission): State<Permission>,
+    request: Request,
+    next: Next,
+) -> Response {
+    guard(request, next, |u: &User| u.require(permission)).await
+}
+
+/// Refuse the request unless the account is an administrator.
+pub(crate) async fn admin_only(request: Request, next: Next) -> Response {
+    guard(request, next, User::require_admin).await
+}
+
+async fn guard(
+    request: Request,
+    next: Next,
+    check: impl Fn(&User) -> Result<(), AppError>,
+) -> Response {
+    let result = match request.extensions().get::<User>() {
+        Some(user) => check(user),
+        None => Err(AppError::unauthorized("authentication required")),
+    };
+    // Inside the nested API router the path has lost its `/api/v1` prefix.
+    let api = request
+        .extensions()
+        .get::<OriginalUri>()
+        .map_or(request.uri(), |OriginalUri(uri)| uri)
+        .path()
+        .starts_with("/api/");
+    match result {
+        Ok(()) => next.run(request).await,
+        Err(e) if api => ApiError::from(e).into_response(),
+        Err(e) => (error::status_for(e.kind), e.message).into_response(),
+    }
+}
+
+/// Send the browser to `to`; htmx requests get `HX-Redirect`, which htmx
+/// follows instead of swapping the response in.
+fn redirect_to(request: &Request, to: &'static str) -> Response {
+    if request.headers().contains_key("hx-request") {
+        return (StatusCode::OK, [("hx-redirect", to)]).into_response();
+    }
+    Redirect::to(to).into_response()
 }
 
 fn unauthenticated(request: &Request, message: &str) -> Response {

@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+{% block title %}Welcome · Direkt{% endblock %}
+{% block body %}
+<main class="narrow">
+  <div class="app-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 4v11m-5-5 5 5 5-5M5 20h14" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+  <h1 class="brand-large">Direkt</h1>
+  {% if !recovery_codes.is_empty() %}
+  <section class="card stack">
+    <h2>Save your recovery codes</h2>
+    <p>
+      Two-factor authentication is on. Save these codes somewhere safe, such
+      as a password manager. Each one signs you in once if you lose your
+      phone. They will not be shown again.
+    </p>
+    <ol class="secret recovery-codes">
+      {% for code in recovery_codes %}<li><code>{{ code }}</code></li>{% endfor %}
+    </ol>
+    <form method="get" action="/">
+      <button type="submit" class="primary">I saved them, continue to Direkt</button>
+    </form>
+  </section>
+  {% else if choose_password %}
+  <form method="post" action="/welcome/password" class="card stack">
+    <h2>Welcome, {{ username }}</h2>
+    <p class="muted">
+      You signed in with a temporary password from an administrator. Choose a
+      password of your own to continue.{% if let Some(expires) = expires %}
+      The temporary one stops working on {{ expires }}.{% endif %}
+    </p>
+    {% if let Some(error) = error %}<p class="flash error">{{ error }}</p>{% endif %}
+    <label>New password
+      <input name="new_password" type="password" autocomplete="new-password" minlength="12" required autofocus>
+    </label>
+    <label>Confirm new password
+      <input name="new_password_confirm" type="password" autocomplete="new-password" minlength="12" required>
+    </label>
+    <p class="muted small">{{ password_rules }}</p>
+    <button type="submit" class="primary">Save password</button>
+    <p class="muted small"><button type="submit" class="link" form="welcome-logout">Log out</button></p>
+  </form>
+  {% else %}
+  <form method="post" action="/welcome/two-factor" class="card stack">
+    <h2>Set up two-factor authentication</h2>
+    <p class="muted">
+      An administrator requires a second step for your account: after your
+      password, each new sign-in also asks for a 6-digit code from an
+      authenticator app on your phone.
+    </p>
+    {% if let Some(error) = error %}<p class="flash error">{{ error }}</p>{% endif %}
+    {% if let Some(e) = enrollment %}
+    <ol class="steps">
+      <li>Open an authenticator app on your phone, such as Google Authenticator, Microsoft Authenticator, Aegis or 1Password, and add an account.</li>
+      <li>Scan this QR code. On the phone itself, <a href="{{ e.uri }}">open the setup link</a> instead.</li>
+    </ol>
+    {% if e.qr_size > 0 %}
+    <svg class="qr" viewBox="0 0 {{ e.qr_size }} {{ e.qr_size }}" role="img" aria-label="QR code for your authenticator app" shape-rendering="crispEdges">
+      <rect width="{{ e.qr_size }}" height="{{ e.qr_size }}" fill="#fff"/>
+      <path d="{{ e.qr_path }}" fill="#000"/>
+    </svg>
+    {% endif %}
+    <p class="muted small">Can't scan it? Choose to enter a setup key, and type this time-based key:</p>
+    <div class="secret"><code class="totp-key">{{ e.secret }}</code></div>
+    <label>Enter the 6-digit code the app shows
+      <input name="code" inputmode="numeric" pattern="[0-9 ]{6,7}" maxlength="7" autocomplete="one-time-code" required autofocus class="code-input">
+    </label>
+    <button type="submit" class="primary">Turn on</button>
+    {% endif %}
+    <p class="muted small"><button type="submit" class="link" form="welcome-logout">Log out</button></p>
+  </form>
+  {% endif %}
+  <form method="post" action="/logout" id="welcome-logout" hidden></form>
+</main>
+{% endblock %}

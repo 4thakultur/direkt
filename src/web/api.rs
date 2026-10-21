@@ -2,7 +2,8 @@
 //! `/api/openapi.json`.
 
 use super::error::{ApiJson, ApiPath, ApiQuery};
-use super::{ApiError, AppState, ErrorBody};
+use super::{ApiError, AppState, ErrorBody, admin_only, require};
+use crate::auth::accounts::{IssuedPassword, NewAccount};
 use crate::domain::{Download, DownloadError, DownloadEvent, MediaType, PostState, TransferState};
 use crate::engine::LiveSnapshot;
 use crate::error::{AppError, ErrorKind};
@@ -10,14 +11,18 @@ use crate::service::Preview;
 use crate::settings::{
     LibrarySettings, MiscSettings, MiscUpdate, OneFichierSettings, TmdbSettings,
 };
-use crate::store::ApiToken;
+use crate::store::{ApiToken, UserChanges};
+use crate::users::{Permission, Role, User};
+use axum::Extension;
 use axum::extract::State;
 use axum::http::StatusCode;
+use axum::middleware;
 use axum::response::IntoResponse;
 use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use utoipa::openapi::security::{ApiKey, ApiKeyValue, HttpAuthScheme, HttpBuilder, SecurityScheme};
 use utoipa::{IntoParams, Modify, OpenApi, ToSchema};
 use uuid::Uuid;
@@ -26,22 +31,14 @@ const DEFAULT_LIMIT: i64 = 50;
 const MAX_LIMIT: i64 = 500;
 
 pub fn routes() -> Router<AppState> {
-    Router::new()
-        .route("/downloads", get(list_downloads).post(create_download))
-        .route("/downloads/cancelled", delete(delete_cancelled_downloads))
-        .route("/downloads/completed", delete(delete_completed_downloads))
-        .route("/downloads/{id}", get(get_download).delete(delete_download))
-        .route("/downloads/{id}/events", get(download_events))
-        .route("/downloads/{id}/pause", post(pause_download))
-        .route("/downloads/{id}/resume", post(resume_download))
-        .route("/downloads/{id}/cancel", post(cancel_download))
-        .route("/downloads/{id}/retry", post(retry_download))
-        .route("/downloads/{id}/organize", post(organize_download))
-        .route("/previews", post(create_preview))
-        .route("/previews/{id}", put(retype_preview))
-        .route("/stats", get(get_stats))
+    let tokens = Router::new()
         .route("/tokens", get(list_tokens).post(create_token))
         .route("/tokens/{id}", delete(revoke_token))
+        .route_layer(middleware::from_fn_with_state(
+            Permission::ApiTokens,
+            require,
+        ));
+    let settings = Router::new()
         .route(
             "/settings/onefichier",
             get(get_onefichier)
@@ -62,6 +59,37 @@ pub fn routes() -> Router<AppState> {
             "/settings/tmdb",
             get(get_tmdb).put(put_tmdb).delete(delete_tmdb),
         )
+        .route_layer(middleware::from_fn_with_state(
+            Permission::ManageSettings,
+            require,
+        ));
+    let users = Router::new()
+        .route("/users", get(list_users).post(create_user))
+        .route(
+            "/users/{id}",
+            get(get_user).patch(update_user).delete(delete_user),
+        )
+        .route("/users/{id}/reset-password", post(reset_user_password))
+        .route("/users/{id}/reset-two-factor", post(reset_user_two_factor))
+        .route_layer(middleware::from_fn(admin_only));
+    Router::new()
+        .route("/downloads", get(list_downloads).post(create_download))
+        .route("/downloads/cancelled", delete(delete_cancelled_downloads))
+        .route("/downloads/completed", delete(delete_completed_downloads))
+        .route("/downloads/{id}", get(get_download).delete(delete_download))
+        .route("/downloads/{id}/events", get(download_events))
+        .route("/downloads/{id}/pause", post(pause_download))
+        .route("/downloads/{id}/resume", post(resume_download))
+        .route("/downloads/{id}/cancel", post(cancel_download))
+        .route("/downloads/{id}/retry", post(retry_download))
+        .route("/downloads/{id}/organize", post(organize_download))
+        .route("/previews", post(create_preview))
+        .route("/previews/{id}", put(retype_preview))
+        .route("/stats", get(get_stats))
+        .route("/me", get(get_me))
+        .merge(tokens)
+        .merge(settings)
+        .merge(users)
 }
 
 type ApiResult<T> = Result<T, ApiError>;
@@ -102,13 +130,29 @@ pub struct DownloadDto {
     pub year: Option<u16>,
     /// Cached artwork, served at `/artwork/{id}` (session login).
     pub artwork_id: Option<String>,
+    /// The account that added it; absent once that account was deleted.
+    pub owner_id: Option<i64>,
+    /// That account's username.
+    pub owner: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
 }
 
+/// Usernames of the accounts whose downloads `actor` can see, by id.
+pub(crate) async fn owner_names(
+    state: &AppState,
+    actor: &User,
+) -> Result<HashMap<i64, String>, AppError> {
+    if actor.can(Permission::ViewAllDownloads) {
+        state.auth.usernames().await
+    } else {
+        Ok(HashMap::from([(actor.id, actor.username.clone())]))
+    }
+}
+
 impl DownloadDto {
-    pub fn new(d: Download, live: Option<LiveSnapshot>) -> Self {
+    pub fn new(d: Download, live: Option<LiveSnapshot>, owners: &HashMap<i64, String>) -> Self {
         let downloaded_bytes = live
             .map(|l| i64::try_from(l.downloaded_bytes).unwrap_or(i64::MAX))
             .unwrap_or(d.downloaded_bytes);
@@ -131,6 +175,8 @@ impl DownloadDto {
             title: d.title,
             year: d.year,
             artwork_id: d.artwork_id,
+            owner_id: d.owner_id,
+            owner: d.owner_id.and_then(|id| owners.get(&id).cloned()),
             created_at: d.created_at,
             updated_at: d.updated_at,
             completed_at: d.completed_at,
@@ -221,6 +267,92 @@ pub struct CreateToken {
     pub name: String,
 }
 
+/// An account. Secrets are never returned.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct UserDto {
+    pub id: i64,
+    pub username: String,
+    pub role: Role,
+    /// Everything the account may do: all of them for administrators.
+    pub permissions: Vec<Permission>,
+    /// An administrator requires two-factor authentication.
+    pub require_two_factor: bool,
+    pub two_factor_enabled: bool,
+    /// The password is temporary: the next sign-in must replace it.
+    pub must_change_password: bool,
+    /// When the temporary password stops working.
+    pub password_expires_at: Option<DateTime<Utc>>,
+    pub disabled: bool,
+    pub created_at: DateTime<Utc>,
+    pub last_login_at: Option<DateTime<Utc>>,
+}
+
+impl From<User> for UserDto {
+    fn from(u: User) -> Self {
+        Self {
+            permissions: u.permissions(),
+            id: u.id,
+            username: u.username,
+            role: u.role,
+            require_two_factor: u.require_two_factor,
+            two_factor_enabled: u.two_factor_enabled,
+            must_change_password: u.must_change_password,
+            password_expires_at: u.password_expires_at.filter(|_| u.must_change_password),
+            disabled: u.disabled,
+            created_at: u.created_at,
+            last_login_at: u.last_login_at,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CreateUser {
+    /// 1-64 characters, no spaces. Unique, ignoring case.
+    #[schema(example = "alice")]
+    pub username: String,
+    /// Defaults to `user`.
+    pub role: Option<Role>,
+    /// For the `user` role. Defaults to `submit_downloads` and
+    /// `premium_providers`. Ignored for administrators.
+    pub permissions: Option<Vec<Permission>>,
+    /// Require two-factor authentication: the first sign-in sets it up.
+    #[serde(default)]
+    pub require_two_factor: bool,
+}
+
+/// Fields left out keep their value.
+#[derive(Debug, Default, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateUser {
+    pub role: Option<Role>,
+    /// Replaces the granted permissions.
+    pub permissions: Option<Vec<Permission>>,
+    pub require_two_factor: Option<bool>,
+    /// A disabled account cannot sign in, and its sessions and API tokens
+    /// stop working until it is enabled again.
+    pub disabled: Option<bool>,
+}
+
+/// A temporary password, shown only in this response. Give it to the
+/// account's owner: their first sign-in must replace it.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct TemporaryPassword {
+    pub user: UserDto,
+    pub temporary_password: String,
+    pub expires_at: DateTime<Utc>,
+}
+
+impl From<IssuedPassword> for TemporaryPassword {
+    fn from(i: IssuedPassword) -> Self {
+        Self {
+            user: i.user.into(),
+            temporary_password: i.password,
+            expires_at: i.expires_at,
+        }
+    }
+}
+
 #[derive(Debug, Serialize, ToSchema)]
 pub struct CreatedToken {
     #[serde(flatten)]
@@ -241,24 +373,26 @@ pub struct CreatedToken {
         (status = 201, description = "Download queued", body = DownloadDto),
         (status = 400, description = "Invalid or forbidden URL", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "The account may not add downloads, or not from this host", body = ErrorBody),
         (status = 422, description = "No provider supports the URL", body = ErrorBody),
     )
 )]
 async fn create_download(
     State(state): State<AppState>,
+    Extension(user): Extension<User>,
     ApiJson(body): ApiJson<CreateDownload>,
 ) -> ApiResult<impl IntoResponse> {
     let download = match (body.preview_id, body.url) {
         (Some(id), None) => {
             state
                 .downloads
-                .confirm(id, body.media_type, body.password.as_deref())
+                .confirm(&user, id, body.media_type, body.password.as_deref())
                 .await?
         }
         (None, Some(url)) => {
             state
                 .downloads
-                .submit(&url, body.password.as_deref(), body.media_type)
+                .submit(&user, &url, body.password.as_deref(), body.media_type)
                 .await?
         }
         (Some(_), Some(_)) => {
@@ -266,7 +400,11 @@ async fn create_download(
         }
         (None, None) => return Err(AppError::invalid("url is required").into()),
     };
-    Ok((StatusCode::CREATED, Json(DownloadDto::new(download, None))))
+    let owners = owner_names(&state, &user).await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(DownloadDto::new(download, None, &owners)),
+    ))
 }
 
 /// Look a link up before downloading it: provider, file name, size,
@@ -278,18 +416,20 @@ async fn create_download(
     responses(
         (status = 200, body = Preview),
         (status = 400, description = "Invalid or forbidden URL", body = ErrorBody),
+        (status = 403, description = "The account may not add downloads, or not from this host", body = ErrorBody),
         (status = 422, description = "No provider supports the URL", body = ErrorBody),
         (status = 502, description = "The file is gone", body = ErrorBody),
     )
 )]
 async fn create_preview(
     State(state): State<AppState>,
+    Extension(user): Extension<User>,
     ApiJson(body): ApiJson<CreatePreview>,
 ) -> ApiResult<Json<Preview>> {
     Ok(Json(
         state
             .downloads
-            .preview(&body.url, body.password.as_deref())
+            .preview(&user, &body.url, body.password.as_deref())
             .await?,
     ))
 }
@@ -306,13 +446,17 @@ async fn create_preview(
 )]
 async fn retype_preview(
     State(state): State<AppState>,
+    Extension(user): Extension<User>,
     ApiPath(id): ApiPath<Uuid>,
     ApiJson(body): ApiJson<RetypePreview>,
 ) -> ApiResult<Json<Preview>> {
-    Ok(Json(state.downloads.retype(id, body.media_type).await?))
+    Ok(Json(
+        state.downloads.retype(&user, id, body.media_type).await?,
+    ))
 }
 
-/// List downloads, newest first.
+/// List downloads, newest first: the account's own, or everyone's with the
+/// `view_all_downloads` permission.
 #[utoipa::path(
     get, path = "/api/v1/downloads", tag = "downloads",
     params(ListQuery),
@@ -324,6 +468,7 @@ async fn retype_preview(
 )]
 async fn list_downloads(
     State(state): State<AppState>,
+    Extension(user): Extension<User>,
     ApiQuery(query): ApiQuery<ListQuery>,
 ) -> ApiResult<Json<DownloadList>> {
     let states = parse_states(query.state.as_deref())?;
@@ -335,14 +480,15 @@ async fn list_downloads(
     if offset < 0 {
         return Err(AppError::invalid("offset must not be negative").into());
     }
+    let owners = owner_names(&state, &user).await?;
     let items = state
         .downloads
-        .list(&states, limit, offset)
+        .list(&user, &states, limit, offset)
         .await?
         .into_iter()
         .map(|d| {
             let live = state.downloads.live(d.id);
-            DownloadDto::new(d, live)
+            DownloadDto::new(d, live, &owners)
         })
         .collect();
     Ok(Json(DownloadList {
@@ -375,10 +521,22 @@ pub(crate) fn parse_states(raw: Option<&str>) -> Result<Vec<TransferState>, AppE
 )]
 async fn get_download(
     State(state): State<AppState>,
+    Extension(user): Extension<User>,
     ApiPath(id): ApiPath<Uuid>,
 ) -> ApiResult<Json<DownloadDto>> {
-    let download = state.downloads.get(id).await?;
-    Ok(Json(DownloadDto::new(download, state.downloads.live(id))))
+    let download = state.downloads.get(&user, id).await?;
+    let owners = owner_names(&state, &user).await?;
+    Ok(Json(DownloadDto::new(
+        download,
+        state.downloads.live(id),
+        &owners,
+    )))
+}
+
+/// A download after an action, as the account sees it.
+async fn acted(state: &AppState, user: &User, download: Download) -> ApiResult<Json<DownloadDto>> {
+    let owners = owner_names(state, user).await?;
+    Ok(Json(DownloadDto::new(download, None, &owners)))
 }
 
 /// Event history of a download, oldest first.
@@ -392,9 +550,10 @@ async fn get_download(
 )]
 async fn download_events(
     State(state): State<AppState>,
+    Extension(user): Extension<User>,
     ApiPath(id): ApiPath<Uuid>,
 ) -> ApiResult<Json<Vec<DownloadEvent>>> {
-    Ok(Json(state.downloads.events(id).await?))
+    Ok(Json(state.downloads.events(&user, id).await?))
 }
 
 /// Transfer throughput and free disk space.
@@ -428,12 +587,11 @@ async fn get_stats(State(state): State<AppState>) -> Json<StatsDto> {
 )]
 async fn pause_download(
     State(state): State<AppState>,
+    Extension(user): Extension<User>,
     ApiPath(id): ApiPath<Uuid>,
 ) -> ApiResult<Json<DownloadDto>> {
-    Ok(Json(DownloadDto::new(
-        state.downloads.pause(id).await?,
-        None,
-    )))
+    let download = state.downloads.pause(&user, id).await?;
+    acted(&state, &user, download).await
 }
 
 /// Resume a paused download.
@@ -448,12 +606,11 @@ async fn pause_download(
 )]
 async fn resume_download(
     State(state): State<AppState>,
+    Extension(user): Extension<User>,
     ApiPath(id): ApiPath<Uuid>,
 ) -> ApiResult<Json<DownloadDto>> {
-    Ok(Json(DownloadDto::new(
-        state.downloads.resume(id).await?,
-        None,
-    )))
+    let download = state.downloads.resume(&user, id).await?;
+    acted(&state, &user, download).await
 }
 
 /// Cancel a download that has not completed and delete its partial data.
@@ -468,12 +625,11 @@ async fn resume_download(
 )]
 async fn cancel_download(
     State(state): State<AppState>,
+    Extension(user): Extension<User>,
     ApiPath(id): ApiPath<Uuid>,
 ) -> ApiResult<Json<DownloadDto>> {
-    Ok(Json(DownloadDto::new(
-        state.downloads.cancel(id).await?,
-        None,
-    )))
+    let download = state.downloads.cancel(&user, id).await?;
+    acted(&state, &user, download).await
 }
 
 #[derive(Debug, Default, Deserialize, IntoParams)]
@@ -491,6 +647,7 @@ pub struct DeleteQuery {
     params(("id" = Uuid, Path, description = "Download ID"), DeleteQuery),
     responses(
         (status = 204, description = "Deleted"),
+        (status = 403, description = "Someone else's download, or deleting files is not allowed", body = ErrorBody),
         (status = 404, body = ErrorBody),
         (status = 409, description = "Not cancelled or completed, or being organized", body = ErrorBody),
         (status = 500, description = "The file could not be deleted; the download is kept", body = ErrorBody),
@@ -498,10 +655,11 @@ pub struct DeleteQuery {
 )]
 async fn delete_download(
     State(state): State<AppState>,
+    Extension(user): Extension<User>,
     ApiPath(id): ApiPath<Uuid>,
     ApiQuery(query): ApiQuery<DeleteQuery>,
 ) -> ApiResult<StatusCode> {
-    state.downloads.delete(id, query.delete_file).await?;
+    state.downloads.delete(&user, id, query.delete_file).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -510,23 +668,37 @@ struct Deleted {
     deleted: usize,
 }
 
-/// Delete every cancelled download and its event history.
+/// Delete every cancelled download the account manages, and its event
+/// history.
 #[utoipa::path(
     delete, path = "/api/v1/downloads/cancelled", tag = "downloads",
     responses((status = 200, body = Deleted))
 )]
-async fn delete_cancelled_downloads(State(state): State<AppState>) -> ApiResult<Json<Deleted>> {
-    let deleted = state.downloads.delete_all(TransferState::Cancelled).await?;
+async fn delete_cancelled_downloads(
+    State(state): State<AppState>,
+    Extension(user): Extension<User>,
+) -> ApiResult<Json<Deleted>> {
+    let deleted = state
+        .downloads
+        .delete_all(&user, TransferState::Cancelled)
+        .await?;
     Ok(Json(Deleted { deleted }))
 }
 
-/// Remove every completed download from the list. Files stay on disk.
+/// Remove every completed download the account manages from the list.
+/// Files stay on disk.
 #[utoipa::path(
     delete, path = "/api/v1/downloads/completed", tag = "downloads",
     responses((status = 200, body = Deleted))
 )]
-async fn delete_completed_downloads(State(state): State<AppState>) -> ApiResult<Json<Deleted>> {
-    let deleted = state.downloads.delete_all(TransferState::Completed).await?;
+async fn delete_completed_downloads(
+    State(state): State<AppState>,
+    Extension(user): Extension<User>,
+) -> ApiResult<Json<Deleted>> {
+    let deleted = state
+        .downloads
+        .delete_all(&user, TransferState::Completed)
+        .await?;
     Ok(Json(Deleted { deleted }))
 }
 
@@ -545,6 +717,7 @@ async fn delete_completed_downloads(State(state): State<AppState>) -> ApiResult<
 )]
 async fn retry_download(
     State(state): State<AppState>,
+    Extension(user): Extension<User>,
     ApiPath(id): ApiPath<Uuid>,
     body: axum::body::Bytes,
 ) -> ApiResult<Json<DownloadDto>> {
@@ -555,10 +728,11 @@ async fn retry_download(
             .map_err(|e| AppError::invalid(format!("invalid JSON body: {e}")))?
             .unwrap_or_default()
     };
-    Ok(Json(DownloadDto::new(
-        state.downloads.retry(id, body.password.as_deref()).await?,
-        None,
-    )))
+    let download = state
+        .downloads
+        .retry(&user, id, body.password.as_deref())
+        .await?;
+    acted(&state, &user, download).await
 }
 
 /// Organize a completed download again, after organizing failed or was
@@ -574,24 +748,31 @@ async fn retry_download(
 )]
 async fn organize_download(
     State(state): State<AppState>,
+    Extension(user): Extension<User>,
     ApiPath(id): ApiPath<Uuid>,
 ) -> ApiResult<Json<DownloadDto>> {
-    Ok(Json(DownloadDto::new(
-        state.downloads.organize(id).await?,
-        None,
-    )))
+    let download = state.downloads.organize(&user, id).await?;
+    acted(&state, &user, download).await
 }
 
-/// List API tokens (secrets are never returned).
+/// List the account's API tokens (secrets are never returned). Needs the
+/// `api_tokens` permission.
 #[utoipa::path(
     get, path = "/api/v1/tokens", tag = "tokens",
-    responses((status = 200, body = Vec<ApiToken>))
+    responses(
+        (status = 200, body = Vec<ApiToken>),
+        (status = 403, description = "The account may not use API tokens", body = ErrorBody),
+    )
 )]
-async fn list_tokens(State(state): State<AppState>) -> ApiResult<Json<Vec<ApiToken>>> {
-    Ok(Json(state.auth.list_api_tokens().await?))
+async fn list_tokens(
+    State(state): State<AppState>,
+    Extension(user): Extension<User>,
+) -> ApiResult<Json<Vec<ApiToken>>> {
+    Ok(Json(state.auth.list_api_tokens(&user).await?))
 }
 
-/// Create an API token. The secret is in the response only.
+/// Create an API token for the account; it acts with the account's
+/// permissions. The secret is in the response only.
 #[utoipa::path(
     post, path = "/api/v1/tokens", tag = "tokens",
     request_body = CreateToken,
@@ -602,13 +783,14 @@ async fn list_tokens(State(state): State<AppState>) -> ApiResult<Json<Vec<ApiTok
 )]
 async fn create_token(
     State(state): State<AppState>,
+    Extension(user): Extension<User>,
     ApiJson(body): ApiJson<CreateToken>,
 ) -> ApiResult<impl IntoResponse> {
-    let (token, secret) = state.auth.create_api_token(&body.name).await?;
+    let (token, secret) = state.auth.create_api_token(&user, &body.name).await?;
     Ok((StatusCode::CREATED, Json(CreatedToken { token, secret })))
 }
 
-/// Revoke an API token.
+/// Revoke one of the account's API tokens.
 #[utoipa::path(
     delete, path = "/api/v1/tokens/{id}", tag = "tokens",
     params(("id" = Uuid, Path, description = "Token ID")),
@@ -619,10 +801,187 @@ async fn create_token(
 )]
 async fn revoke_token(
     State(state): State<AppState>,
+    Extension(user): Extension<User>,
     ApiPath(id): ApiPath<Uuid>,
 ) -> ApiResult<StatusCode> {
-    state.auth.revoke_api_token(id).await?;
+    state.auth.revoke_api_token(&user, id).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// The signed-in account and its permissions.
+#[utoipa::path(
+    get, path = "/api/v1/me", tag = "users",
+    responses((status = 200, body = UserDto))
+)]
+async fn get_me(Extension(user): Extension<User>) -> Json<UserDto> {
+    Json(user.into())
+}
+
+/// List every account. Administrators only.
+#[utoipa::path(
+    get, path = "/api/v1/users", tag = "users",
+    responses(
+        (status = 200, body = Vec<UserDto>),
+        (status = 403, description = "Not an administrator", body = ErrorBody),
+    )
+)]
+async fn list_users(
+    State(state): State<AppState>,
+    Extension(user): Extension<User>,
+) -> ApiResult<Json<Vec<UserDto>>> {
+    let users = state.auth.list_users(&user).await?;
+    Ok(Json(users.into_iter().map(UserDto::from).collect()))
+}
+
+/// Create an account. Direkt generates a temporary password, returned only
+/// here, that expires after 72 hours. The first sign-in must replace it with
+/// a strong password, then set up two-factor authentication if required.
+/// Administrators only.
+#[utoipa::path(
+    post, path = "/api/v1/users", tag = "users",
+    request_body = CreateUser,
+    responses(
+        (status = 201, body = TemporaryPassword),
+        (status = 400, description = "Invalid username", body = ErrorBody),
+        (status = 403, description = "Not an administrator", body = ErrorBody),
+        (status = 409, description = "The username is taken", body = ErrorBody),
+    )
+)]
+async fn create_user(
+    State(state): State<AppState>,
+    Extension(user): Extension<User>,
+    ApiJson(body): ApiJson<CreateUser>,
+) -> ApiResult<impl IntoResponse> {
+    let issued = state
+        .auth
+        .create_user(
+            &user,
+            NewAccount {
+                username: body.username,
+                role: body.role.unwrap_or(Role::User),
+                permissions: body
+                    .permissions
+                    .unwrap_or_else(|| Permission::DEFAULT.to_vec()),
+                require_two_factor: body.require_two_factor,
+            },
+        )
+        .await?;
+    Ok((StatusCode::CREATED, Json(TemporaryPassword::from(issued))))
+}
+
+/// Get one account. Administrators only.
+#[utoipa::path(
+    get, path = "/api/v1/users/{id}", tag = "users",
+    params(("id" = i64, Path, description = "Account ID")),
+    responses(
+        (status = 200, body = UserDto),
+        (status = 403, description = "Not an administrator", body = ErrorBody),
+        (status = 404, body = ErrorBody),
+    )
+)]
+async fn get_user(
+    State(state): State<AppState>,
+    Extension(user): Extension<User>,
+    ApiPath(id): ApiPath<i64>,
+) -> ApiResult<Json<UserDto>> {
+    Ok(Json(state.auth.get_user(&user, id).await?.into()))
+}
+
+/// Change an account's role, permissions, two-factor requirement, or
+/// whether it is disabled. Takes effect on its next request. Administrators
+/// cannot demote or disable themselves, and one enabled administrator must
+/// remain. Administrators only.
+#[utoipa::path(
+    patch, path = "/api/v1/users/{id}", tag = "users",
+    params(("id" = i64, Path, description = "Account ID")),
+    request_body = UpdateUser,
+    responses(
+        (status = 200, body = UserDto),
+        (status = 403, description = "Not an administrator", body = ErrorBody),
+        (status = 404, body = ErrorBody),
+        (status = 409, description = "Would demote or disable yourself, or leave no administrator", body = ErrorBody),
+    )
+)]
+async fn update_user(
+    State(state): State<AppState>,
+    Extension(user): Extension<User>,
+    ApiPath(id): ApiPath<i64>,
+    ApiJson(body): ApiJson<UpdateUser>,
+) -> ApiResult<Json<UserDto>> {
+    let changes = UserChanges {
+        role: body.role,
+        permissions: body.permissions,
+        require_two_factor: body.require_two_factor,
+        disabled: body.disabled,
+    };
+    Ok(Json(
+        state.auth.update_user(&user, id, changes).await?.into(),
+    ))
+}
+
+/// Delete an account, its sessions and API tokens. Its downloads stay,
+/// without an owner. Administrators only, and not their own account.
+#[utoipa::path(
+    delete, path = "/api/v1/users/{id}", tag = "users",
+    params(("id" = i64, Path, description = "Account ID")),
+    responses(
+        (status = 204, description = "Deleted"),
+        (status = 403, description = "Not an administrator", body = ErrorBody),
+        (status = 404, body = ErrorBody),
+        (status = 409, description = "Your own account, or the last administrator", body = ErrorBody),
+    )
+)]
+async fn delete_user(
+    State(state): State<AppState>,
+    Extension(user): Extension<User>,
+    ApiPath(id): ApiPath<i64>,
+) -> ApiResult<StatusCode> {
+    state.auth.delete_user(&user, id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Give an account a new temporary password, for a forgotten password. Its
+/// sessions end. Administrators only, and not for their own account.
+#[utoipa::path(
+    post, path = "/api/v1/users/{id}/reset-password", tag = "users",
+    params(("id" = i64, Path, description = "Account ID")),
+    responses(
+        (status = 200, body = TemporaryPassword),
+        (status = 403, description = "Not an administrator", body = ErrorBody),
+        (status = 404, body = ErrorBody),
+        (status = 409, description = "Your own account", body = ErrorBody),
+    )
+)]
+async fn reset_user_password(
+    State(state): State<AppState>,
+    Extension(user): Extension<User>,
+    ApiPath(id): ApiPath<i64>,
+) -> ApiResult<Json<TemporaryPassword>> {
+    Ok(Json(
+        state.auth.reset_user_password(&user, id).await?.into(),
+    ))
+}
+
+/// Turn off an account's two-factor authentication, for a lost phone. If it
+/// is required, the next sign-in sets it up again. Administrators only.
+#[utoipa::path(
+    post, path = "/api/v1/users/{id}/reset-two-factor", tag = "users",
+    params(("id" = i64, Path, description = "Account ID")),
+    responses(
+        (status = 200, body = UserDto),
+        (status = 403, description = "Not an administrator", body = ErrorBody),
+        (status = 404, body = ErrorBody),
+        (status = 409, description = "Already off, or your own account", body = ErrorBody),
+    )
+)]
+async fn reset_user_two_factor(
+    State(state): State<AppState>,
+    Extension(user): Extension<User>,
+    ApiPath(id): ApiPath<i64>,
+) -> ApiResult<Json<UserDto>> {
+    Ok(Json(
+        state.auth.reset_user_two_factor(&user, id).await?.into(),
+    ))
 }
 
 /// 1fichier settings. The API key itself is never returned, only a mask.
@@ -844,6 +1203,8 @@ async fn sign_out_onefichier(State(state): State<AppState>) -> ApiResult<Json<On
         title = "Direkt API",
         description = "Submit and manage downloads. Authenticate with an API token \
             (`Authorization: Bearer dkt_...`), created in the web UI under Settings. \
+            A token acts as the account that created it, with its permissions; \
+            a request the account is not allowed to make gets `403 forbidden`. \
             Errors use the body `{\"error\": {\"kind\": ..., \"message\": ...}}`."
     ),
     paths(
@@ -851,6 +1212,8 @@ async fn sign_out_onefichier(State(state): State<AppState>) -> ApiResult<Json<On
         pause_download, resume_download, cancel_download, retry_download, organize_download,
         delete_download, delete_cancelled_downloads, delete_completed_downloads, get_stats,
         list_tokens, create_token, revoke_token,
+        get_me, list_users, create_user, get_user, update_user, delete_user,
+        reset_user_password, reset_user_two_factor,
         get_onefichier, put_onefichier, delete_onefichier,
         sign_in_onefichier, sign_out_onefichier, refresh_onefichier_cdn,
         get_tmdb, put_tmdb, delete_tmdb, get_misc, patch_misc, get_library,
@@ -860,8 +1223,9 @@ async fn sign_out_onefichier(State(state): State<AppState>) -> ApiResult<Json<On
     security(("bearer" = []), ("session" = [])),
     tags(
         (name = "downloads", description = "Download queue"),
-        (name = "tokens", description = "API token management"),
-        (name = "settings", description = "Runtime settings"),
+        (name = "tokens", description = "The account's API tokens (`api_tokens` permission)"),
+        (name = "users", description = "Accounts (administrators only, except `/me`)"),
+        (name = "settings", description = "Runtime settings (`manage_settings` permission)"),
     )
 )]
 pub struct ApiDoc;

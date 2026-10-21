@@ -17,7 +17,7 @@ use uuid::Uuid;
 mod auth;
 mod settings;
 
-pub use auth::{AdminAccount, ApiToken};
+pub use auth::{ApiToken, NewUser, UserChanges, UserRecord};
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
@@ -40,6 +40,8 @@ pub struct NewDownload {
     pub title: Option<String>,
     pub year: Option<u16>,
     pub artwork_id: Option<String>,
+    /// The account adding it.
+    pub owner_id: Option<i64>,
 }
 
 /// Optional data recorded atomically with a transfer state change.
@@ -129,6 +131,11 @@ impl Store {
         Ok(Self { pool })
     }
 
+    #[cfg(test)]
+    pub(crate) fn pool(&self) -> &SqlitePool {
+        &self.pool
+    }
+
     pub async fn ping(&self) -> AppResult<()> {
         sqlx::query("SELECT 1").execute(&self.pool).await?;
         Ok(())
@@ -149,8 +156,8 @@ impl Store {
         let row: DownloadRow = sqlx::query_as(
             "INSERT INTO downloads
                 (id, url, display_url, provider, download_password, filename, media_type,
-                 title, year, artwork_id, state, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)
+                 title, year, artwork_id, owner_id, state, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)
              RETURNING *",
         )
         .bind(id.to_string())
@@ -163,6 +170,7 @@ impl Store {
         .bind(&new.title)
         .bind(new.year)
         .bind(&new.artwork_id)
+        .bind(new.owner_id)
         .bind(ts)
         .bind(ts)
         .fetch_one(&mut *tx)
@@ -180,10 +188,12 @@ impl Store {
         row.map(TryInto::try_into).transpose()
     }
 
-    /// Newest first. An empty `states` slice means all states.
+    /// Newest first. An empty `states` slice means all states; `owner`
+    /// limits the list to one account's downloads.
     pub async fn list_downloads(
         &self,
         states: &[TransferState],
+        owner: Option<i64>,
         limit: i64,
         offset: i64,
     ) -> AppResult<Vec<Download>> {
@@ -194,12 +204,14 @@ impl Store {
         let rows: Vec<DownloadRow> = sqlx::query_as(
             "SELECT * FROM downloads
              WHERE (?1 IS NULL OR state IN (SELECT value FROM json_each(?1)))
+               AND (?4 IS NULL OR owner_id = ?4)
              ORDER BY created_at DESC, rowid DESC
              LIMIT ?2 OFFSET ?3",
         )
         .bind(filter)
         .bind(limit)
         .bind(offset)
+        .bind(owner)
         .fetch_all(&self.pool)
         .await?;
         rows.into_iter().map(TryInto::try_into).collect()
@@ -505,12 +517,19 @@ impl Store {
     }
 
     /// Delete every download in `state` that is not being post-processed, and
-    /// their event history. Returns the deleted ids.
-    pub async fn delete_all_in(&self, state: TransferState) -> AppResult<Vec<Uuid>> {
+    /// their event history; only `owner`'s when given. Returns the deleted ids.
+    pub async fn delete_all_in(
+        &self,
+        state: TransferState,
+        owner: Option<i64>,
+    ) -> AppResult<Vec<Uuid>> {
         let ids: Vec<String> = sqlx::query_scalar(
-            "DELETE FROM downloads WHERE state = ?1 AND post_state != 'processing' RETURNING id",
+            "DELETE FROM downloads
+             WHERE state = ?1 AND post_state != 'processing' AND (?2 IS NULL OR owner_id = ?2)
+             RETURNING id",
         )
         .bind(state.as_str())
+        .bind(owner)
         .fetch_all(&self.pool)
         .await?;
         ids.iter()
@@ -695,6 +714,7 @@ struct DownloadRow {
     artwork_id: Option<String>,
     year: Option<i64>,
     post_target: Option<String>,
+    owner_id: Option<i64>,
     created_at: i64,
     updated_at: i64,
     completed_at: Option<i64>,
@@ -731,6 +751,7 @@ impl TryFrom<DownloadRow> for Download {
             artwork_id: r.artwork_id,
             year: r.year.and_then(|y| u16::try_from(y).ok()),
             post_target: r.post_target,
+            owner_id: r.owner_id,
             created_at: from_millis(r.created_at)?,
             updated_at: from_millis(r.updated_at)?,
             completed_at: r.completed_at.map(from_millis).transpose()?,
@@ -1121,15 +1142,23 @@ mod tests {
             .await
             .unwrap();
 
-        let all = s.list_downloads(&[], 50, 0).await.unwrap();
+        let all = s.list_downloads(&[], None, 50, 0).await.unwrap();
         assert_eq!(all.iter().map(|d| d.id).collect::<Vec<_>>(), [b.id, a.id]);
-        let paused = s.list_downloads(&[Paused], 50, 0).await.unwrap();
+        let paused = s.list_downloads(&[Paused], None, 50, 0).await.unwrap();
         assert_eq!(paused.len(), 1);
         assert_eq!(paused[0].id, a.id);
-        assert_eq!(s.list_downloads(&[], 1, 1).await.unwrap()[0].id, a.id);
-        let both = s.list_downloads(&[Paused, Queued], 50, 0).await.unwrap();
+        assert_eq!(s.list_downloads(&[], None, 1, 1).await.unwrap()[0].id, a.id);
+        let both = s
+            .list_downloads(&[Paused, Queued], None, 50, 0)
+            .await
+            .unwrap();
         assert_eq!(both.len(), 2);
-        assert!(s.list_downloads(&[Failed], 50, 0).await.unwrap().is_empty());
+        assert!(
+            s.list_downloads(&[Failed], None, 50, 0)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -1153,9 +1182,9 @@ mod tests {
         assert!(s.get_download(a.id).await.unwrap().is_none());
         assert!(s.list_events(a.id).await.unwrap().is_empty());
 
-        assert_eq!(s.delete_all_in(Cancelled).await.unwrap(), [b.id]);
-        assert!(s.delete_all_in(Cancelled).await.unwrap().is_empty());
-        let left = s.list_downloads(&[], 50, 0).await.unwrap();
+        assert_eq!(s.delete_all_in(Cancelled, None).await.unwrap(), [b.id]);
+        assert!(s.delete_all_in(Cancelled, None).await.unwrap().is_empty());
+        let left = s.list_downloads(&[], None, 50, 0).await.unwrap();
         assert_eq!(left.iter().map(|d| d.id).collect::<Vec<_>>(), [c.id]);
     }
 

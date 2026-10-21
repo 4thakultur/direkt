@@ -84,6 +84,13 @@ pub trait Provider: Send + Sync {
         false
     }
 
+    /// Whether downloads use the server's own account, API key or credits
+    /// with this host. Accounts need the `premium_providers` permission for
+    /// such links.
+    fn uses_server_account(&self) -> bool {
+        false
+    }
+
     /// Resolve a submitted URL into a downloadable resource. Errors carry a
     /// [`Disposition`](crate::error::Disposition): a provider can signal
     /// temporary restrictions (retry), required user action (block), or

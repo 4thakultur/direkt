@@ -245,6 +245,8 @@ pub struct Download {
     /// move so an interrupted move can be recognized.
     #[serde(skip)]
     pub post_target: Option<String>,
+    /// The account that added it; `None` once that account is deleted.
+    pub owner_id: Option<i64>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,

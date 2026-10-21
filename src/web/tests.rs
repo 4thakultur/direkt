@@ -332,9 +332,7 @@ async fn static_assets() {
     assert_eq!(js.status, StatusCode::OK);
     assert!(js.header("content-type").starts_with("text/javascript"));
     assert!(js.header("cache-control").contains("immutable"));
-    let css = app.get("/static/classic.css", &[]).await;
-    assert!(css.header("content-type").starts_with("text/css"));
-    let css = app.get("/static/steve.css", &[]).await;
+    let css = app.get("/static/style.css", &[]).await;
     assert!(css.header("content-type").starts_with("text/css"));
     let app_js = app.get("/static/app.js", &[]).await;
     assert_eq!(app_js.status, StatusCode::OK);
@@ -2084,41 +2082,45 @@ async fn theme_is_chosen_per_browser() {
     let (app, cookie) = TestApp::with_admin().await;
     let auth = cookie_header(&cookie);
 
-    // Steve by default, on the app and on the login page.
+    // Dark by default, on the app and on the login page.
     let page = app.get("/", &auth).await;
-    assert!(page.body.contains("data-theme=\"steve\""));
-    assert!(page.body.contains("href=\"/static/steve.css\""));
+    assert!(page.body.contains("data-theme=\"dark\""));
+    assert!(
+        page.body
+            .contains("<meta name=\"color-scheme\" content=\"dark\">")
+    );
+    assert!(page.body.contains("href=\"/static/style.css\""));
     assert!(
         app.get("/login", &[])
             .await
             .body
-            .contains("/static/steve.css")
+            .contains("data-theme=\"dark\"")
     );
 
     // Switching answers with the new theme and remembers it in a cookie.
-    let r = app
-        .post_form("/settings/theme", &auth, "theme=classic")
-        .await;
+    let r = app.post_form("/settings/theme", &auth, "theme=light").await;
     assert_eq!(r.status, StatusCode::OK);
-    assert!(r.body.contains("data-theme=\"classic\""));
+    assert!(r.body.contains("data-theme=\"light\""));
     assert!(
         r.body
-            .contains("value=\"classic\" class=\"theme-choice\" aria-pressed=\"true\"")
+            .contains("value=\"light\" class=\"theme-choice\" aria-pressed=\"true\"")
     );
     let set = r.header("set-cookie");
-    assert!(set.starts_with("direkt_theme=classic;"), "{set}");
+    assert!(set.starts_with("direkt_theme=light;"), "{set}");
     assert!(set.contains("HttpOnly"), "{set}");
 
-    let both = format!("{cookie}; direkt_theme=classic");
+    let both = format!("{cookie}; direkt_theme=light");
     for uri in ["/", "/settings"] {
         let page = app.get(uri, &cookie_header(&both)).await;
-        assert!(page.body.contains("href=\"/static/classic.css\""), "{uri}");
-        assert!(!page.body.contains("viewport-fit=cover"), "{uri}");
+        assert!(page.body.contains("data-theme=\"light\""), "{uri}");
+        assert!(
+            page.body
+                .contains("<meta name=\"color-scheme\" content=\"light\">"),
+            "{uri}"
+        );
     }
-    let login = app
-        .get("/login", &[("cookie", "direkt_theme=classic")])
-        .await;
-    assert!(login.body.contains("data-theme=\"classic\""));
+    let login = app.get("/login", &[("cookie", "direkt_theme=light")]).await;
+    assert!(login.body.contains("data-theme=\"light\""));
 
     // An unknown value in the cookie falls back; one in the form is refused.
     let odd = format!("{cookie}; direkt_theme=../evil");
@@ -2126,7 +2128,7 @@ async fn theme_is_chosen_per_browser() {
         app.get("/", &cookie_header(&odd))
             .await
             .body
-            .contains("data-theme=\"steve\"")
+            .contains("data-theme=\"dark\"")
     );
     let r = app.post_form("/settings/theme", &auth, "theme=evil").await;
     assert_eq!(r.status, StatusCode::BAD_REQUEST);
@@ -2134,7 +2136,7 @@ async fn theme_is_chosen_per_browser() {
     assert!(r.headers.get("set-cookie").is_none());
 
     // Changing the theme needs a session.
-    let r = app.post_form("/settings/theme", &[], "theme=classic").await;
+    let r = app.post_form("/settings/theme", &[], "theme=light").await;
     assert_ne!(r.status, StatusCode::OK);
 }
 
@@ -2393,4 +2395,576 @@ async fn skipped_downloads_can_be_organized_again() {
         .await;
     assert_eq!(r.status, StatusCode::OK);
     assert!(r.body.contains("Queued for organizing"));
+}
+
+// ---------------------------------------------------------------------------
+// Accounts and permissions
+// ---------------------------------------------------------------------------
+
+/// What new accounts choose at their first sign-in.
+const USER_PASSWORD: &str = "Tidal-orchard-lamp-42";
+
+fn session_from(r: &Reply) -> String {
+    r.header("set-cookie").split(';').next().unwrap().to_owned()
+}
+
+impl TestApp {
+    /// An administrator creates an account; returns its id and temporary
+    /// password.
+    async fn create_account(&self, admin: &str, body: Value) -> (i64, String) {
+        let r = self
+            .post_json("/api/v1/users", &cookie_header(admin), body)
+            .await;
+        assert_eq!(r.status, StatusCode::CREATED, "{}", r.body);
+        let v = r.json();
+        (
+            v["user"]["id"].as_i64().unwrap(),
+            v["temporary_password"].as_str().unwrap().to_owned(),
+        )
+    }
+
+    async fn log_in(&self, username: &str, password: &str) -> Reply {
+        self.post_form(
+            "/login",
+            &[],
+            &format!("username={username}&password={}", encode(password)),
+        )
+        .await
+    }
+
+    /// First sign-in: the temporary password, then one of their own.
+    /// Returns the session cookie.
+    async fn first_sign_in(&self, username: &str, temporary: &str) -> String {
+        let r = self.log_in(username, temporary).await;
+        assert_eq!(r.status, StatusCode::SEE_OTHER, "{}", r.body);
+        let r = self
+            .post_form(
+                "/welcome/password",
+                &cookie_header(&session_from(&r)),
+                &format!(
+                    "new_password={0}&new_password_confirm={0}",
+                    encode(USER_PASSWORD)
+                ),
+            )
+            .await;
+        assert_eq!(r.status, StatusCode::SEE_OTHER, "{}", r.body);
+        assert_eq!(r.header("location"), "/welcome");
+        session_from(&r)
+    }
+
+    /// A signed-in account with `permissions`: its id and session cookie.
+    async fn user_with(&self, admin: &str, name: &str, permissions: &[&str]) -> (i64, String) {
+        let (id, temporary) = self
+            .create_account(
+                admin,
+                serde_json::json!({"username": name, "permissions": permissions}),
+            )
+            .await;
+        (id, self.first_sign_in(name, &temporary).await)
+    }
+
+    /// Submit a direct link through the API; returns the download id.
+    async fn submit_as(&self, cookie: &str, url: &str) -> String {
+        let r = self
+            .post_json(
+                "/api/v1/downloads",
+                &cookie_header(cookie),
+                serde_json::json!({ "url": url }),
+            )
+            .await;
+        assert_eq!(r.status, StatusCode::CREATED, "{}", r.body);
+        r.json()["id"].as_str().unwrap().to_owned()
+    }
+}
+
+#[tokio::test]
+async fn first_sign_in_replaces_the_temporary_password() {
+    let (app, admin) = TestApp::with_admin().await;
+    let (_, temporary) = app
+        .create_account(&admin, serde_json::json!({"username": "alice"}))
+        .await;
+    let users = app.get("/api/v1/users", &cookie_header(&admin)).await;
+    assert!(!users.body.contains(&temporary), "shown once");
+    let users = users.json();
+    let alice = &users.as_array().unwrap()[1];
+    assert_eq!(alice["must_change_password"], true);
+    assert_eq!(
+        alice["permissions"],
+        serde_json::json!(["submit_downloads", "premium_providers"])
+    );
+
+    let r = app.log_in("alice", &temporary).await;
+    assert_eq!(r.status, StatusCode::SEE_OTHER);
+    let cookie = session_from(&r);
+    let auth = cookie_header(&cookie);
+
+    // Everything leads to the first-sign-in page until it is done.
+    let r = app.get("/", &auth).await;
+    assert_eq!(r.status, StatusCode::SEE_OTHER);
+    assert_eq!(r.header("location"), "/welcome");
+    let r = app
+        .get(
+            "/ui/dashboard",
+            &[("cookie", &cookie), ("hx-request", "true")],
+        )
+        .await;
+    assert_eq!(r.header("hx-redirect"), "/welcome");
+    let r = app.get("/api/v1/downloads", &auth).await;
+    assert_eq!(r.status, StatusCode::FORBIDDEN);
+    assert!(
+        r.json()["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("temporary password")
+    );
+    let page = app.get("/welcome", &auth).await;
+    assert!(page.body.contains("Welcome, alice"), "{}", page.body);
+
+    let choose = |password: &str, confirm: &str| {
+        format!(
+            "new_password={}&new_password_confirm={}",
+            encode(password),
+            encode(confirm)
+        )
+    };
+    let r = app
+        .post_form("/welcome/password", &auth, &choose("short", "short"))
+        .await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST);
+    assert!(r.body.contains("at least 12"), "{}", r.body);
+    let r = app
+        .post_form("/welcome/password", &auth, &choose(&temporary, &temporary))
+        .await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST);
+    assert!(r.body.contains("not the temporary one"), "{}", r.body);
+    let r = app
+        .post_form(
+            "/welcome/password",
+            &auth,
+            &choose(USER_PASSWORD, "Something-else-42"),
+        )
+        .await;
+    assert!(r.body.contains("do not match"));
+
+    let r = app
+        .post_form(
+            "/welcome/password",
+            &auth,
+            &choose(USER_PASSWORD, USER_PASSWORD),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::SEE_OTHER);
+    let new_cookie = session_from(&r);
+    assert_eq!(
+        app.get("/api/v1/me", &auth).await.status,
+        StatusCode::UNAUTHORIZED,
+        "the session that used the temporary password ended"
+    );
+    let new_auth = cookie_header(&new_cookie);
+    let r = app.get("/welcome", &new_auth).await;
+    assert_eq!(r.header("location"), "/", "nothing left to do");
+    let me = app.get("/api/v1/me", &new_auth).await.json();
+    assert_eq!(me["username"], "alice");
+    assert_eq!(me["role"], "user");
+    assert_eq!(me["must_change_password"], false);
+    assert_eq!(app.get("/", &new_auth).await.status, StatusCode::OK);
+
+    assert_eq!(
+        app.log_in("alice", &temporary).await.status,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        app.log_in("alice", USER_PASSWORD).await.status,
+        StatusCode::SEE_OTHER
+    );
+}
+
+#[tokio::test]
+async fn required_two_factor_is_set_up_at_first_sign_in() {
+    let (app, admin) = TestApp::with_admin().await;
+    let (_, temporary) = app
+        .create_account(
+            &admin,
+            serde_json::json!({"username": "bob", "require_two_factor": true}),
+        )
+        .await;
+    let cookie = app.first_sign_in("bob", &temporary).await;
+    let auth = cookie_header(&cookie);
+    assert_eq!(app.get("/", &auth).await.header("location"), "/welcome");
+
+    let page = app.get("/welcome", &auth).await;
+    assert!(page.body.contains("Set up two-factor authentication"));
+    let key = |body: &str| {
+        body.split("class=\"totp-key\">")
+            .nth(1)
+            .and_then(|s| s.split('<').next())
+            .unwrap()
+            .replace(' ', "")
+    };
+    let secret = key(&page.body);
+    assert_eq!(
+        key(&app.get("/welcome", &auth).await.body),
+        secret,
+        "a reload keeps the secret"
+    );
+
+    let r = app
+        .post_form("/welcome/two-factor", &auth, "code=000000")
+        .await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST);
+    let r = app
+        .post_form(
+            "/welcome/two-factor",
+            &auth,
+            &format!("code={}", app_code(&secret, 0)),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    assert!(r.body.contains("Save your recovery codes"));
+    assert_eq!(app.get("/", &auth).await.status, StatusCode::OK);
+
+    let settings = app.get("/settings", &auth).await;
+    assert!(settings.body.contains("can't be turned off"));
+    assert!(!settings.body.contains("/settings/two-factor/disable"));
+
+    let r = app.log_in("bob", USER_PASSWORD).await;
+    assert_eq!(r.header("location"), "/login/code", "a code is now needed");
+}
+
+#[tokio::test]
+async fn permissions_are_enforced() {
+    let (app, admin) = TestApp::with_admin().await;
+    let (_, viewer) = app.user_with(&admin, "viewer", &[]).await;
+    let auth = cookie_header(&viewer);
+
+    // No downloads.
+    let r = app
+        .post_json(
+            "/api/v1/downloads",
+            &auth,
+            serde_json::json!({"url": "https://example.com/file.bin"}),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::FORBIDDEN);
+    assert_eq!(r.error_kind(), "forbidden");
+    let r = app
+        .post_form(
+            "/ui/downloads/preview",
+            &auth,
+            "url=https%3A%2F%2Fexample.com%2Ffile.bin",
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::FORBIDDEN);
+    let page = app.get("/", &auth).await;
+    assert!(page.body.contains("can't add downloads"));
+    assert!(!page.body.contains("name=\"url\""));
+
+    // No server settings, tokens or accounts.
+    for path in ["/api/v1/settings/misc", "/api/v1/tokens", "/api/v1/users"] {
+        let r = app.get(path, &auth).await;
+        assert_eq!(r.status, StatusCode::FORBIDDEN, "{path}");
+        assert_eq!(r.error_kind(), "forbidden");
+    }
+    for (path, form) in [
+        ("/settings/misc", "speed_unit=binary&max_concurrent=3"),
+        ("/settings/tokens", "name=x"),
+        ("/settings/tmdb/remove", ""),
+        ("/users", "username=eve"),
+    ] {
+        let r = app.post_form(path, &auth, form).await;
+        assert_eq!(r.status, StatusCode::FORBIDDEN, "{path}");
+    }
+    assert_eq!(app.get("/users", &auth).await.status, StatusCode::FORBIDDEN);
+    let settings = app.get("/settings", &auth).await;
+    for hidden in [
+        r#"id="onefichier""#,
+        r#"id="misc""#,
+        r#"id="tokens""#,
+        "href=\"/users\"",
+    ] {
+        assert!(!settings.body.contains(hidden), "{hidden}");
+    }
+    for shown in [r#"id="password""#, r#"id="two-factor""#] {
+        assert!(settings.body.contains(shown), "{shown}");
+    }
+    assert_eq!(
+        app.get("/api/v1/me", &auth).await.json()["permissions"],
+        serde_json::json!([])
+    );
+
+    // Direct links only, without premium hosts.
+    let (_, direct) = app.user_with(&admin, "direct", &["submit_downloads"]).await;
+    let r = app
+        .post_json(
+            "/api/v1/downloads",
+            &cookie_header(&direct),
+            serde_json::json!({"url": "https://1fichier.com/?abcde12345"}),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::FORBIDDEN, "{}", r.body);
+    assert!(r.body.contains("premium"));
+    app.submit_as(&direct, "https://example.com/file.bin").await;
+
+    // Administrators see the accounts link.
+    let settings = app.get("/settings", &cookie_header(&admin)).await;
+    assert!(settings.body.contains("href=\"/users\""));
+}
+
+#[tokio::test]
+async fn downloads_belong_to_their_owner() {
+    let (app, admin) = TestApp::with_admin().await;
+    let a = app.submit_as(&admin, "https://example.com/a.bin").await;
+    let (alice_id, alice) = app.user_with(&admin, "alice", &["submit_downloads"]).await;
+    let b = app.submit_as(&alice, "https://example.com/b.bin").await;
+    let alice_auth = cookie_header(&alice);
+
+    let list = app.get("/api/v1/downloads", &alice_auth).await.json();
+    let items = list["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["id"], b.as_str());
+    assert_eq!(items[0]["owner"], "alice");
+    for path in [
+        format!("/api/v1/downloads/{a}"),
+        format!("/api/v1/downloads/{a}/events"),
+    ] {
+        assert_eq!(
+            app.get(&path, &alice_auth).await.status,
+            StatusCode::NOT_FOUND
+        );
+    }
+    let r = app
+        .post_json(
+            &format!("/api/v1/downloads/{a}/pause"),
+            &alice_auth,
+            Value::Null,
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::NOT_FOUND, "existence is not revealed");
+    let r = app
+        .post_json(
+            &format!("/api/v1/downloads/{b}/pause"),
+            &alice_auth,
+            Value::Null,
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::OK);
+
+    let list = app
+        .get("/api/v1/downloads", &cookie_header(&admin))
+        .await
+        .json();
+    let owners: Vec<_> = list["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d["owner"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(owners, ["alice", "admin"]);
+
+    // Seeing everyone's is not managing them.
+    let (watcher_id, watcher) = app
+        .user_with(&admin, "watcher", &["view_all_downloads"])
+        .await;
+    let watcher_auth = cookie_header(&watcher);
+    let list = app.get("/api/v1/downloads", &watcher_auth).await.json();
+    assert_eq!(list["items"].as_array().unwrap().len(), 2);
+    let r = app
+        .post_json(
+            &format!("/api/v1/downloads/{b}/resume"),
+            &watcher_auth,
+            Value::Null,
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::FORBIDDEN);
+    let dash = app.get("/ui/dashboard", &watcher_auth).await;
+    assert!(dash.body.contains("by alice"), "{}", dash.body);
+    assert!(!dash.body.contains(&format!("/ui/downloads/{b}/resume")));
+    let dash = app.get("/ui/dashboard", &alice_auth).await;
+    assert!(dash.body.contains(&format!("/ui/downloads/{b}/resume")));
+
+    let r = app
+        .patch_json(
+            &format!("/api/v1/users/{watcher_id}"),
+            &admin,
+            serde_json::json!({"permissions": ["manage_all_downloads"]}),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    assert_eq!(
+        r.json()["permissions"],
+        serde_json::json!(["view_all_downloads", "manage_all_downloads"])
+    );
+    let r = app
+        .post_json(
+            &format!("/api/v1/downloads/{b}/resume"),
+            &watcher_auth,
+            Value::Null,
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "takes effect at once");
+
+    // Deleting files needs its own permission.
+    let r = app
+        .post_json(
+            &format!("/api/v1/downloads/{b}/cancel"),
+            &alice_auth,
+            Value::Null,
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::OK);
+    let r = app
+        .send(
+            HttpRequest::delete(format!("/api/v1/downloads/{b}?delete_file=true"))
+                .header("cookie", &alice)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::FORBIDDEN);
+
+    // Clearing a list only clears the account's own.
+    let r = app
+        .post_json(
+            &format!("/api/v1/downloads/{a}/cancel"),
+            &cookie_header(&admin),
+            Value::Null,
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::OK);
+    let r = app
+        .send(
+            HttpRequest::delete("/api/v1/downloads/cancelled")
+                .header("cookie", &alice)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(r.json()["deleted"], 1);
+    assert_eq!(
+        app.get(&format!("/api/v1/downloads/{a}"), &cookie_header(&admin))
+            .await
+            .status,
+        StatusCode::OK
+    );
+
+    // A deleted account's downloads stay, without an owner.
+    let c = app.submit_as(&alice, "https://example.com/c.bin").await;
+    let r = app
+        .send(
+            HttpRequest::delete(format!("/api/v1/users/{alice_id}"))
+                .header("cookie", &admin)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::NO_CONTENT);
+    let d = app
+        .get(&format!("/api/v1/downloads/{c}"), &cookie_header(&admin))
+        .await
+        .json();
+    assert_eq!(d["owner_id"], Value::Null);
+    assert_eq!(
+        app.get("/api/v1/me", &alice_auth).await.status,
+        StatusCode::UNAUTHORIZED
+    );
+}
+
+#[tokio::test]
+async fn accounts_are_managed_through_the_web_ui() {
+    let (app, admin) = TestApp::with_admin().await;
+    let auth = cookie_header(&admin);
+    let r = app
+        .post_form(
+            "/users",
+            &auth,
+            "username=carol&role=user&perm_submit_downloads=on&require_two_factor=on",
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    assert!(r.body.contains("Temporary Password for carol"));
+    let temporary = |body: &str| {
+        body.split("<code id=\"issued-password\">")
+            .nth(1)
+            .and_then(|s| s.split('<').next())
+            .unwrap()
+            .to_owned()
+    };
+    let first = temporary(&r.body);
+    let list = app.get("/users", &auth).await;
+    assert!(list.body.contains("Waiting for first sign-in"));
+    assert!(!list.body.contains(&first), "shown once");
+    let r = app
+        .post_form("/users", &auth, "username=CAROL&role=user")
+        .await;
+    assert!(r.body.contains("already taken"), "{}", r.body);
+    assert!(
+        r.body.contains("value=\"CAROL\""),
+        "the form keeps its input"
+    );
+
+    let users = app.get("/api/v1/users", &auth).await.json();
+    let carol = &users.as_array().unwrap()[1];
+    assert_eq!(carol["require_two_factor"], true);
+    let id = carol["id"].as_i64().unwrap();
+
+    let r = app
+        .post_form(
+            &format!("/users/{id}"),
+            &auth,
+            "role=user&perm_view_all_downloads=on",
+        )
+        .await;
+    assert!(r.body.contains("Saved"), "{}", r.body);
+    let carol = app.get(&format!("/api/v1/users/{id}"), &auth).await.json();
+    assert_eq!(
+        carol["permissions"],
+        serde_json::json!(["view_all_downloads"])
+    );
+    assert_eq!(carol["require_two_factor"], false);
+
+    let r = app
+        .post_form(&format!("/users/{id}/reset-password"), &auth, "")
+        .await;
+    assert!(r.body.contains("Temporary Password for carol"));
+    let second = temporary(&r.body);
+    assert_eq!(
+        app.log_in("carol", &first).await.status,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        app.log_in("carol", &second).await.status,
+        StatusCode::SEE_OTHER
+    );
+
+    let r = app
+        .post_form(&format!("/users/{id}/status"), &auth, "disabled=true")
+        .await;
+    assert!(r.body.contains("Account disabled"));
+    let r = app.log_in("carol", &second).await;
+    assert!(r.body.contains("disabled"), "{}", r.body);
+
+    // Administrators can't lock themselves out.
+    let r = app
+        .post_form("/users/1/status", &auth, "disabled=true")
+        .await;
+    assert_eq!(r.status, StatusCode::CONFLICT);
+    let r = app
+        .patch_json(
+            "/api/v1/users/1",
+            &admin,
+            serde_json::json!({"role": "user"}),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::CONFLICT);
+
+    let dialog = app.get(&format!("/users/{id}/delete"), &auth).await;
+    assert!(dialog.body.contains("Delete account?"));
+    let r = app
+        .post_form(&format!("/users/{id}/delete"), &auth, "")
+        .await;
+    assert_eq!(r.header("hx-redirect"), "/users");
+    assert_eq!(
+        app.get(&format!("/api/v1/users/{id}"), &auth).await.status,
+        StatusCode::NOT_FOUND
+    );
 }

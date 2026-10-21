@@ -1,0 +1,99 @@
+{% extends "app.html" %}
+{% block title %}{{ account.username }} · Direkt{% endblock %}
+{% block nav_users %} active{% endblock %}
+{% block content %}
+<p class="back"><a href="/users"><svg class="icon" aria-hidden="true"><use href="#i-back"/></svg><span>Users</span></a></p>
+{% if let Some(message) = message %}<p class="flash ok">{{ message }}</p>{% endif %}
+{% if let Some(error) = error %}<p class="flash error">{{ error }}</p>{% endif %}
+
+<header class="profile">
+  <span class="avatar avatar-lg tint-{{ account.avatar.tint }}" aria-hidden="true">{{ account.avatar.initial }}</span>
+  <h1 class="profile-name">{{ account.username }}</h1>
+  <p class="profile-sub">{{ account.role }}{% if account.is_me %} · You{% endif %}</p>
+  <span class="pill {{ account.status_class }}">{{ account.status }}</span>
+</header>
+
+{% if let Some(issued) = issued %}{% include "_issued.html" %}{% endif %}
+
+<div class="list">
+  <div class="list-item"><span class="item-label">Two-Factor Authentication</span><span class="item-value">{{ account.two_factor }}</span></div>
+  <div class="list-item"><span class="item-label">Last Sign-In</span><span class="item-value">{{ account.last_login }}</span></div>
+  <div class="list-item"><span class="item-label">Created</span><span class="item-value">{{ account.created }}</span></div>
+</div>
+
+<form method="post" action="/users/{{ account.id }}" class="account-form">
+  <h2 class="list-label">Access</h2>
+  <div class="list">
+    <div class="list-item">
+      <span class="item-label" id="role-label">Role</span>
+      <span class="segmented" role="radiogroup" aria-labelledby="role-label">
+        <label><input type="radio" name="role" value="user"{% if !account.admin %} checked{% endif %}{% if account.is_me %} disabled{% endif %}><span>User</span></label>
+        <label><input type="radio" name="role" value="admin"{% if account.admin %} checked{% endif %}{% if account.is_me %} disabled{% endif %}><span>Administrator</span></label>
+      </span>
+    </div>
+  </div>
+  <p class="list-foot when-admin">Administrators can do everything, including managing accounts.{% if account.is_me %} Another administrator can change your role.{% endif %}</p>
+
+  <div class="perm-group">
+    <h3 class="list-label">Permissions</h3>
+    <div class="list">
+      {% for p in account.permissions %}
+      <label class="list-item switch-item">
+        <span class="item-body">
+          <span class="item-title">{{ p.label }}</span>
+          <span class="item-sub">{{ p.description }}</span>
+        </span>
+        <input type="checkbox" class="switch" name="perm_{{ p.value }}" value="on"{% if p.checked %} checked{% endif %}>
+      </label>
+      {% endfor %}
+    </div>
+    <p class="list-foot">Everyone sees and manages the downloads they added themselves.</p>
+  </div>
+
+  <h3 class="list-label">Security</h3>
+  <div class="list">
+    <label class="list-item switch-item">
+      <span class="item-body">
+        <span class="item-title">Require Two-Factor Authentication</span>
+        <span class="item-sub">Without it set up, the next page asks for it before anything else.</span>
+      </span>
+      <input type="checkbox" class="switch" name="require_two_factor" value="on"{% if account.require_two_factor %} checked{% endif %}>
+    </label>
+  </div>
+
+  <div class="form-actions">
+    <button type="submit" class="primary">Save Changes</button>
+  </div>
+</form>
+
+{% if !account.is_me %}
+<h2 class="list-label">Sign-In</h2>
+<div class="list">
+  <form method="post" action="/users/{{ account.id }}/reset-password">
+    <button type="submit" class="list-item action-item">Issue Temporary Password</button>
+  </form>
+  {% if account.two_factor_enabled %}
+  <form method="post" action="/users/{{ account.id }}/reset-two-factor">
+    <button type="submit" class="list-item action-item">Reset Two-Factor Authentication</button>
+  </form>
+  {% endif %}
+</div>
+<p class="list-foot">A temporary password signs {{ account.username }} out; API tokens keep working. Resetting two-factor authentication is for a lost phone{% if account.require_two_factor %}: the next sign-in sets it up again{% endif %}.</p>
+
+<div class="list">
+  <form method="post" action="/users/{{ account.id }}/status">
+    {% if account.disabled %}
+    <input type="hidden" name="disabled" value="false">
+    <button type="submit" class="list-item action-item">Enable Account</button>
+    {% else %}
+    <input type="hidden" name="disabled" value="true">
+    <button type="submit" class="list-item action-item danger">Disable Account</button>
+    {% endif %}
+  </form>
+  <div>
+    <button type="button" class="list-item action-item danger" hx-get="/users/{{ account.id }}/delete" hx-target="#modal">Delete Account</button>
+  </div>
+</div>
+<p class="list-foot">A disabled account is signed out and its API tokens stop working until it is enabled again. Deleting it keeps its downloads and files.</p>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,10 @@
+<section class="issued" aria-labelledby="issued-title">
+  <span class="issued-icon tint-blue" aria-hidden="true"><svg class="icon"><use href="#i-key"/></svg></span>
+  <h2 id="issued-title" class="issued-title">Temporary Password for {{ issued.username }}</h2>
+  <p class="issued-text">Give {{ issued.username }} this temporary password, in person or over a channel you trust. It's shown only now, and their first sign-in replaces it.</p>
+  <div class="issued-secret">
+    <code id="issued-password">{{ issued.password }}</code>
+    <button type="button" class="copy-btn" data-copy="issued-password" aria-label="Copy the temporary password"><svg class="icon" aria-hidden="true"><use href="#i-copy"/></svg><span data-copy-label>Copy</span></button>
+  </div>
+  <p class="issued-foot">Works until {{ issued.expires }}.</p>
+</section>

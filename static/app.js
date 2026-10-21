@@ -119,3 +119,54 @@
   });
   update();
 })();
+
+// The account menu in the top bar is a <details>: close it on a click
+// elsewhere or Escape, as a menu would.
+(() => {
+  "use strict";
+
+  const menu = document.querySelector(".account-menu");
+  if (!menu) return;
+  document.addEventListener("click", (event) => {
+    if (menu.open && !menu.contains(event.target)) menu.open = false;
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && menu.open) {
+      menu.open = false;
+      menu.querySelector("summary").focus();
+    }
+  });
+})();
+
+// Copy buttons (`data-copy` names the element whose text to copy). The
+// clipboard API needs HTTPS or localhost; elsewhere the text is selected
+// so it can be copied by hand.
+(() => {
+  "use strict";
+
+  function select(element) {
+    const range = document.createRange();
+    range.selectNodeContents(element);
+    const selection = getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+  }
+
+  document.addEventListener("click", async (event) => {
+    const button = event.target.closest("[data-copy]");
+    if (!button) return;
+    const source = document.getElementById(button.dataset.copy);
+    if (!source) return;
+    const label = button.querySelector("[data-copy-label]");
+    try {
+      await navigator.clipboard.writeText(source.textContent.trim());
+      if (label) label.textContent = "Copied";
+    } catch {
+      select(source);
+      if (label) label.textContent = "Selected";
+    }
+    setTimeout(() => {
+      if (label) label.textContent = "Copy";
+    }, 2000);
+  });
+})();

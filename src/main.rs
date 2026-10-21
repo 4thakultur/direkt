@@ -13,22 +13,31 @@ use direkt::web::{self, AppState};
 use std::path::Path;
 use tracing_subscriber::EnvFilter;
 
-const USAGE: &str = "usage: direkt [serve | reset-admin | reset-2fa | healthcheck]
+const USAGE: &str = "usage: direkt [serve | reset-password <username> | reset-2fa <username>
+              | reset-admin | healthcheck]
 
-  serve        run the server (default)
-  reset-admin  delete the administrator account, all sessions, and all API
-               tokens; the next start offers first-run setup again
-  reset-2fa    turn off two-factor authentication, for a lost authenticator
-               app; the account, sessions and API tokens stay
-  healthcheck  exit 0 if the server running with this configuration answers
-               its health endpoint, 1 otherwise (for container health checks)
+  serve                      run the server (default)
+  reset-password <username>  give the account a new temporary password,
+                             printed here, and sign it out; the next sign-in
+                             must replace it
+  reset-2fa <username>       turn off the account's two-factor
+                             authentication, for a lost authenticator app;
+                             its password, sessions and API tokens stay
+  reset-admin                delete every administrator account with its
+                             sessions and API tokens; the next start offers
+                             first-run setup again. Other accounts and all
+                             downloads stay
+  healthcheck                exit 0 if the server running with this
+                             configuration answers its health endpoint, 1
+                             otherwise (for container health checks)
 
 Configuration is read from $DIREKT_CONFIG (default ./direkt.toml).";
 
 enum Command {
     Serve,
+    ResetPassword(String),
+    ResetTwoFactor(String),
     ResetAdmin,
-    ResetTwoFactor,
     HealthCheck,
 }
 
@@ -43,7 +52,12 @@ async fn main() -> anyhow::Result<()> {
     {
         [] | ["serve"] => Command::Serve,
         ["reset-admin"] => Command::ResetAdmin,
-        ["reset-2fa"] => Command::ResetTwoFactor,
+        ["reset-password", username] => Command::ResetPassword((*username).to_owned()),
+        ["reset-2fa", username] => Command::ResetTwoFactor((*username).to_owned()),
+        ["reset-password" | "reset-2fa"] => {
+            eprintln!("direkt: name the account, e.g. `direkt {} alice`", args[0]);
+            std::process::exit(2);
+        }
         ["healthcheck"] => Command::HealthCheck,
         ["-h" | "--help" | "help"] => {
             println!("{USAGE}");
@@ -68,7 +82,8 @@ async fn main() -> anyhow::Result<()> {
     match command {
         Command::Serve => serve(config, &config_path).await,
         Command::ResetAdmin => reset_admin(&config).await,
-        Command::ResetTwoFactor => reset_two_factor(&config).await,
+        Command::ResetPassword(username) => reset_password(&config, &username).await,
+        Command::ResetTwoFactor(username) => reset_two_factor(&config, &username).await,
         Command::HealthCheck => web::server::probe_health(config.server.listen)
             .await
             .map_err(|e| anyhow::anyhow!("health check failed: {e}")),
@@ -90,33 +105,81 @@ async fn open_store(config: &Config) -> anyhow::Result<Store> {
 
 async fn reset_admin(config: &Config) -> anyhow::Result<()> {
     let store = open_store(config).await?;
-    store
-        .reset_admin()
+    let deleted = store
+        .delete_admins()
         .await
-        .map_err(|e| anyhow::anyhow!("resetting administrator: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("deleting administrator accounts: {e}"))?;
     store.close().await;
+    tracing::warn!(
+        deleted,
+        "administrator accounts deleted from the command line"
+    );
     println!(
-        "Administrator account, sessions, and API tokens removed. \
-         Restart Direkt and open the web UI to run setup again."
+        "{deleted} administrator account(s) deleted, with their sessions and API tokens. \
+         Restart Direkt and open the web UI to create a new administrator. Other accounts \
+         and all downloads were kept."
     );
     Ok(())
 }
 
-async fn reset_two_factor(config: &Config) -> anyhow::Result<()> {
+/// Find an account by name, for the recovery commands.
+async fn account(store: &Store, username: &str) -> anyhow::Result<direkt::users::User> {
+    store
+        .user_by_name(username)
+        .await
+        .map_err(|e| anyhow::anyhow!("looking up the account: {e}"))?
+        .map(|r| r.user)
+        .ok_or_else(|| anyhow::anyhow!("no account is named {username:?}"))
+}
+
+async fn reset_password(config: &Config, username: &str) -> anyhow::Result<()> {
     let store = open_store(config).await?;
+    let user = account(&store, username).await?;
+    let issued = direkt::auth::accounts::issue_temporary_password(&store, user)
+        .await
+        .map_err(|e| anyhow::anyhow!("setting a temporary password: {e}"))?;
+    store.close().await;
+    tracing::warn!(user = %issued.user.username, "temporary password issued from the command line");
+    println!(
+        "Temporary password for {}: {}\n\
+         It works until {} and must be replaced at the next sign-in. The account \
+         was signed out.{}",
+        issued.user.username,
+        issued.password,
+        issued.expires_at.format("%Y-%m-%d %H:%M UTC"),
+        if issued.user.disabled {
+            " It is disabled: an administrator must enable it before it can sign in."
+        } else {
+            ""
+        }
+    );
+    Ok(())
+}
+
+async fn reset_two_factor(config: &Config, username: &str) -> anyhow::Result<()> {
+    let store = open_store(config).await?;
+    let user = account(&store, username).await?;
     let was_on = store
-        .disable_two_factor()
+        .disable_two_factor(user.id)
         .await
         .map_err(|e| anyhow::anyhow!("turning off two-factor authentication: {e}"))?;
     store.close().await;
     if was_on {
-        tracing::warn!("two-factor authentication turned off from the command line");
+        tracing::warn!(user = %user.username, "two-factor authentication turned off from the command line");
         println!(
-            "Two-factor authentication is off. Sign in with the password, then \
-             set it up again under Settings."
+            "Two-factor authentication is off for {}. Sign in with the password{}.",
+            user.username,
+            if user.require_two_factor {
+                "; it is required for this account, so the sign-in sets it up again"
+            } else {
+                ", then set it up again under Settings"
+            }
         );
     } else {
-        println!("Two-factor authentication was already off.");
+        println!(
+            "Two-factor authentication was already off for {}.",
+            user.username
+        );
     }
     Ok(())
 }
@@ -146,7 +209,7 @@ async fn serve(config: Config, config_path: &Path) -> anyhow::Result<()> {
     if let Some(path) = auth.pending_setup_token_path() {
         tracing::warn!(
             setup_token_file = %path.display(),
-            "no administrator account yet: open the web UI and enter the setup token from this file"
+            "no administrator account: open the web UI and enter the setup token from this file"
         );
     }
 

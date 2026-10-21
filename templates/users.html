@@ -1,0 +1,75 @@
+{% extends "app.html" %}
+{% block title %}Users · Direkt{% endblock %}
+{% block nav_users %} active{% endblock %}
+{% block heading %}<h1 class="page-title">Users</h1>{% endblock %}
+{% block content %}
+{% if let Some(error) = error %}<p class="flash error">{{ error }}</p>{% endif %}
+{% if let Some(issued) = issued %}{% include "_issued.html" %}{% endif %}
+
+<h2 class="list-label">Accounts</h2>
+<ul class="list">
+  {% for a in accounts %}
+  <li>
+    <a class="list-item link-item" href="/users/{{ a.id }}">
+      <span class="avatar tint-{{ a.avatar.tint }}" aria-hidden="true">{{ a.avatar.initial }}</span>
+      <span class="item-body">
+        <span class="item-title">{{ a.username }}{% if a.is_me %} <span class="item-tag">You</span>{% endif %}</span>
+        <span class="item-sub">{{ a.role }} · Last sign-in {{ a.last_login }}</span>
+      </span>
+      {% if a.status != "Active" %}<span class="pill {{ a.status_class }}">{{ a.status }}</span>{% endif %}
+      <svg class="icon item-chevron" aria-hidden="true"><use href="#i-chevron"/></svg>
+    </a>
+  </li>
+  {% endfor %}
+</ul>
+
+<form method="post" action="/users" class="account-form" id="new-account">
+  <h2 class="list-label">New Account</h2>
+  <div class="list">
+    <label class="list-item field-item">
+      <span class="item-label">Username</span>
+      <input name="username" value="{{ username }}" placeholder="Required" autocomplete="off" maxlength="64" required spellcheck="false" autocapitalize="off">
+    </label>
+    <div class="list-item">
+      <span class="item-label" id="role-label">Role</span>
+      <span class="segmented" role="radiogroup" aria-labelledby="role-label">
+        <label><input type="radio" name="role" value="user"{% if !admin_role %} checked{% endif %}><span>User</span></label>
+        <label><input type="radio" name="role" value="admin"{% if admin_role %} checked{% endif %}><span>Administrator</span></label>
+      </span>
+    </div>
+  </div>
+  <p class="list-foot when-admin">Administrators can do everything, including managing accounts.</p>
+
+  <div class="perm-group">
+    <h3 class="list-label">Permissions</h3>
+    <div class="list">
+      {% for p in permissions %}
+      <label class="list-item switch-item">
+        <span class="item-body">
+          <span class="item-title">{{ p.label }}</span>
+          <span class="item-sub">{{ p.description }}</span>
+        </span>
+        <input type="checkbox" class="switch" name="perm_{{ p.value }}" value="on"{% if p.checked %} checked{% endif %}>
+      </label>
+      {% endfor %}
+    </div>
+    <p class="list-foot">Everyone sees and manages the downloads they added themselves.</p>
+  </div>
+
+  <h3 class="list-label">Security</h3>
+  <div class="list">
+    <label class="list-item switch-item">
+      <span class="item-body">
+        <span class="item-title">Require Two-Factor Authentication</span>
+        <span class="item-sub">Set up right after the first sign-in. The user can't turn it off.</span>
+      </span>
+      <input type="checkbox" class="switch" name="require_two_factor" value="on"{% if require_two_factor %} checked{% endif %}>
+    </label>
+  </div>
+  <p class="list-foot">Direkt makes a temporary password for the new account, valid for 72 hours.</p>
+
+  <div class="form-actions">
+    <button type="submit" class="primary">Create Account</button>
+  </div>
+</form>
+{% endblock %}

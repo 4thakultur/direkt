@@ -4,6 +4,7 @@
   <dl class="details">
     <dt>URL</dt><dd class="break">{{ d.display_url }}</dd>
     <dt>Provider</dt><dd>{{ d.provider }}</dd>
+    {% if let Some(owner) = d.owner %}<dt>Added by</dt><dd>{{ owner }}</dd>{% endif %}
     {% if let Some(t) = d.media_label %}<dt>Type</dt><dd>{{ t }}</dd>{% endif %}
     {% if let Some(title) = d.title %}<dt>Title</dt><dd>{{ title }}</dd>{% endif %}
     {% if let Some(path) = d.file_path %}<dt>File</dt><dd class="break">{{ path }}</dd>{% endif %}

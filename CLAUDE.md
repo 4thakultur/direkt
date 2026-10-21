@@ -179,7 +179,7 @@ Keep the following features separate from MVP implementation requirements:
 - Sonarr, Radarr, and other media automation integrations.
 - Archive extraction and password-protected archive management.
 - Advanced scheduling and bandwidth shaping.
-- Multi-user accounts, roles, and complex permission systems.
+- Permission systems beyond the two roles (administrator, user) and the fixed set of per-user permissions, which the project owner scheduled and which are implemented (see `docs/security.md`): no groups, custom roles, quotas, or self-registration.
 - A dynamic third-party plugin marketplace.
 - Distributed workers or multi-instance coordination.
 - Automatic cleanup policies that delete completed downloads.

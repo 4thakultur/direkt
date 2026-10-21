@@ -6,7 +6,7 @@
       <div class="hero-title">
         <p class="eyebrow">{{ d.state_label }}{% if let Some(percent) = d.percent %} · {{ percent }}%{% endif %}{% if let Some(post) = d.post_label %} · {{ post }}{% endif %}</p>
         <h2 class="hero-name"><a href="/downloads/{{ d.id }}" title="{{ d.display_url }}">{{ d.name }}</a></h2>
-        <p class="muted small">{{ d.provider }}{% if let Some(t) = d.media_label %} · {{ t }}{% endif %}</p>
+        <p class="muted small">{{ d.provider }}{% if let Some(t) = d.media_label %} · {{ t }}{% endif %}{% if let Some(owner) = d.owner %} · by {{ owner }}{% endif %}</p>
       </div>
       {% include "_actions.html" %}
     </div>

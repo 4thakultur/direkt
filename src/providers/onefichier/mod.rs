@@ -194,6 +194,10 @@ impl Provider for OneFichierProvider {
         true
     }
 
+    fn uses_server_account(&self) -> bool {
+        true
+    }
+
     fn resolve<'a>(
         &'a self,
         request: ResolveRequest<'a>,

@@ -7,6 +7,20 @@
 {% if let Some(message) = message %}<p class="flash ok">{{ message }}</p>{% endif %}
 {% if let Some(error) = error %}<p class="flash error">{{ error }}</p>{% endif %}
 
+{% if me.admin %}
+<a class="panel panel-link" href="/users">
+  <span class="panel-row">
+    <span class="panel-icon tint-blue" aria-hidden="true"><svg class="icon"><use href="#i-people"/></svg></span>
+    <span class="panel-title">
+      <span class="panel-name">Users</span>
+      <span class="panel-desc">Accounts, roles and permissions</span>
+    </span>
+    <svg class="icon chevron" aria-hidden="true"><use href="#i-chevron"/></svg>
+  </span>
+</a>
+{% endif %}
+
+{% if can_manage_settings %}
 <details class="panel" id="onefichier"{% if open == "onefichier" || onefichier.account.attention.is_some() %} open{% endif %}>
   <summary>
     <span class="panel-icon tint-orange" aria-hidden="true"><svg class="icon"><use href="#i-cloud"/></svg></span>
@@ -187,20 +201,24 @@
   </div>
 </details>
 
+{% endif %}
+
+{% if can_tokens %}
 <details class="panel" id="tokens"{% if open == "tokens" %} open{% endif %}>
   <summary>
     <span class="panel-icon tint-gray" aria-hidden="true"><svg class="icon"><use href="#i-key"/></svg></span>
     <span class="panel-title">
       <span class="panel-name">API tokens</span>
-      <span class="panel-desc">Access for scripts and integrations</span>
+      <span class="panel-desc">Access for your scripts and integrations</span>
     </span>
     <span class="pill{% if !tokens.is_empty() %} ok{% endif %}">{% if tokens.is_empty() %}None{% else %}{{ tokens.len() }} active{% endif %}</span>
     <svg class="icon chevron" aria-hidden="true"><use href="#i-chevron"/></svg>
   </summary>
   <div class="panel-body stack">
     <p class="muted">
-      Tokens let scripts and integrations use the <a href="/settings/api">API</a>.
-      Send one as <code>Authorization: Bearer &lt;token&gt;</code>.
+      Tokens let scripts and integrations use the <a href="/settings/api">API</a>
+      as you, with your permissions. Send one as
+      <code>Authorization: Bearer &lt;token&gt;</code>.
     </p>
     {% if let Some(secret) = new_token %}
     <div class="secret">
@@ -234,13 +252,16 @@
     </form>
   </div>
 </details>
+{% else %}
+<p class="muted small">The <a href="/settings/api">API reference</a> describes what scripts can do. Ask an administrator for API token access.</p>
+{% endif %}
 
 <details class="panel" id="password"{% if open == "password" %} open{% endif %}>
   <summary>
     <span class="panel-icon tint-blue" aria-hidden="true"><svg class="icon"><use href="#i-lock"/></svg></span>
     <span class="panel-title">
       <span class="panel-name">Change password</span>
-      <span class="panel-desc">Administrator login for the web UI</span>
+      <span class="panel-desc">Your sign-in password, {{ me.username }}</span>
     </span>
     <svg class="icon chevron" aria-hidden="true"><use href="#i-chevron"/></svg>
   </summary>
@@ -249,12 +270,13 @@
       <label>Current password
         <input name="current_password" type="password" autocomplete="current-password" required>
       </label>
-      <label>New password <span class="muted">(at least 10 characters)</span>
-        <input name="new_password" type="password" autocomplete="new-password" minlength="10" required>
+      <label>New password
+        <input name="new_password" type="password" autocomplete="new-password" minlength="12" required>
       </label>
       <label>Confirm new password
-        <input name="new_password_confirm" type="password" autocomplete="new-password" minlength="10" required>
+        <input name="new_password_confirm" type="password" autocomplete="new-password" minlength="12" required>
       </label>
+      <p class="muted small">{{ password_rules }}</p>
       <button type="submit">Change password</button>
     </form>
   </div>
@@ -266,7 +288,7 @@
       <span class="panel-name">Two-factor authentication</span>
       <span class="panel-desc">A code from an authenticator app at every new sign-in</span>
     </span>
-    {% if two_factor.enabled %}<span class="pill{% if two_factor.recovery_codes_left > 0 %} ok{% else %} warn{% endif %}">On</span>
+    {% if two_factor.enabled %}<span class="pill{% if two_factor.recovery_codes_left > 0 %} ok{% else %} warn{% endif %}">On{% if two_factor.required %} · required{% endif %}</span>
     {% else if two_factor.enrollment.is_some() %}<span class="pill warn">Setting up</span>
     {% else %}<span class="pill">Off</span>{% endif %}
     <svg class="icon chevron" aria-hidden="true"><use href="#i-chevron"/></svg>
@@ -301,6 +323,9 @@
       <button type="submit">Make new codes</button>
     </form>
 
+    {% if two_factor.required %}
+    <p class="note">An administrator requires two-factor authentication for your account, so it can't be turned off.</p>
+    {% else %}
     <h3>Turn off</h3>
     <form method="post" action="/settings/two-factor/disable" class="stack">
       <label>Password
@@ -311,6 +336,7 @@
       </label>
       <button type="submit" class="danger">Turn off two-factor authentication</button>
     </form>
+    {% endif %}
 
     {% else if let Some(e) = two_factor.enrollment %}
     <ol class="steps">
@@ -338,7 +364,7 @@
 
     {% else %}
     <p class="muted">
-      Protect the administrator account with a second step: after your
+      Protect your account with a second step: after your
       password, a new sign-in also asks for a 6-digit code from an
       authenticator app on your phone, such as Google Authenticator, Microsoft
       Authenticator, Aegis or 1Password. Browsers that are already signed in
@@ -351,8 +377,9 @@
     </form>
     {% endif %}
     <p class="muted small">
-      Lost your phone and your recovery codes? Run <code>direkt reset-2fa</code>
-      on the server to turn two-factor authentication off.
+      Lost your phone and your recovery codes? Ask an administrator to reset
+      two-factor authentication for your account{% if me.admin %}, or run
+      <code>direkt reset-2fa {{ me.username }}</code> on the server{% endif %}.
     </p>
   </div>
 </details>
@@ -377,11 +404,11 @@
       {% endfor %}
     </form>
     <p class="muted small">
-      Kept in a cookie, so each browser and device has its own choice. Steve
-      follows the system's light or dark mode.
+      Kept in a cookie, so each browser and device has its own choice.
     </p>
   </div>
 </details>
+{% if can_manage_settings %}
 <details class="panel" id="misc"{% if open == "misc" %} open{% endif %}>
   <summary>
     <span class="panel-icon tint-green" aria-hidden="true"><svg class="icon"><use href="#i-sliders"/></svg></span>
@@ -432,6 +459,7 @@
     </form>
   </div>
 </details>
+{% endif %}
 <form method="post" action="/logout" class="logout-row">
   <button type="submit">Log out</button>
 </form>

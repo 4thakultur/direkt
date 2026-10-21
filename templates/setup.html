@@ -5,7 +5,7 @@
   <div class="app-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 4v11m-5-5 5 5 5-5M5 20h14" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
   <h1 class="brand-large">Direkt</h1>
   <form method="post" action="/setup" class="card stack">
-    <h2>Create the administrator account</h2>
+    <h2>Create the first administrator account</h2>
     <p class="muted">
       To prove you control this server, enter the one-time setup token from
       <code>{{ token_path }}</code>. With Docker Compose:
@@ -18,12 +18,13 @@
     <label>Username
       <input name="username" value="{{ username }}" autocomplete="username" required>
     </label>
-    <label>Password <span class="muted">(at least 10 characters)</span>
-      <input name="password" type="password" autocomplete="new-password" minlength="10" required>
+    <label>Password
+      <input name="password" type="password" autocomplete="new-password" minlength="12" required>
     </label>
     <label>Confirm password
-      <input name="password_confirm" type="password" autocomplete="new-password" minlength="10" required>
+      <input name="password_confirm" type="password" autocomplete="new-password" minlength="12" required>
     </label>
+    <p class="muted small">{{ password_rules }}</p>
     <button type="submit" class="primary">Create account</button>
   </form>
 </main>

@@ -678,6 +678,7 @@ mod tests {
             year: None,
             artwork_id: None,
             post_target: None,
+            owner_id: None,
         };
         assert_eq!(
             if_range_validator(&dl).as_deref(),

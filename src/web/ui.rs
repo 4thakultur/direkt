@@ -6,10 +6,11 @@
 //! them.
 
 use super::{
-    AppState, PENDING_LOGIN_COOKIE, SESSION_COOKIE, clear_pending_login_cookie,
-    clear_session_cookie, client_ip, pending_login_cookie, read_cookie, session_cookie,
+    AppState, PENDING_LOGIN_COOKIE, SESSION_COOKIE, admin_only, clear_pending_login_cookie,
+    clear_session_cookie, client_ip, pending_login_cookie, read_cookie, require, session_cookie,
 };
-use crate::auth::{LoginOutcome, TwoFactorStatus};
+use crate::auth::accounts::{IssuedPassword, NewAccount};
+use crate::auth::{Enrollment, LoginOutcome, PASSWORD_RULES, TwoFactorStatus};
 use crate::domain::{Download, DownloadEvent, MediaType, PostState, TransferState};
 use crate::engine::{HISTORY_SECS, LiveSnapshot, ThroughputSnapshot};
 use crate::error::{AppError, ErrorKind};
@@ -18,22 +19,23 @@ use crate::settings::{
     FolderSetting, LibrarySettings, MiscSettings, MiscUpdate, OneFichierSettings, SECRET_MASK,
     SpeedUnit, TmdbSettings, parse_speed_limit,
 };
-use crate::store::ApiToken;
+use crate::store::{ApiToken, UserChanges};
+use crate::users::{Permission, Role, User};
 use askama::Template;
-use axum::Router;
 use axum::extract::{Form, FromRequestParts, Path, State};
 use axum::http::request::Parts;
 use axum::http::{Extensions, HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
+use axum::{Extension, Router, middleware};
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::fmt::Write as _;
 use uuid::Uuid;
 
 const HTMX_JS: &str = include_str!("../../static/htmx-2.0.4.min.js");
-const CLASSIC_CSS: &str = include_str!("../../static/classic.css");
-const STEVE_CSS: &str = include_str!("../../static/steve.css");
+const STYLE_CSS: &str = include_str!("../../static/style.css");
 const APP_JS: &str = include_str!("../../static/app.js");
 const FAVICON_SVG: &str = include_str!("../../static/favicon.svg");
 const FAVICON_ICO: &[u8] = include_bytes!("../../static/favicon.ico");
@@ -49,8 +51,7 @@ pub fn public_routes() -> Router<AppState> {
         .route("/login/code", get(login_code_page).post(login_code_submit))
         .route("/setup", get(setup_page).post(setup_submit))
         .route("/static/htmx-2.0.4.min.js", get(htmx_js))
-        .route("/static/classic.css", get(|| css(CLASSIC_CSS)))
-        .route("/static/steve.css", get(|| css(STEVE_CSS)))
+        .route("/static/style.css", get(css))
         .route("/static/app.js", get(app_js))
         .route(
             "/static/favicon.svg",
@@ -65,13 +66,45 @@ pub fn public_routes() -> Router<AppState> {
 }
 
 pub fn protected_routes() -> Router<AppState> {
+    let tokens = Router::new()
+        .route("/settings/tokens", post(create_token))
+        .route("/settings/tokens/{id}/revoke", post(revoke_token))
+        .route_layer(middleware::from_fn_with_state(
+            Permission::ApiTokens,
+            require,
+        ));
+    let server_settings = Router::new()
+        .route("/settings/tmdb", post(save_tmdb))
+        .route("/settings/tmdb/remove", post(remove_tmdb))
+        .route("/settings/misc", post(save_misc))
+        .route("/settings/onefichier", post(save_onefichier))
+        .route("/settings/onefichier/remove", post(remove_onefichier))
+        .route("/settings/onefichier/sign-in", post(sign_in_onefichier))
+        .route("/settings/onefichier/sign-out", post(sign_out_onefichier))
+        .route(
+            "/settings/onefichier/cdn/refresh",
+            post(refresh_onefichier_cdn),
+        )
+        .route_layer(middleware::from_fn_with_state(
+            Permission::ManageSettings,
+            require,
+        ));
+    let users = Router::new()
+        .route("/users", get(users_page).post(create_user))
+        .route("/users/{id}", get(user_page).post(update_user))
+        .route("/users/{id}/status", post(set_user_status))
+        .route("/users/{id}/reset-password", post(reset_user_password))
+        .route("/users/{id}/reset-two-factor", post(reset_user_two_factor))
+        .route(
+            "/users/{id}/delete",
+            get(confirm_delete_user).post(delete_user),
+        )
+        .route_layer(middleware::from_fn(admin_only));
     Router::new()
         .route("/", get(downloads_page))
         .route("/downloads/{id}", get(download_page))
         .route("/settings", get(settings_page))
         .route("/settings/api", get(api_page))
-        .route("/settings/tokens", post(create_token))
-        .route("/settings/tokens/{id}/revoke", post(revoke_token))
         .route("/settings/password", post(change_password))
         .route("/settings/two-factor/setup", post(start_two_factor))
         .route("/settings/two-factor/enable", post(enable_two_factor))
@@ -82,18 +115,10 @@ pub fn protected_routes() -> Router<AppState> {
             post(new_recovery_codes),
         )
         .route("/settings/theme", post(change_theme))
-        .route("/settings/tmdb", post(save_tmdb))
-        .route("/settings/tmdb/remove", post(remove_tmdb))
-        .route("/settings/misc", post(save_misc))
         .route("/artwork/{id}", get(artwork_image))
-        .route("/settings/onefichier", post(save_onefichier))
-        .route("/settings/onefichier/remove", post(remove_onefichier))
-        .route("/settings/onefichier/sign-in", post(sign_in_onefichier))
-        .route("/settings/onefichier/sign-out", post(sign_out_onefichier))
-        .route(
-            "/settings/onefichier/cdn/refresh",
-            post(refresh_onefichier_cdn),
-        )
+        .route("/welcome", get(welcome_page))
+        .route("/welcome/password", post(welcome_password))
+        .route("/welcome/two-factor", post(welcome_two_factor))
         .route("/logout", post(logout))
         .route("/ui/dashboard", get(dashboard_fragment))
         .route("/ui/submit", get(submit_fragment))
@@ -103,17 +128,65 @@ pub fn protected_routes() -> Router<AppState> {
         .route("/ui/downloads/{id}/detail", get(detail_fragment))
         .route(
             "/ui/cancelled/delete",
-            get(|| confirm_delete_all(TransferState::Cancelled))
-                .post(|state| delete_all(state, TransferState::Cancelled)),
+            get(|| confirm_delete_all(TransferState::Cancelled)).post(
+                |state: State<AppState>, user: Extension<User>| {
+                    delete_all(state, user, TransferState::Cancelled)
+                },
+            ),
         )
         .route(
             "/ui/completed/delete",
-            get(|| confirm_delete_all(TransferState::Completed))
-                .post(|state| delete_all(state, TransferState::Completed)),
+            get(|| confirm_delete_all(TransferState::Completed)).post(
+                |state: State<AppState>, user: Extension<User>| {
+                    delete_all(state, user, TransferState::Completed)
+                },
+            ),
         )
         .route("/ui/downloads/{id}/{action}", post(download_action))
         .route("/ui/downloads/{id}/{action}/confirm", get(confirm_action))
         .route("/ui/modal/close", get(close_modal))
+        .merge(tokens)
+        .merge(server_settings)
+        .merge(users)
+}
+
+/// The signed-in account, for the page header's account menu.
+#[derive(Default)]
+struct MeView {
+    username: String,
+    admin: bool,
+    role: &'static str,
+    avatar: Avatar,
+}
+
+impl From<&User> for MeView {
+    fn from(u: &User) -> Self {
+        Self {
+            username: u.username.clone(),
+            admin: u.is_admin(),
+            role: u.role.label(),
+            avatar: Avatar::new(u.id, &u.username),
+        }
+    }
+}
+
+/// A round avatar: the name's first letter on a colour picked from the
+/// account id, so it stays the same across renames.
+#[derive(Default)]
+struct Avatar {
+    initial: String,
+    tint: &'static str,
+}
+
+impl Avatar {
+    const TINTS: [&'static str; 7] = ["blue", "purple", "orange", "green", "teal", "indigo", "red"];
+
+    fn new(id: i64, name: &str) -> Self {
+        Self {
+            initial: name.chars().take(1).flat_map(char::to_uppercase).collect(),
+            tint: Self::TINTS[id.rem_euclid(Self::TINTS.len() as i64) as usize],
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -140,40 +213,46 @@ fn render_status(status: StatusCode, template: &impl Template) -> Response {
 
 /// The look of the web UI. Chosen per browser on the settings page and kept in
 /// a cookie, so a phone and a desktop can differ. Every full page renders with
-/// it; fragments only use classes both stylesheets style.
+/// it. Both share one stylesheet, which switches on the `data-theme` attribute.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) enum Theme {
-    /// "Beyond": black and red, flat.
-    Classic,
-    /// Light and dark, after Apple's iOS, macOS and apple.com.
+    Light,
     #[default]
-    Steve,
+    Dark,
 }
 
 const THEME_COOKIE: &str = "direkt_theme";
 
 impl Theme {
-    const ALL: [Theme; 2] = [Theme::Steve, Theme::Classic];
+    const ALL: [Theme; 2] = [Theme::Light, Theme::Dark];
 
-    /// The cookie value, `data-theme` attribute and stylesheet name.
+    /// The cookie value and `data-theme` attribute.
     fn id(self) -> &'static str {
         match self {
-            Theme::Classic => "classic",
-            Theme::Steve => "steve",
+            Theme::Light => "light",
+            Theme::Dark => "dark",
         }
     }
 
     fn label(self) -> &'static str {
         match self {
-            Theme::Classic => "Beyond",
-            Theme::Steve => "Steve",
+            Theme::Light => "Light",
+            Theme::Dark => "Dark",
         }
     }
 
     fn description(self) -> &'static str {
         match self {
-            Theme::Classic => "Black and red, flat and dense.",
-            Theme::Steve => "Light and dark, after iOS and macOS.",
+            Theme::Light => "Light surfaces, after iOS and macOS.",
+            Theme::Dark => "Dark surfaces, after iOS and macOS.",
+        }
+    }
+
+    /// The browser chrome colour, matching the top bar.
+    fn chrome_color(self) -> &'static str {
+        match self {
+            Theme::Light => "#f5f5f7",
+            Theme::Dark => "#000000",
         }
     }
 
@@ -311,6 +390,8 @@ struct DownloadView {
     title: Option<String>,
     /// When it finished, for the completed list.
     finished: Option<String>,
+    /// Who added it, when that is someone else.
+    owner: Option<String>,
 }
 
 /// The file extension in capitals if it looks like one, else `FILE`.
@@ -334,16 +415,38 @@ fn url_file_name(display_url: &str) -> Option<String> {
     (!name.trim().is_empty()).then(|| name.into_owned())
 }
 
+/// Who is looking at a download, and the names of its owners.
+struct Viewer<'a> {
+    user: &'a User,
+    owners: &'a HashMap<i64, String>,
+}
+
 impl DownloadView {
-    fn new(d: Download, live: Option<LiveSnapshot>, unit: SpeedUnit) -> Self {
+    fn new(d: Download, live: Option<LiveSnapshot>, unit: SpeedUnit, viewer: &Viewer) -> Self {
         use TransferState::*;
-        let deletable_completed = d.state == Completed && d.post_state != PostState::Processing;
+        let manage = viewer.user.can_manage(&d);
+        let deletable_completed =
+            manage && d.state == Completed && d.post_state != PostState::Processing;
         // An organized file is in the media library, which Direkt never
         // deletes from.
-        let can_delete_file =
-            deletable_completed && d.file_path.is_some() && d.post_state != PostState::Completed;
-        let can_organize =
-            d.state == Completed && matches!(d.post_state, PostState::Failed | PostState::Skipped);
+        let can_delete_file = deletable_completed
+            && viewer.user.can(Permission::DeleteFiles)
+            && d.file_path.is_some()
+            && d.post_state != PostState::Completed;
+        let can_organize = manage
+            && d.state == Completed
+            && matches!(d.post_state, PostState::Failed | PostState::Skipped);
+        let owner = match d.owner_id {
+            Some(id) if id == viewer.user.id => None,
+            Some(id) => Some(
+                viewer
+                    .owners
+                    .get(&id)
+                    .cloned()
+                    .unwrap_or_else(|| "another account".into()),
+            ),
+            None => Some("a deleted account".into()),
+        };
         let downloaded = live
             .map(|l| l.downloaded_bytes)
             .unwrap_or(u64::try_from(d.downloaded_bytes).unwrap_or(0));
@@ -383,6 +486,7 @@ impl DownloadView {
             .or_else(|| url_file_name(&d.display_url))
             .unwrap_or_else(|| d.display_url.clone());
         Self {
+            owner,
             artwork: d.artwork_id,
             media_label: d.media_type.map(MediaType::label),
             title: d.title,
@@ -406,11 +510,12 @@ impl DownloadView {
             created: fmt_time(d.created_at),
             updated: fmt_time(d.updated_at),
             completed: d.completed_at.map(fmt_time),
-            can_pause: matches!(d.state, Queued | Downloading | Retrying),
-            can_resume: d.state == Paused,
-            can_retry: matches!(d.state, Failed | Blocked | Cancelled),
-            can_cancel: matches!(d.state, Queued | Downloading | Retrying | Paused | Blocked),
-            can_delete: d.state == Cancelled || deletable_completed,
+            can_pause: manage && matches!(d.state, Queued | Downloading | Retrying),
+            can_resume: manage && d.state == Paused,
+            can_retry: manage && matches!(d.state, Failed | Blocked | Cancelled),
+            can_cancel: manage
+                && matches!(d.state, Queued | Downloading | Retrying | Paused | Blocked),
+            can_delete: (manage && d.state == Cancelled) || deletable_completed,
             can_delete_file,
             can_organize,
         }
@@ -466,13 +571,13 @@ async fn htmx_js() -> impl IntoResponse {
     )
 }
 
-async fn css(stylesheet: &'static str) -> impl IntoResponse {
+async fn css() -> impl IntoResponse {
     (
         [
             (header::CONTENT_TYPE, "text/css; charset=utf-8"),
             (header::CACHE_CONTROL, "no-cache"),
         ],
-        stylesheet,
+        STYLE_CSS,
     )
 }
 
@@ -650,6 +755,7 @@ struct SetupPage {
     error: Option<String>,
     token_path: String,
     username: String,
+    password_rules: &'static str,
 }
 
 #[derive(Deserialize)]
@@ -676,6 +782,7 @@ async fn setup_page(State(state): State<AppState>, theme: Theme) -> Response {
             error: None,
             token_path: setup_token_path(&state),
             username: String::new(),
+            password_rules: PASSWORD_RULES,
         }),
     }
 }
@@ -716,6 +823,7 @@ async fn setup_submit(
                 error: Some(e.message),
                 token_path: setup_token_path(&state),
                 username: form.username,
+                password_rules: PASSWORD_RULES,
             },
         ),
     }
@@ -820,8 +928,10 @@ struct ClearAction {
 #[template(path = "downloads.html")]
 struct DownloadsPage {
     theme: Theme,
+    me: MeView,
     dash: Dashboard,
     submit: SubmitForm,
+    can_submit: bool,
 }
 
 #[derive(Template)]
@@ -911,19 +1021,29 @@ impl From<Preview> for PreviewView {
     }
 }
 
-async fn load_dashboard(state: &AppState) -> Dashboard {
+async fn load_dashboard(state: &AppState, user: &User) -> Dashboard {
     use TransferState::*;
     let service = &state.downloads;
-    let (unfinished, completed, cancelled) = tokio::join!(
+    let (unfinished, completed, cancelled, owners) = tokio::join!(
         service.list(
+            user,
             &[Queued, Downloading, Retrying, Paused, Blocked, Failed],
             QUEUE_LIMIT,
             0
         ),
-        service.list(&[Completed], HISTORY_LIMIT, 0),
-        service.list(&[Cancelled], HISTORY_LIMIT, 0),
+        service.list(user, &[Completed], HISTORY_LIMIT, 0),
+        service.list(user, &[Cancelled], HISTORY_LIMIT, 0),
+        super::api::owner_names(state, user),
     );
     let mut error = None;
+    let owners = owners.unwrap_or_else(|e| {
+        error = Some(e.message);
+        HashMap::new()
+    });
+    let viewer = Viewer {
+        user,
+        owners: &owners,
+    };
     let mut take = |result: Result<Vec<Download>, AppError>| match result {
         Ok(list) => list,
         Err(e) => {
@@ -941,7 +1061,7 @@ async fn load_dashboard(state: &AppState) -> Dashboard {
     let misc = state.settings.misc();
     let view = |d: Download| {
         let live = service.live(d.id);
-        DownloadView::new(d, live, misc.speed_unit)
+        DownloadView::new(d, live, misc.speed_unit, &viewer)
     };
     let mut downloading = Vec::new();
     let mut up_next = Vec::new();
@@ -976,12 +1096,13 @@ async fn load_dashboard(state: &AppState) -> Dashboard {
     .into_iter()
     .filter(|(_, rows, _)| !rows.is_empty())
     .map(|(title, rows, truncated)| Group {
+        // Only offered when it would remove something the account manages.
         clear: match title {
-            "Cancelled" => Some(ClearAction {
+            "Cancelled" if rows.iter().any(|r| r.can_delete) => Some(ClearAction {
                 url: "/ui/cancelled/delete",
                 label: "Delete all",
             }),
-            "Completed" => Some(ClearAction {
+            "Completed" if rows.iter().any(|r| r.can_delete) => Some(ClearAction {
                 url: "/ui/completed/delete",
                 label: "Clear list",
             }),
@@ -1001,16 +1122,25 @@ async fn load_dashboard(state: &AppState) -> Dashboard {
     }
 }
 
-async fn downloads_page(State(state): State<AppState>, theme: Theme) -> Response {
+async fn downloads_page(
+    State(state): State<AppState>,
+    Extension(user): Extension<User>,
+    theme: Theme,
+) -> Response {
     render(&DownloadsPage {
         theme,
-        dash: load_dashboard(&state).await,
+        me: MeView::from(&user),
+        dash: load_dashboard(&state, &user).await,
         submit: SubmitForm::default(),
+        can_submit: user.can(Permission::SubmitDownloads),
     })
 }
 
-async fn dashboard_fragment(State(state): State<AppState>) -> Response {
-    render(&load_dashboard(&state).await)
+async fn dashboard_fragment(
+    State(state): State<AppState>,
+    Extension(user): Extension<User>,
+) -> Response {
+    render(&load_dashboard(&state, &user).await)
 }
 
 #[derive(Deserialize)]
@@ -1034,15 +1164,23 @@ async fn submit_fragment() -> Response {
 
 /// Download clicked: look the link up and show the confirmation menu, or
 /// start it right away when confirmation is turned off.
-async fn preview_download(State(state): State<AppState>, Form(body): Form<SubmitBody>) -> Response {
+async fn preview_download(
+    State(state): State<AppState>,
+    Extension(user): Extension<User>,
+    Form(body): Form<SubmitBody>,
+) -> Response {
     let password = body.password.as_deref().filter(|p| !p.is_empty());
     if !state.settings.misc().confirm_downloads {
-        return match state.downloads.submit_detected(&body.url, password).await {
+        return match state
+            .downloads
+            .submit_detected(&user, &body.url, password)
+            .await
+        {
             Ok(_) => download_started(),
             Err(e) => submit_error(e, body.url),
         };
     }
-    match state.downloads.preview(&body.url, password).await {
+    match state.downloads.preview(&user, &body.url, password).await {
         Ok(preview) => render(&SubmitForm {
             value: body.url,
             preview: Some(preview.into()),
@@ -1071,11 +1209,12 @@ fn parse_media_type(value: &str) -> Result<MediaType, AppError> {
 /// The type was changed on the confirmation menu: look it up again.
 async fn retype_preview(
     State(state): State<AppState>,
+    Extension(user): Extension<User>,
     Path(id): Path<Uuid>,
     Form(body): Form<ConfirmBody>,
 ) -> Response {
     let result = match parse_media_type(&body.media_type) {
-        Ok(t) => state.downloads.retype(id, t).await,
+        Ok(t) => state.downloads.retype(&user, id, t).await,
         Err(e) => Err(e),
     };
     match result {
@@ -1091,13 +1230,14 @@ async fn retype_preview(
 /// Start download clicked on the confirmation menu.
 async fn confirm_download(
     State(state): State<AppState>,
+    Extension(user): Extension<User>,
     Form(body): Form<ConfirmBody>,
 ) -> Response {
     let result = match parse_media_type(&body.media_type) {
         Ok(t) => {
             state
                 .downloads
-                .confirm(body.preview_id, Some(t), body.password.as_deref())
+                .confirm(&user, body.preview_id, Some(t), body.password.as_deref())
                 .await
         }
         Err(e) => Err(e),
@@ -1166,9 +1306,10 @@ async fn close_modal() -> Response {
 
 async fn confirm_action(
     State(state): State<AppState>,
+    Extension(user): Extension<User>,
     Path((id, action)): Path<(Uuid, String)>,
 ) -> Response {
-    let d = match state.downloads.get(id).await {
+    let d = match state.downloads.get(&user, id).await {
         Ok(d) => d,
         Err(e) => {
             return render_status(
@@ -1253,20 +1394,31 @@ async fn confirm_delete_all(which: TransferState) -> Response {
 
 async fn download_action(
     State(state): State<AppState>,
+    Extension(user): Extension<User>,
     Path((id, action)): Path<(Uuid, String)>,
 ) -> Response {
     let service = &state.downloads;
+    let user = &user;
     let result = match action.as_str() {
-        "pause" => service.pause(id).await.map(|_| "Paused"),
-        "resume" => service.resume(id).await.map(|_| "Resumed"),
-        "retry" => service.retry(id, None).await.map(|_| "Queued for retry"),
-        "cancel" => service.cancel(id).await.map(|_| "Cancelled"),
+        "pause" => service.pause(user, id).await.map(|_| "Paused"),
+        "resume" => service.resume(user, id).await.map(|_| "Resumed"),
+        "retry" => service
+            .retry(user, id, None)
+            .await
+            .map(|_| "Queued for retry"),
+        "cancel" => service.cancel(user, id).await.map(|_| "Cancelled"),
         "delete" => service
-            .delete(id, false)
+            .delete(user, id, false)
             .await
             .map(|()| "Removed from the list"),
-        "delete-file" => service.delete(id, true).await.map(|()| "File deleted"),
-        "organize" => service.organize(id).await.map(|_| "Queued for organizing"),
+        "delete-file" => service
+            .delete(user, id, true)
+            .await
+            .map(|()| "File deleted"),
+        "organize" => service
+            .organize(user, id)
+            .await
+            .map(|_| "Queued for organizing"),
         _ => Err(AppError::not_found("unknown action")),
     };
     match result {
@@ -1284,8 +1436,12 @@ async fn download_action(
     }
 }
 
-async fn delete_all(State(state): State<AppState>, which: TransferState) -> Response {
-    let (status, flash) = match state.downloads.delete_all(which).await {
+async fn delete_all(
+    State(state): State<AppState>,
+    Extension(user): Extension<User>,
+    which: TransferState,
+) -> Response {
+    let (status, flash) = match state.downloads.delete_all(&user, which).await {
         Ok(n) => (
             StatusCode::OK,
             ActionResult {
@@ -1312,6 +1468,7 @@ async fn delete_all(State(state): State<AppState>, which: TransferState) -> Resp
 #[template(path = "download.html")]
 struct DownloadPage {
     theme: Theme,
+    me: MeView,
     d: DownloadView,
     events: Vec<EventView>,
 }
@@ -1325,12 +1482,18 @@ struct DetailFragment {
 
 async fn load_detail(
     state: &AppState,
+    user: &User,
     id: Uuid,
 ) -> Result<(DownloadView, Vec<EventView>), AppError> {
-    let download = state.downloads.get(id).await?;
-    let events = state.downloads.events(id).await?;
+    let download = state.downloads.get(user, id).await?;
+    let events = state.downloads.events(user, id).await?;
     let live = state.downloads.live(id);
-    let mut view = DownloadView::new(download, live, state.settings.misc().speed_unit);
+    let owners = super::api::owner_names(state, user).await?;
+    let viewer = Viewer {
+        user,
+        owners: &owners,
+    };
+    let mut view = DownloadView::new(download, live, state.settings.misc().speed_unit, &viewer);
     view.can_delete = false;
     view.can_delete_file = false;
     Ok((
@@ -1341,17 +1504,27 @@ async fn load_detail(
 
 async fn download_page(
     State(state): State<AppState>,
+    Extension(user): Extension<User>,
     theme: Theme,
     Path(id): Path<Uuid>,
 ) -> Response {
-    match load_detail(&state, id).await {
-        Ok((d, events)) => render(&DownloadPage { theme, d, events }),
+    match load_detail(&state, &user, id).await {
+        Ok((d, events)) => render(&DownloadPage {
+            theme,
+            me: MeView::from(&user),
+            d,
+            events,
+        }),
         Err(e) => (status_for(&e), e.message).into_response(),
     }
 }
 
-async fn detail_fragment(State(state): State<AppState>, Path(id): Path<Uuid>) -> Response {
-    match load_detail(&state, id).await {
+async fn detail_fragment(
+    State(state): State<AppState>,
+    Extension(user): Extension<User>,
+    Path(id): Path<Uuid>,
+) -> Response {
+    match load_detail(&state, &user, id).await {
         Ok((d, events)) => render(&DetailFragment { d, events }),
         Err(e) => render_status(
             status_for(&e),
@@ -1392,6 +1565,12 @@ impl From<ApiToken> for TokenView {
 #[template(path = "settings.html")]
 struct SettingsPage {
     theme: Theme,
+    me: MeView,
+    /// Show the server settings: 1fichier, artwork, library, misc.
+    can_manage_settings: bool,
+    /// Show the API tokens section.
+    can_tokens: bool,
+    password_rules: &'static str,
     onefichier: OneFichierSettings,
     tmdb: TmdbSettings,
     library: LibraryView,
@@ -1419,43 +1598,66 @@ const SECTION_TWO_FACTOR: &str = "two-factor";
 const SECTION_APPEARANCE: &str = "appearance";
 const SECTION_MISC: &str = "misc";
 
-async fn settings_with(state: &AppState, theme: Theme, mut page: SettingsPage) -> SettingsPage {
+async fn settings_with(
+    state: &AppState,
+    theme: Theme,
+    user: &User,
+    mut page: SettingsPage,
+) -> SettingsPage {
     page.theme = theme;
-    page.onefichier = state.settings.onefichier();
-    page.tmdb = state.settings.tmdb();
-    page.library = LibraryView::from(state.settings.library());
-    page.misc = MiscView::from(&state.settings.misc());
-    page.cdn = page.onefichier.cdn.as_ref().map(CdnDisplay::from);
-    page.has_credits = page
-        .onefichier
-        .cdn
-        .as_ref()
-        .is_some_and(|c| c.balance.is_some() && c.in_use != Some(false));
-    match state.auth.list_api_tokens().await {
-        Ok(tokens) => page.tokens = tokens.into_iter().map(TokenView::from).collect(),
-        Err(e) => page.error = page.error.or(Some(e.message)),
+    page.me = MeView::from(user);
+    page.password_rules = PASSWORD_RULES;
+    page.can_manage_settings = user.can(Permission::ManageSettings);
+    page.can_tokens = user.can(Permission::ApiTokens);
+    if page.can_manage_settings {
+        page.onefichier = state.settings.onefichier();
+        page.tmdb = state.settings.tmdb();
+        page.library = LibraryView::from(state.settings.library());
+        page.misc = MiscView::from(&state.settings.misc());
+        page.cdn = page.onefichier.cdn.as_ref().map(CdnDisplay::from);
+        page.has_credits = page
+            .onefichier
+            .cdn
+            .as_ref()
+            .is_some_and(|c| c.balance.is_some() && c.in_use != Some(false));
     }
-    match state.auth.two_factor_status().await {
+    if page.can_tokens {
+        match state.auth.list_api_tokens(user).await {
+            Ok(tokens) => page.tokens = tokens.into_iter().map(TokenView::from).collect(),
+            Err(e) => page.error = page.error.or(Some(e.message)),
+        }
+    }
+    match state.auth.two_factor_status(user).await {
         Ok(status) => page.two_factor = TwoFactorView::from(status),
         Err(e) => page.error = page.error.or(Some(e.message)),
     }
     page
 }
 
-async fn settings_page(State(state): State<AppState>, theme: Theme) -> Response {
-    render(&settings_with(&state, theme, SettingsPage::default()).await)
+async fn settings_page(
+    State(state): State<AppState>,
+    Extension(user): Extension<User>,
+    theme: Theme,
+) -> Response {
+    render(&settings_with(&state, theme, &user, SettingsPage::default()).await)
 }
 
 #[derive(Template)]
 #[template(path = "api.html")]
 struct ApiPage {
     theme: Theme,
+    me: MeView,
     api: &'static super::api_docs::ApiReference,
     /// This server's address as the browser reached it, for the examples.
     origin: String,
 }
 
-async fn api_page(State(state): State<AppState>, theme: Theme, headers: HeaderMap) -> Response {
+async fn api_page(
+    State(state): State<AppState>,
+    Extension(user): Extension<User>,
+    theme: Theme,
+    headers: HeaderMap,
+) -> Response {
     let host = headers
         .get(header::HOST)
         .and_then(|h| h.to_str().ok())
@@ -1467,6 +1669,7 @@ async fn api_page(State(state): State<AppState>, theme: Theme, headers: HeaderMa
     };
     render(&ApiPage {
         theme,
+        me: MeView::from(&user),
         api: &super::api_docs::REFERENCE,
         origin: format!("{scheme}://{host}"),
     })
@@ -1479,10 +1682,11 @@ struct TokenForm {
 
 async fn create_token(
     State(state): State<AppState>,
+    Extension(user): Extension<User>,
     theme: Theme,
     Form(form): Form<TokenForm>,
 ) -> Response {
-    let page = match state.auth.create_api_token(&form.name).await {
+    let page = match state.auth.create_api_token(&user, &form.name).await {
         Ok((token, secret)) => SettingsPage {
             new_token: Some(secret),
             message: Some(format!(
@@ -1498,15 +1702,16 @@ async fn create_token(
             ..Default::default()
         },
     };
-    render(&settings_with(&state, theme, page).await)
+    render(&settings_with(&state, theme, &user, page).await)
 }
 
 async fn revoke_token(
     State(state): State<AppState>,
+    Extension(user): Extension<User>,
     theme: Theme,
     Path(id): Path<Uuid>,
 ) -> Response {
-    let page = match state.auth.revoke_api_token(id).await {
+    let page = match state.auth.revoke_api_token(&user, id).await {
         Ok(()) => SettingsPage {
             message: Some("Token revoked.".into()),
             open: SECTION_TOKENS,
@@ -1518,7 +1723,7 @@ async fn revoke_token(
             ..Default::default()
         },
     };
-    render(&settings_with(&state, theme, page).await)
+    render(&settings_with(&state, theme, &user, page).await)
 }
 
 /// CDN credits prepared for the settings page.
@@ -1554,6 +1759,7 @@ struct OneFichierForm {
 
 async fn save_onefichier(
     State(state): State<AppState>,
+    Extension(user): Extension<User>,
     theme: Theme,
     Form(form): Form<OneFichierForm>,
 ) -> Response {
@@ -1570,7 +1776,7 @@ async fn save_onefichier(
                 |_| "1fichier API key saved. Retry any 1fichier downloads that need attention.",
             )
         };
-    settings_result(&state, theme, result).await
+    settings_result(&state, theme, &user, result).await
 }
 
 #[derive(Deserialize)]
@@ -1583,6 +1789,7 @@ struct SignInForm {
 
 async fn sign_in_onefichier(
     State(state): State<AppState>,
+    Extension(user): Extension<User>,
     theme: Theme,
     Form(form): Form<SignInForm>,
 ) -> Response {
@@ -1598,34 +1805,46 @@ async fn sign_in_onefichier(
                 "Signed in to 1fichier. Retry any 1fichier downloads that need attention."
             }
         });
-    settings_result(&state, theme, result).await
+    settings_result(&state, theme, &user, result).await
 }
 
-async fn sign_out_onefichier(State(state): State<AppState>, theme: Theme) -> Response {
+async fn sign_out_onefichier(
+    State(state): State<AppState>,
+    Extension(user): Extension<User>,
+    theme: Theme,
+) -> Response {
     let result = state
         .settings
         .sign_out_onefichier()
         .await
         .map(|_| "Signed out of 1fichier; the stored email and password were deleted.");
-    settings_result(&state, theme, result).await
+    settings_result(&state, theme, &user, result).await
 }
 
-async fn refresh_onefichier_cdn(State(state): State<AppState>, theme: Theme) -> Response {
+async fn refresh_onefichier_cdn(
+    State(state): State<AppState>,
+    Extension(user): Extension<User>,
+    theme: Theme,
+) -> Response {
     let result = state
         .settings
         .refresh_onefichier_cdn()
         .await
         .map(|_| "1fichier CDN credits updated.");
-    settings_result(&state, theme, result).await
+    settings_result(&state, theme, &user, result).await
 }
 
-async fn remove_onefichier(State(state): State<AppState>, theme: Theme) -> Response {
+async fn remove_onefichier(
+    State(state): State<AppState>,
+    Extension(user): Extension<User>,
+    theme: Theme,
+) -> Response {
     let result = state
         .settings
         .clear_onefichier_key()
         .await
         .map(|_| "1fichier API key removed.");
-    settings_result(&state, theme, result).await
+    settings_result(&state, theme, &user, result).await
 }
 
 #[derive(Deserialize)]
@@ -1635,6 +1854,7 @@ struct TmdbForm {
 
 async fn save_tmdb(
     State(state): State<AppState>,
+    Extension(user): Extension<User>,
     theme: Theme,
     Form(form): Form<TmdbForm>,
 ) -> Response {
@@ -1651,31 +1871,37 @@ async fn save_tmdb(
             .await
             .map(|_| "TMDB API key saved. Artwork appears as downloads are shown.")
     };
-    section_result(&state, theme, SECTION_TMDB, result).await
+    section_result(&state, theme, &user, SECTION_TMDB, result).await
 }
 
-async fn remove_tmdb(State(state): State<AppState>, theme: Theme) -> Response {
+async fn remove_tmdb(
+    State(state): State<AppState>,
+    Extension(user): Extension<User>,
+    theme: Theme,
+) -> Response {
     let result = state
         .settings
         .clear_tmdb_key()
         .await
         .map(|_| "TMDB API key removed. Artwork already found stays cached.");
-    section_result(&state, theme, SECTION_TMDB, result).await
+    section_result(&state, theme, &user, SECTION_TMDB, result).await
 }
 
 /// Render the settings page after a 1fichier action, with that section open.
 async fn settings_result(
     state: &AppState,
     theme: Theme,
+    user: &User,
     result: Result<&str, AppError>,
 ) -> Response {
-    section_result(state, theme, SECTION_ONEFICHIER, result).await
+    section_result(state, theme, user, SECTION_ONEFICHIER, result).await
 }
 
 /// Render the settings page after an action, with its section open.
 async fn section_result(
     state: &AppState,
     theme: Theme,
+    user: &User,
     open: &'static str,
     result: Result<&str, AppError>,
 ) -> Response {
@@ -1684,6 +1910,7 @@ async fn section_result(
             &settings_with(
                 state,
                 theme,
+                user,
                 SettingsPage {
                     message: Some(message.to_owned()),
                     open,
@@ -1699,7 +1926,7 @@ async fn section_result(
                 open,
                 ..Default::default()
             };
-            render_status(status, &settings_with(state, theme, page).await)
+            render_status(status, &settings_with(state, theme, user, page).await)
         }
     }
 }
@@ -1799,6 +2026,7 @@ impl MiscForm {
 
 async fn save_misc(
     State(state): State<AppState>,
+    Extension(user): Extension<User>,
     theme: Theme,
     Form(form): Form<MiscForm>,
 ) -> Response {
@@ -1810,7 +2038,7 @@ async fn save_misc(
             .map(|_| "Settings saved. They apply to running downloads right away."),
         Err(e) => Err(e),
     };
-    section_result(&state, theme, SECTION_MISC, result).await
+    section_result(&state, theme, &user, SECTION_MISC, result).await
 }
 
 /// Library folders prepared for the settings page (read-only).
@@ -1883,6 +2111,7 @@ struct PasswordForm {
 
 async fn change_password(
     State(state): State<AppState>,
+    Extension(user): Extension<User>,
     theme: Theme,
     extensions: Extensions,
     Form(form): Form<PasswordForm>,
@@ -1895,13 +2124,14 @@ async fn change_password(
         };
         return render_status(
             StatusCode::BAD_REQUEST,
-            &settings_with(&state, theme, page).await,
+            &settings_with(&state, theme, &user, page).await,
         );
     }
     match state
         .auth
         .change_password(
             client_ip(&extensions),
+            &user,
             &form.current_password,
             &form.new_password,
         )
@@ -1913,7 +2143,7 @@ async fn change_password(
                 open: SECTION_PASSWORD,
                 ..Default::default()
             };
-            let mut response = render(&settings_with(&state, theme, page).await);
+            let mut response = render(&settings_with(&state, theme, &user, page).await);
             response.headers_mut().insert(
                 header::SET_COOKIE,
                 session_cookie(&session, state.secure_cookies),
@@ -1927,7 +2157,7 @@ async fn change_password(
                 open: SECTION_PASSWORD,
                 ..Default::default()
             };
-            render_status(status, &settings_with(&state, theme, page).await)
+            render_status(status, &settings_with(&state, theme, &user, page).await)
         }
     }
 }
@@ -1936,6 +2166,8 @@ async fn change_password(
 #[derive(Default)]
 struct TwoFactorView {
     enabled: bool,
+    /// Required by an administrator: it can't be turned off.
+    required: bool,
     recovery_codes_left: u32,
     enrollment: Option<EnrollmentView>,
 }
@@ -1948,26 +2180,31 @@ struct EnrollmentView {
     qr_path: String,
 }
 
+impl From<Enrollment> for EnrollmentView {
+    fn from(e: Enrollment) -> Self {
+        let qr = crate::totp::qr_svg(&e.uri);
+        Self {
+            secret: e
+                .secret
+                .as_bytes()
+                .chunks(4)
+                .map(|c| std::str::from_utf8(c).expect("base32 is ASCII"))
+                .collect::<Vec<_>>()
+                .join(" "),
+            qr_size: qr.as_ref().map_or(0, |q| q.size),
+            qr_path: qr.map(|q| q.path).unwrap_or_default(),
+            uri: e.uri,
+        }
+    }
+}
+
 impl From<TwoFactorStatus> for TwoFactorView {
     fn from(s: TwoFactorStatus) -> Self {
         Self {
             enabled: s.enabled,
+            required: s.required,
             recovery_codes_left: s.recovery_codes_left,
-            enrollment: s.enrollment.map(|e| {
-                let qr = crate::totp::qr_svg(&e.uri);
-                EnrollmentView {
-                    secret: e
-                        .secret
-                        .as_bytes()
-                        .chunks(4)
-                        .map(|c| std::str::from_utf8(c).expect("base32 is ASCII"))
-                        .collect::<Vec<_>>()
-                        .join(" "),
-                    qr_size: qr.as_ref().map_or(0, |q| q.size),
-                    qr_path: qr.map(|q| q.path).unwrap_or_default(),
-                    uri: e.uri,
-                }
-            }),
+            enrollment: s.enrollment.map(EnrollmentView::from),
         }
     }
 }
@@ -1985,20 +2222,22 @@ struct DisableTwoFactorForm {
 
 async fn start_two_factor(
     State(state): State<AppState>,
+    Extension(user): Extension<User>,
     theme: Theme,
     extensions: Extensions,
     Form(form): Form<ConfirmPasswordForm>,
 ) -> Response {
     let result = state
         .auth
-        .start_two_factor_setup(client_ip(&extensions), &form.password)
+        .start_two_factor_setup(client_ip(&extensions), &user, &form.password)
         .await
         .map(|_| "Scan the QR code with your authenticator app, then enter the code it shows.");
-    section_result(&state, theme, SECTION_TWO_FACTOR, result).await
+    section_result(&state, theme, &user, SECTION_TWO_FACTOR, result).await
 }
 
 async fn enable_two_factor(
     State(state): State<AppState>,
+    Extension(user): Extension<User>,
     theme: Theme,
     extensions: Extensions,
     headers: HeaderMap,
@@ -2007,73 +2246,82 @@ async fn enable_two_factor(
     let current = read_cookie(&headers, SESSION_COOKIE).unwrap_or_default();
     match state
         .auth
-        .finish_two_factor_setup(client_ip(&extensions), &form.code, current)
+        .finish_two_factor_setup(client_ip(&extensions), &user, &form.code, current)
         .await
     {
         Ok(codes) => {
             recovery_codes_page(
                 &state,
                 theme,
+                &user,
                 "Two-factor authentication is on. New sign-ins need a code from \
              your authenticator app, and other sessions have been logged out.",
                 codes,
             )
             .await
         }
-        Err(e) => section_result(&state, theme, SECTION_TWO_FACTOR, Err(e)).await,
+        Err(e) => section_result(&state, theme, &user, SECTION_TWO_FACTOR, Err(e)).await,
     }
 }
 
-async fn cancel_two_factor(State(state): State<AppState>, theme: Theme) -> Response {
-    state.auth.cancel_two_factor_setup();
+async fn cancel_two_factor(
+    State(state): State<AppState>,
+    Extension(user): Extension<User>,
+    theme: Theme,
+) -> Response {
+    state.auth.cancel_two_factor_setup(user.id);
     let page = SettingsPage {
         open: SECTION_TWO_FACTOR,
         ..Default::default()
     };
-    render(&settings_with(&state, theme, page).await)
+    render(&settings_with(&state, theme, &user, page).await)
 }
 
 async fn disable_two_factor(
     State(state): State<AppState>,
+    Extension(user): Extension<User>,
     theme: Theme,
     extensions: Extensions,
     Form(form): Form<DisableTwoFactorForm>,
 ) -> Response {
     let result = state
         .auth
-        .disable_two_factor(client_ip(&extensions), &form.password, &form.code)
+        .disable_two_factor(client_ip(&extensions), &user, &form.password, &form.code)
         .await
         .map(|()| "Two-factor authentication is off. Remove Direkt from your authenticator app.");
-    section_result(&state, theme, SECTION_TWO_FACTOR, result).await
+    section_result(&state, theme, &user, SECTION_TWO_FACTOR, result).await
 }
 
 async fn new_recovery_codes(
     State(state): State<AppState>,
+    Extension(user): Extension<User>,
     theme: Theme,
     extensions: Extensions,
     Form(form): Form<ConfirmPasswordForm>,
 ) -> Response {
     match state
         .auth
-        .new_recovery_codes(client_ip(&extensions), &form.password)
+        .new_recovery_codes(client_ip(&extensions), &user, &form.password)
         .await
     {
         Ok(codes) => {
             recovery_codes_page(
                 &state,
                 theme,
+                &user,
                 "New recovery codes made. The old ones no longer work.",
                 codes,
             )
             .await
         }
-        Err(e) => section_result(&state, theme, SECTION_TWO_FACTOR, Err(e)).await,
+        Err(e) => section_result(&state, theme, &user, SECTION_TWO_FACTOR, Err(e)).await,
     }
 }
 
 async fn recovery_codes_page(
     state: &AppState,
     theme: Theme,
+    user: &User,
     message: &str,
     codes: Vec<String>,
 ) -> Response {
@@ -2083,7 +2331,7 @@ async fn recovery_codes_page(
         open: SECTION_TWO_FACTOR,
         ..Default::default()
     };
-    render(&settings_with(state, theme, page).await)
+    render(&settings_with(state, theme, user, page).await)
 }
 
 #[derive(Deserialize)]
@@ -2092,7 +2340,11 @@ struct ThemeForm {
 }
 
 /// Switch this browser's theme. The page answering the switch already uses it.
-async fn change_theme(State(state): State<AppState>, Form(form): Form<ThemeForm>) -> Response {
+async fn change_theme(
+    State(state): State<AppState>,
+    Extension(user): Extension<User>,
+    Form(form): Form<ThemeForm>,
+) -> Response {
     let Some(theme) = Theme::parse(&form.theme) else {
         let page = SettingsPage {
             error: Some("unknown theme".into()),
@@ -2101,18 +2353,586 @@ async fn change_theme(State(state): State<AppState>, Form(form): Form<ThemeForm>
         };
         return render_status(
             StatusCode::BAD_REQUEST,
-            &settings_with(&state, Theme::default(), page).await,
+            &settings_with(&state, Theme::default(), &user, page).await,
         );
     };
     let page = SettingsPage {
         open: SECTION_APPEARANCE,
         ..Default::default()
     };
-    let mut response = render(&settings_with(&state, theme, page).await);
+    let mut response = render(&settings_with(&state, theme, &user, page).await);
     response
         .headers_mut()
         .insert(header::SET_COOKIE, theme.cookie(state.secure_cookies));
     response
+}
+
+// ---------------------------------------------------------------------------
+// First sign-in: replace the temporary password, set up two-factor
+// authentication when it is required
+// ---------------------------------------------------------------------------
+
+#[derive(Template)]
+#[template(path = "welcome.html")]
+struct WelcomePage {
+    theme: Theme,
+    username: String,
+    /// The temporary password must be replaced first.
+    choose_password: bool,
+    /// When the temporary password stops working.
+    expires: Option<String>,
+    /// Two-factor authentication is required and being set up.
+    enrollment: Option<EnrollmentView>,
+    /// Just set up: shown once, with a link on to Direkt.
+    recovery_codes: Vec<String>,
+    password_rules: &'static str,
+    error: Option<String>,
+}
+
+impl WelcomePage {
+    fn new(theme: Theme, user: &User) -> Self {
+        Self {
+            theme,
+            username: user.username.clone(),
+            choose_password: user.must_change_password,
+            expires: user
+                .password_expires_at
+                .filter(|_| user.must_change_password)
+                .map(fmt_time),
+            enrollment: None,
+            recovery_codes: Vec::new(),
+            password_rules: PASSWORD_RULES,
+            error: None,
+        }
+    }
+}
+
+async fn welcome_page(
+    State(state): State<AppState>,
+    Extension(user): Extension<User>,
+    theme: Theme,
+) -> Response {
+    if !user.needs_onboarding() {
+        return Redirect::to("/").into_response();
+    }
+    render_welcome(&state, theme, &user, None).await
+}
+
+/// The current first-sign-in step, with an error from the last attempt.
+async fn render_welcome(
+    state: &AppState,
+    theme: Theme,
+    user: &User,
+    error: Option<AppError>,
+) -> Response {
+    let mut page = WelcomePage::new(theme, user);
+    let status = error.as_ref().map_or(StatusCode::OK, status_for);
+    page.error = error.map(|e| e.message);
+    if !user.must_change_password {
+        match state.auth.required_two_factor_setup(user).await {
+            Ok(enrollment) => page.enrollment = Some(enrollment.into()),
+            Err(e) => page.error = page.error.or(Some(e.message)),
+        }
+    }
+    render_status(status, &page)
+}
+
+#[derive(Deserialize)]
+struct NewPasswordForm {
+    new_password: String,
+    new_password_confirm: String,
+}
+
+async fn welcome_password(
+    State(state): State<AppState>,
+    Extension(user): Extension<User>,
+    theme: Theme,
+    Form(form): Form<NewPasswordForm>,
+) -> Response {
+    let result = if form.new_password != form.new_password_confirm {
+        Err(AppError::invalid("passwords do not match"))
+    } else {
+        state.auth.choose_password(&user, &form.new_password).await
+    };
+    match result {
+        // On to two-factor setup if it is required, else to Direkt.
+        Ok(session) => (
+            [(
+                header::SET_COOKIE,
+                session_cookie(&session, state.secure_cookies),
+            )],
+            Redirect::to("/welcome"),
+        )
+            .into_response(),
+        Err(e) => render_welcome(&state, theme, &user, Some(e)).await,
+    }
+}
+
+async fn welcome_two_factor(
+    State(state): State<AppState>,
+    Extension(user): Extension<User>,
+    theme: Theme,
+    extensions: Extensions,
+    headers: HeaderMap,
+    Form(form): Form<CodeForm>,
+) -> Response {
+    if !user.needs_two_factor_setup() || user.must_change_password {
+        return Redirect::to("/welcome").into_response();
+    }
+    let current = read_cookie(&headers, SESSION_COOKIE).unwrap_or_default();
+    match state
+        .auth
+        .finish_two_factor_setup(client_ip(&extensions), &user, &form.code, current)
+        .await
+    {
+        Ok(codes) => render(&WelcomePage {
+            recovery_codes: codes,
+            choose_password: false,
+            expires: None,
+            ..WelcomePage::new(theme, &user)
+        }),
+        Err(e) => render_welcome(&state, theme, &user, Some(e)).await,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Accounts (administrators)
+// ---------------------------------------------------------------------------
+
+struct PermissionOption {
+    value: &'static str,
+    label: &'static str,
+    description: &'static str,
+    checked: bool,
+}
+
+fn permission_options(granted: &[Permission]) -> Vec<PermissionOption> {
+    Permission::ALL
+        .into_iter()
+        .map(|p| PermissionOption {
+            value: p.as_str(),
+            label: p.label(),
+            description: p.description(),
+            checked: granted.contains(&p),
+        })
+        .collect()
+}
+
+/// An account prepared for the accounts pages.
+struct AccountView {
+    id: i64,
+    username: String,
+    avatar: Avatar,
+    role: &'static str,
+    admin: bool,
+    status: &'static str,
+    /// Pill style: `ok`, `warn`, or empty.
+    status_class: &'static str,
+    two_factor: &'static str,
+    require_two_factor: bool,
+    two_factor_enabled: bool,
+    disabled: bool,
+    created: String,
+    last_login: String,
+    /// The administrator looking at it.
+    is_me: bool,
+    permissions: Vec<PermissionOption>,
+}
+
+impl AccountView {
+    fn new(u: User, me: &User) -> Self {
+        let expired =
+            u.must_change_password && u.password_expires_at.is_some_and(|t| t <= Utc::now());
+        let (status, status_class) = if u.disabled {
+            ("Disabled", "warn")
+        } else if expired {
+            ("Temporary password expired", "warn")
+        } else if u.must_change_password {
+            ("Waiting for first sign-in", "")
+        } else if u.needs_two_factor_setup() {
+            ("Setting up two-factor", "")
+        } else {
+            ("Active", "ok")
+        };
+        Self {
+            id: u.id,
+            role: u.role.label(),
+            admin: u.is_admin(),
+            status,
+            status_class,
+            two_factor: match (u.two_factor_enabled, u.require_two_factor) {
+                (true, true) => "On (required)",
+                (true, false) => "On",
+                (false, true) => "Required, not set up",
+                (false, false) => "Off",
+            },
+            require_two_factor: u.require_two_factor,
+            two_factor_enabled: u.two_factor_enabled,
+            disabled: u.disabled,
+            created: fmt_time(u.created_at),
+            last_login: u
+                .last_login_at
+                .map(|t| human_ago(t, Utc::now()))
+                .unwrap_or_else(|| "never".into()),
+            is_me: u.id == me.id,
+            // What was granted, not everything an administrator can do: the
+            // switches show what the account keeps if it becomes a user.
+            permissions: permission_options(&u.granted),
+            avatar: Avatar::new(u.id, &u.username),
+            username: u.username,
+        }
+    }
+}
+
+/// A temporary password just issued, shown once.
+struct IssuedView {
+    username: String,
+    password: String,
+    expires: String,
+}
+
+impl From<IssuedPassword> for IssuedView {
+    fn from(i: IssuedPassword) -> Self {
+        Self {
+            username: i.user.username,
+            password: i.password,
+            expires: fmt_time(i.expires_at),
+        }
+    }
+}
+
+#[derive(Template)]
+#[template(path = "users.html")]
+struct UsersPage {
+    theme: Theme,
+    me: MeView,
+    accounts: Vec<AccountView>,
+    /// The new-account form, refilled after an error.
+    username: String,
+    admin_role: bool,
+    require_two_factor: bool,
+    permissions: Vec<PermissionOption>,
+    issued: Option<IssuedView>,
+    error: Option<String>,
+}
+
+impl UsersPage {
+    fn new(theme: Theme, me: &User) -> Self {
+        Self {
+            theme,
+            me: MeView::from(me),
+            accounts: Vec::new(),
+            username: String::new(),
+            admin_role: false,
+            require_two_factor: false,
+            permissions: permission_options(&Permission::DEFAULT),
+            issued: None,
+            error: None,
+        }
+    }
+}
+
+async fn render_users(state: &AppState, user: &User, mut page: UsersPage) -> Response {
+    match state.auth.list_users(user).await {
+        Ok(users) => {
+            page.accounts = users
+                .into_iter()
+                .map(|u| AccountView::new(u, user))
+                .collect()
+        }
+        Err(e) => page.error = page.error.or(Some(e.message)),
+    }
+    let status = if page.error.is_some() {
+        StatusCode::BAD_REQUEST
+    } else {
+        StatusCode::OK
+    };
+    render_status(status, &page)
+}
+
+async fn users_page(
+    State(state): State<AppState>,
+    Extension(user): Extension<User>,
+    theme: Theme,
+) -> Response {
+    render_users(&state, &user, UsersPage::new(theme, &user)).await
+}
+
+/// The account forms. Checkboxes are sent only when ticked, so each
+/// permission has its own field, `perm_<name>`.
+struct AccountForm {
+    username: String,
+    /// Absent when the role can't be changed (the administrator's own).
+    role: Option<Role>,
+    permissions: Vec<Permission>,
+    require_two_factor: bool,
+}
+
+impl AccountForm {
+    fn parse(fields: &[(String, String)]) -> Result<Self, AppError> {
+        let field = |name: &str| {
+            fields
+                .iter()
+                .find(|(k, _)| k == name)
+                .map(|(_, v)| v.as_str())
+        };
+        let role = field("role")
+            .map(|r| Role::parse(r).ok_or_else(|| AppError::invalid("unknown role")))
+            .transpose()?;
+        let permissions = fields
+            .iter()
+            .filter_map(|(k, _)| k.strip_prefix("perm_"))
+            .map(|p| Permission::parse(p).ok_or_else(|| AppError::invalid("unknown permission")))
+            .collect::<Result<_, _>>()?;
+        Ok(Self {
+            username: field("username").unwrap_or_default().to_owned(),
+            role,
+            permissions,
+            require_two_factor: field("require_two_factor").is_some(),
+        })
+    }
+}
+
+async fn create_user(
+    State(state): State<AppState>,
+    Extension(user): Extension<User>,
+    theme: Theme,
+    Form(fields): Form<Vec<(String, String)>>,
+) -> Response {
+    let mut page = UsersPage::new(theme, &user);
+    let form = match AccountForm::parse(&fields) {
+        Ok(form) => form,
+        Err(e) => {
+            page.error = Some(e.message);
+            return render_users(&state, &user, page).await;
+        }
+    };
+    let role = form.role.unwrap_or(Role::User);
+    let result = state
+        .auth
+        .create_user(
+            &user,
+            NewAccount {
+                username: form.username.clone(),
+                role,
+                permissions: form.permissions.clone(),
+                require_two_factor: form.require_two_factor,
+            },
+        )
+        .await;
+    match result {
+        Ok(issued) => page.issued = Some(issued.into()),
+        Err(e) => {
+            page.error = Some(e.message);
+            page.username = form.username;
+            page.admin_role = role == Role::Admin;
+            page.require_two_factor = form.require_two_factor;
+            page.permissions = permission_options(&form.permissions);
+        }
+    }
+    render_users(&state, &user, page).await
+}
+
+#[derive(Template)]
+#[template(path = "user.html")]
+struct UserPage {
+    theme: Theme,
+    me: MeView,
+    account: AccountView,
+    issued: Option<IssuedView>,
+    message: Option<String>,
+    error: Option<String>,
+}
+
+/// The account page, after an action's result.
+async fn render_user(
+    state: &AppState,
+    theme: Theme,
+    user: &User,
+    id: i64,
+    result: Result<Option<IssuedView>, AppError>,
+    message: &str,
+) -> Response {
+    let (status, issued, message, error) = match result {
+        Ok(issued) => (
+            StatusCode::OK,
+            issued,
+            (!message.is_empty()).then(|| message.to_owned()),
+            None,
+        ),
+        Err(e) => (status_for(&e), None, None, Some(e.message)),
+    };
+    match state.auth.get_user(user, id).await {
+        Ok(account) => render_status(
+            status,
+            &UserPage {
+                theme,
+                me: MeView::from(user),
+                account: AccountView::new(account, user),
+                issued,
+                message,
+                error,
+            },
+        ),
+        Err(e) => (status_for(&e), e.message).into_response(),
+    }
+}
+
+async fn user_page(
+    State(state): State<AppState>,
+    Extension(user): Extension<User>,
+    theme: Theme,
+    Path(id): Path<i64>,
+) -> Response {
+    render_user(&state, theme, &user, id, Ok(None), "").await
+}
+
+async fn update_user(
+    State(state): State<AppState>,
+    Extension(user): Extension<User>,
+    theme: Theme,
+    Path(id): Path<i64>,
+    Form(fields): Form<Vec<(String, String)>>,
+) -> Response {
+    let result = match AccountForm::parse(&fields) {
+        Ok(form) => {
+            let changes = UserChanges {
+                // An administrator's permissions are not shown; keep the
+                // ones granted for if they become a user again.
+                permissions: (form.role == Some(Role::User)).then_some(form.permissions),
+                role: form.role,
+                require_two_factor: Some(form.require_two_factor),
+                disabled: None,
+            };
+            state
+                .auth
+                .update_user(&user, id, changes)
+                .await
+                .map(|_| None)
+        }
+        Err(e) => Err(e),
+    };
+    render_user(
+        &state,
+        theme,
+        &user,
+        id,
+        result,
+        "Saved. The changes apply from the account's next request.",
+    )
+    .await
+}
+
+#[derive(Deserialize)]
+struct StatusForm {
+    disabled: bool,
+}
+
+async fn set_user_status(
+    State(state): State<AppState>,
+    Extension(user): Extension<User>,
+    theme: Theme,
+    Path(id): Path<i64>,
+    Form(form): Form<StatusForm>,
+) -> Response {
+    let changes = UserChanges {
+        disabled: Some(form.disabled),
+        ..Default::default()
+    };
+    let result = state
+        .auth
+        .update_user(&user, id, changes)
+        .await
+        .map(|_| None);
+    let message = if form.disabled {
+        "Account disabled. It was signed out, and its API tokens stop working until it is enabled \
+         again."
+    } else {
+        "Account enabled."
+    };
+    render_user(&state, theme, &user, id, result, message).await
+}
+
+async fn reset_user_password(
+    State(state): State<AppState>,
+    Extension(user): Extension<User>,
+    theme: Theme,
+    Path(id): Path<i64>,
+) -> Response {
+    let result = state
+        .auth
+        .reset_user_password(&user, id)
+        .await
+        .map(|issued| Some(issued.into()));
+    render_user(&state, theme, &user, id, result, "").await
+}
+
+async fn reset_user_two_factor(
+    State(state): State<AppState>,
+    Extension(user): Extension<User>,
+    theme: Theme,
+    Path(id): Path<i64>,
+) -> Response {
+    let result = state
+        .auth
+        .reset_user_two_factor(&user, id)
+        .await
+        .map(|_| None);
+    render_user(
+        &state,
+        theme,
+        &user,
+        id,
+        result,
+        "Two-factor authentication is off for this account. If it is required, the next sign-in \
+         sets it up again.",
+    )
+    .await
+}
+
+async fn confirm_delete_user(
+    State(state): State<AppState>,
+    Extension(user): Extension<User>,
+    Path(id): Path<i64>,
+) -> Response {
+    match state.auth.get_user(&user, id).await {
+        Ok(account) => render(&ConfirmDialog {
+            title: "Delete account?",
+            message: format!(
+                "\u{201c}{}\u{201d} can no longer sign in, and its API tokens stop working. Its \
+                 downloads and files stay. This can\u{2019}t be undone.",
+                account.username
+            ),
+            detail: None,
+            action: format!("/users/{id}/delete"),
+            confirm: "Delete account",
+            dismiss: "Keep",
+        }),
+        Err(e) => render_status(
+            status_for(&e),
+            &Flash {
+                ok: false,
+                message: e.message,
+            },
+        ),
+    }
+}
+
+async fn delete_user(
+    State(state): State<AppState>,
+    Extension(user): Extension<User>,
+    Path(id): Path<i64>,
+) -> Response {
+    match state.auth.delete_user(&user, id).await {
+        Ok(()) => (StatusCode::OK, [("hx-redirect", "/users")]).into_response(),
+        Err(e) => render_status(
+            status_for(&e),
+            &ActionResult {
+                ok: false,
+                message: e.message,
+            },
+        ),
+    }
 }
 
 #[cfg(test)]
@@ -2124,9 +2944,9 @@ mod tests {
         for theme in Theme::ALL {
             assert_eq!(Theme::parse(theme.id()), Some(theme));
         }
-        assert_eq!(Theme::parse("Steve"), None);
+        assert_eq!(Theme::parse("Dark"), None);
         assert_eq!(Theme::parse(""), None);
-        assert_eq!(Theme::default(), Theme::Steve);
+        assert_eq!(Theme::default(), Theme::Dark);
     }
 
     #[test]

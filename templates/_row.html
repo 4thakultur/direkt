@@ -9,6 +9,7 @@
       <span>{{ d.provider }}</span>
       {% if let Some(t) = d.media_label %}<span>{{ t }}</span>{% endif %}
       {% if let Some(finished) = d.finished %}<span>{{ finished }}</span>{% endif %}
+      {% if let Some(owner) = d.owner %}<span>by {{ owner }}</span>{% endif %}
     </div>
     {% if d.state != "completed" %}{% if let Some(percent) = d.percent %}<progress class="bar thin" max="100" value="{{ percent }}">{{ percent }}%</progress>{% endif %}{% endif %}
     {% if let Some(note) = d.note %}<p class="note {{ d.state }}">{{ note }}</p>{% endif %}

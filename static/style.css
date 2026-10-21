@@ -1,11 +1,12 @@
-/* Direkt, theme "Steve": after Apple's iOS, macOS and apple.com.
-   Light and dark (follows the system), translucent bars, inset grouped
-   lists, pill buttons and a Liquid Glass corner button on phones.
+/* Direkt's stylesheet, after Apple's iOS, macOS and apple.com: translucent
+   bars, inset grouped lists, pill buttons and a Liquid Glass corner button on
+   phones. Two themes, Light and Dark, chosen per browser and set as
+   `data-theme` on the root element.
    No external assets: the system font (SF Pro on Apple devices), inline SVG
-   icons. Shares its markup with the Beyond theme. */
+   icons. */
 
 :root {
-  color-scheme: light dark;
+  color-scheme: light;
   --bg: #f5f5f7;
   --bar: rgba(251, 251, 253, 0.78);
   --bar-solid: #fbfbfd;
@@ -47,37 +48,36 @@
   --spring: cubic-bezier(0.32, 0.72, 0, 1);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #000;
-    --bar: rgba(22, 22, 23, 0.78);
-    --bar-solid: #161617;
-    --surface: #1c1c1e;
-    --surface-2: #2c2c2e;
-    --fill: rgba(118, 118, 128, 0.24);
-    --fill-2: rgba(118, 118, 128, 0.36);
-    --separator: rgba(84, 84, 88, 0.55);
-    --text: #f5f5f7;
-    --muted: #98989d;
-    --dim: #6e6e73;
-    --accent: #0a84ff;
-    --accent-hover: #409cff;
-    --accent-text: #2997ff;
-    --accent-bg: rgba(10, 132, 255, 0.18);
-    --green: #30d158;
-    --green-bg: rgba(48, 209, 88, 0.16);
-    --orange: #ff9f0a;
-    --orange-bg: rgba(255, 159, 10, 0.16);
-    --red: #ff453a;
-    --red-solid: #ff453a;
-    --red-bg: rgba(255, 69, 58, 0.16);
-    --thumb: #636366;
-    --shadow: none;
-    --shadow-lg: 0 12px 40px rgba(0, 0, 0, 0.6);
-    --art-shadow: 0 6px 18px rgba(0, 0, 0, 0.5);
-    --scrim: rgba(0, 0, 0, 0.55);
-    --ring: rgba(10, 132, 255, 0.6);
-  }
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #000;
+  --bar: rgba(22, 22, 23, 0.78);
+  --bar-solid: #161617;
+  --surface: #1c1c1e;
+  --surface-2: #2c2c2e;
+  --fill: rgba(118, 118, 128, 0.24);
+  --fill-2: rgba(118, 118, 128, 0.36);
+  --separator: rgba(84, 84, 88, 0.55);
+  --text: #f5f5f7;
+  --muted: #98989d;
+  --dim: #6e6e73;
+  --accent: #0a84ff;
+  --accent-hover: #409cff;
+  --accent-text: #2997ff;
+  --accent-bg: rgba(10, 132, 255, 0.18);
+  --green: #30d158;
+  --green-bg: rgba(48, 209, 88, 0.16);
+  --orange: #ff9f0a;
+  --orange-bg: rgba(255, 159, 10, 0.16);
+  --red: #ff453a;
+  --red-solid: #ff453a;
+  --red-bg: rgba(255, 69, 58, 0.16);
+  --thumb: #636366;
+  --shadow: none;
+  --shadow-lg: 0 12px 40px rgba(0, 0, 0, 0.6);
+  --art-shadow: 0 6px 18px rgba(0, 0, 0, 0.5);
+  --scrim: rgba(0, 0, 0, 0.55);
+  --ring: rgba(10, 132, 255, 0.6);
 }
 
 * { box-sizing: border-box; }
@@ -182,7 +182,6 @@ p { margin: 0 0 0.5rem; }
 }
 .nav-link:hover { opacity: 1; text-decoration: none; background: var(--fill); }
 .nav-link.active { opacity: 1; font-weight: 600; background: var(--fill); }
-.logout { margin-left: auto; }
 
 main {
   max-width: 1024px;
@@ -852,7 +851,7 @@ td button { padding: 0.3rem 0.85rem; font-size: 0.82rem; }
   box-shadow: var(--shadow);
   overflow: hidden;
 }
-.panel > summary {
+.panel > summary, .panel-link > .panel-row {
   display: flex;
   align-items: center;
   gap: 0.85rem;
@@ -865,7 +864,7 @@ td button { padding: 0.3rem 0.85rem; font-size: 0.82rem; }
 }
 .panel > summary::-webkit-details-marker { display: none; }
 .panel > summary::marker { content: ""; }
-.panel > summary:hover { background: var(--surface-2); }
+.panel > summary:hover, .panel-link:hover > .panel-row { background: var(--surface-2); }
 .panel > summary:focus-visible { box-shadow: inset 0 0 0 3px var(--ring); }
 .panel[open] > summary { box-shadow: inset 0 -1px 0 var(--separator); }
 .panel-icon {
@@ -886,6 +885,9 @@ td button { padding: 0.3rem 0.85rem; font-size: 0.82rem; }
 .tint-green { background: linear-gradient(180deg, #5fd97a, #34c759); }
 .tint-teal { background: linear-gradient(180deg, #6ad4e0, #30b0c7); }
 .tint-red { background: linear-gradient(180deg, #ff6961, #ff3b30); }
+/* A settings row that opens another page, styled like a panel header. */
+.panel-link { display: block; color: inherit; }
+.panel-link:hover { text-decoration: none; }
 .panel-title { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .panel-name { font-size: 1rem; font-weight: 500; color: var(--text); }
 .panel-desc { font-size: 0.8rem; color: var(--muted); }
@@ -982,17 +984,318 @@ td button { padding: 0.3rem 0.85rem; font-size: 0.82rem; }
 .sw-card { display: flex; gap: 6px; align-items: center; padding: 5px; }
 .sw-art { width: 34px; height: 16px; flex: none; }
 .sw-lines { flex: 1; height: 5px; }
-.swatch-classic { background: #000; border: 1px solid #1f1f1f; }
-.swatch-classic .sw-bar { background: #000; border-bottom: 1px solid #1f1f1f; }
-.swatch-classic .sw-card { background: #0a0a0a; border: 1px solid #1f1f1f; border-left: 2px solid #e3262f; border-radius: 2px; }
-.swatch-classic .sw-art { background: #1b1b1b; border-radius: 1px; }
-.swatch-classic .sw-lines { background: linear-gradient(90deg, #e3262f 55%, #1b1b1b 55%); border-radius: 1px; }
-.swatch-steve { background: linear-gradient(135deg, #f5f5f7 50%, #000 50%); border: 1px solid rgba(0, 0, 0, 0.08); }
-.swatch-steve .sw-bar { background: rgba(255, 255, 255, 0.7); }
-.swatch-steve .sw-card { background: #fff; border-radius: 6px; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12); }
-.swatch-steve .sw-card + .sw-card { background: #1c1c1e; }
-.swatch-steve .sw-art { background: linear-gradient(135deg, #5ac8fa, #0071e3); border-radius: 3px; }
-.swatch-steve .sw-lines { background: linear-gradient(90deg, #0071e3 60%, rgba(120, 120, 128, 0.25) 60%); border-radius: 3px; }
+.swatch-light { background: #f5f5f7; border: 1px solid rgba(0, 0, 0, 0.08); }
+.swatch-light .sw-bar { background: rgba(251, 251, 253, 0.9); border-bottom: 1px solid rgba(60, 60, 67, 0.12); }
+.swatch-light .sw-card { background: #fff; border-radius: 6px; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12); }
+.swatch-light .sw-art { background: linear-gradient(135deg, #5ac8fa, #0071e3); border-radius: 3px; }
+.swatch-light .sw-lines { background: linear-gradient(90deg, #0071e3 60%, rgba(118, 118, 128, 0.2) 60%); border-radius: 3px; }
+.swatch-dark { background: #000; border: 1px solid rgba(84, 84, 88, 0.55); }
+.swatch-dark .sw-bar { background: #161617; }
+.swatch-dark .sw-card { background: #1c1c1e; border-radius: 6px; }
+.swatch-dark .sw-art { background: linear-gradient(135deg, #64d2ff, #0a84ff); border-radius: 3px; }
+.swatch-dark .sw-lines { background: linear-gradient(90deg, #0a84ff 60%, rgba(118, 118, 128, 0.36) 60%); border-radius: 3px; }
+
+/* ---------------------------------------------------------------------------
+   Accounts: inset grouped lists as in iOS Settings, with switches, a
+   segmented control, avatars, and the account menu in the top bar.
+   ------------------------------------------------------------------------- */
+
+.avatar {
+  flex: none;
+  display: inline-grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  color: #fff;
+  font: 600 0.95rem/1 var(--rounded);
+  letter-spacing: 0;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.avatar-sm { width: 28px; height: 28px; font-size: 0.8rem; }
+.avatar-lg { width: 84px; height: 84px; font-size: 2.1rem; }
+
+/* Section label and footer around a list, in the iOS manner. */
+.list-label {
+  margin: 1.75rem 1rem 0.45rem;
+  font-size: 0.78rem;
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.list-foot { margin: 0.5rem 1rem 0; font-size: 0.8rem; color: var(--muted); }
+
+.list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  background: var(--surface);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+.list > * { position: relative; margin: 0; }
+/* Hairlines between rows, inset past the avatar as in iOS. */
+.list > * + *::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: 1rem;
+  border-top: 1px solid var(--separator);
+  z-index: 1;
+}
+.list:has(.avatar) > * + *::before { left: calc(1rem + 36px + 0.8rem); }
+
+.list-item {
+  display: flex;
+  align-items: center;
+  gap: 0.8rem;
+  width: 100%;
+  min-height: 48px;
+  margin: 0;
+  padding: 0.6rem 1rem;
+  border-radius: 0;
+  background: none;
+  font-size: 0.95rem;
+  font-weight: 400;
+  color: var(--text);
+  text-align: left;
+}
+.item-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 0.1rem; }
+.item-title { font-weight: 500; overflow-wrap: anywhere; }
+.item-sub { font-size: 0.8rem; color: var(--muted); }
+.item-label { flex: none; color: var(--text); font-weight: 400; font-size: 0.95rem; }
+.item-value { flex: 1; text-align: right; color: var(--muted); }
+.item-tag {
+  margin-left: 0.3rem;
+  padding: 0.05rem 0.45rem;
+  border-radius: 999px;
+  background: var(--fill);
+  font-size: 0.72rem;
+  font-weight: 500;
+  color: var(--muted);
+  vertical-align: 0.1em;
+}
+.item-chevron { flex: none; width: 14px; height: 14px; color: var(--dim); transform: rotate(-90deg); }
+
+a.link-item { transition: background 0.15s; }
+a.link-item:hover { text-decoration: none; background: var(--surface-2); }
+a.link-item:active { background: var(--fill); }
+
+/* A text field as a row: label on the left, the value typed on the right. */
+.field-item { cursor: text; }
+.field-item > input {
+  flex: 1;
+  min-width: 0;
+  width: auto;
+  margin: 0;
+  padding: 0;
+  border-radius: 0;
+  background: none;
+  text-align: right;
+  font-size: 0.95rem;
+  box-shadow: none;
+}
+.field-item > input:focus { background: none; box-shadow: none; }
+/* No ring, as in iOS: the caret shows where typing goes, and the label
+   takes the accent colour. */
+.field-item > input:focus-visible { box-shadow: none; }
+.field-item:focus-within .item-label { color: var(--accent-text); }
+
+/* A tappable action row: blue, or red for destructive ones. */
+button.action-item {
+  justify-content: flex-start;
+  color: var(--accent-text);
+  transition: background 0.15s;
+}
+button.action-item:hover { background: var(--surface-2); }
+button.action-item:active { transform: none; background: var(--fill); }
+button.action-item.danger { color: var(--red); background: none; }
+button.action-item.danger:hover { background: var(--surface-2); filter: none; }
+.list-foot + .list { margin-top: 1.75rem; }
+
+/* iOS switch. */
+.switch-item { cursor: pointer; }
+.switch-item > input.switch,
+input.switch {
+  -webkit-appearance: none;
+  appearance: none;
+  flex: none;
+  position: relative;
+  display: block;
+  width: 51px;
+  height: 31px;
+  margin: 0;
+  padding: 0;
+  border: none;
+  border-radius: 999px;
+  background: var(--fill-2);
+  cursor: pointer;
+  transition: background 0.25s var(--ease);
+}
+input.switch::before {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 27px;
+  height: 27px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 3px 8px rgba(0, 0, 0, 0.15), 0 3px 1px rgba(0, 0, 0, 0.06);
+  transition: transform 0.3s var(--spring);
+}
+input.switch:checked { background: #34c759; }
+input.switch:checked::before { transform: translateX(20px); }
+input.switch:focus { background: var(--fill-2); box-shadow: none; }
+input.switch:checked:focus { background: #34c759; }
+input.switch:focus-visible { box-shadow: 0 0 0 4px var(--ring); }
+
+/* Segmented control. */
+.segmented {
+  flex: none;
+  display: inline-grid;
+  grid-auto-flow: column;
+  grid-auto-columns: 1fr;
+  margin-left: auto;
+  padding: 2px;
+  border-radius: 9px;
+  background: var(--fill);
+}
+.segmented label { display: block; margin: 0; font-size: 0.85rem; font-weight: 500; color: var(--text); cursor: pointer; }
+.segmented input { position: absolute; opacity: 0; width: 1px; height: 1px; pointer-events: none; }
+.segmented span {
+  display: block;
+  padding: 0.3rem 0.95rem;
+  border-radius: 7px;
+  text-align: center;
+  white-space: nowrap;
+  transition: background 0.2s var(--ease), box-shadow 0.2s var(--ease);
+}
+.segmented input:checked + span {
+  background: var(--thumb);
+  box-shadow: 0 3px 8px rgba(0, 0, 0, 0.12), 0 3px 1px rgba(0, 0, 0, 0.04);
+}
+.segmented input:focus-visible + span { box-shadow: 0 0 0 3px var(--ring); }
+.segmented input:disabled + span { color: var(--dim); cursor: default; }
+
+/* Administrators have every permission: the switches only matter for users. */
+.account-form .when-admin { display: none; }
+.account-form:has(input[name="role"][value="admin"]:checked) .when-admin { display: block; }
+.account-form:has(input[name="role"][value="admin"]:checked) .perm-group { display: none; }
+
+.form-actions { margin-top: 1.5rem; display: flex; justify-content: flex-end; }
+.form-actions button { padding: 0.6rem 1.4rem; border-radius: 999px; font-weight: 600; }
+
+/* An account's page: centred header, as on an Apple Account page. */
+.profile { display: flex; flex-direction: column; align-items: center; gap: 0.35rem; margin: 0 0 1.5rem; text-align: center; }
+.profile .avatar { margin-bottom: 0.35rem; box-shadow: var(--art-shadow); }
+.profile-name { margin: 0; font-size: 1.75rem; font-weight: 700; letter-spacing: -0.03em; overflow-wrap: anywhere; }
+.profile-sub { margin: 0; color: var(--muted); }
+
+/* A temporary password, shown once. */
+.issued {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0 0 1.5rem;
+  padding: 1.75rem 1.5rem 1.4rem;
+  background: var(--surface);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  text-align: center;
+}
+.issued-icon { display: grid; place-items: center; width: 48px; height: 48px; border-radius: 12px; color: #fff; }
+.issued-icon .icon { width: 26px; height: 26px; }
+.issued-title { margin: 0.25rem 0 0; font-size: 1.2rem; font-weight: 700; }
+.issued-text { margin: 0; max-width: 34rem; font-size: 0.9rem; color: var(--muted); }
+.issued-secret {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+  padding: 0.4rem 0.4rem 0.4rem 1.1rem;
+  border-radius: 999px;
+  background: var(--fill);
+}
+.issued-secret code {
+  padding: 0;
+  background: none;
+  font: 600 1.15rem/1.2 var(--mono);
+  letter-spacing: 0.04em;
+  user-select: all;
+  overflow-wrap: anywhere;
+}
+.copy-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.4rem 0.85rem;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+.copy-btn:hover { background: var(--accent-hover); }
+.copy-btn .icon { width: 15px; height: 15px; }
+.issued-foot { margin: 0.25rem 0 0; font-size: 0.8rem; color: var(--dim); }
+
+/* Account menu: the avatar in the top bar opens a macOS-style menu. */
+.account-menu { position: relative; margin-left: auto; }
+.account-menu > summary { list-style: none; display: grid; place-items: center; border-radius: 50%; cursor: pointer; }
+.account-menu > summary::-webkit-details-marker { display: none; }
+.account-menu > summary::marker { content: ""; }
+.account-menu > summary:hover .avatar { filter: brightness(1.08); }
+.account-menu[open] > summary .avatar { box-shadow: 0 0 0 3px var(--ring); }
+.menu {
+  position: absolute;
+  top: calc(100% + 0.5rem);
+  right: 0;
+  z-index: 50;
+  min-width: 220px;
+  padding: 0.35rem;
+  border-radius: 12px;
+  /* Opaque: a backdrop blur can't work inside the already blurred bar. */
+  background: var(--surface);
+  box-shadow: var(--shadow-lg), 0 0 0 0.5px var(--separator);
+  transform-origin: top right;
+  animation: menu-in 0.18s var(--ease);
+}
+@keyframes menu-in { from { opacity: 0; transform: scale(0.96); } }
+.menu-head { display: flex; align-items: center; gap: 0.65rem; padding: 0.5rem 0.6rem 0.65rem; margin-bottom: 0.3rem; border-bottom: 1px solid var(--separator); }
+.menu-who { display: flex; flex-direction: column; min-width: 0; }
+.menu-name { font-weight: 600; overflow-wrap: anywhere; }
+.menu-role { font-size: 0.78rem; color: var(--muted); }
+.menu form { margin: 0; }
+.menu-item {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  width: 100%;
+  padding: 0.4rem 0.6rem;
+  border-radius: 7px;
+  background: none;
+  color: var(--text);
+  font-size: 0.88rem;
+  font-weight: 400;
+  text-align: left;
+}
+.menu-item .icon { width: 17px; height: 17px; color: var(--muted); }
+.menu-item:hover, button.menu-item:hover { text-decoration: none; background: var(--accent); color: #fff; }
+.menu-item:hover .icon { color: #fff; }
+button.menu-item:active { transform: none; }
+
+@media (max-width: 760px) {
+  /* Phones have the corner button and Settings → Log out instead. */
+  .account-menu { display: none; }
+  .segmented span { padding: 0.35rem 0.75rem; }
+  .issued-secret { flex-direction: column; border-radius: var(--radius); padding: 0.75rem; }
+}
 
 /* ---------------------------------------------------------------------------
    Phones: the top-right corner holds one round Liquid Glass button (iOS 26)
@@ -1060,17 +1363,15 @@ td button { padding: 0.3rem 0.85rem; font-size: 0.82rem; }
     background-color: var(--glass-press);
     transition-duration: 0.18s;
   }
-  @media (prefers-color-scheme: dark) {
-    .corner-btn {
-      --glass: rgba(120, 120, 128, 0.26);
-      --glass-press: rgba(120, 120, 128, 0.42);
-      --rim: rgba(255, 255, 255, 0.32);
-      --rim-low: rgba(255, 255, 255, 0.08);
-      --edge: rgba(255, 255, 255, 0.06);
-      background:
-        radial-gradient(120% 90% at 50% 0%, rgba(255, 255, 255, 0.12), transparent 60%),
-        var(--glass);
-    }
+  :root[data-theme="dark"] .corner-btn {
+    --glass: rgba(120, 120, 128, 0.26);
+    --glass-press: rgba(120, 120, 128, 0.42);
+    --rim: rgba(255, 255, 255, 0.32);
+    --rim-low: rgba(255, 255, 255, 0.08);
+    --edge: rgba(255, 255, 255, 0.06);
+    background:
+      radial-gradient(120% 90% at 50% 0%, rgba(255, 255, 255, 0.12), transparent 60%),
+      var(--glass);
   }
 
   /* Log out moves to the end of Settings, like Sign Out on iOS. */

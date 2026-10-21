@@ -601,6 +601,8 @@ struct Harness {
     providers: Providers,
     store: Store,
     service: DownloadService,
+    /// Every service call acts as this administrator.
+    admin: crate::users::User,
     engine: Engine,
     dispatcher: Option<JoinHandle<()>>,
     download_dir: PathBuf,
@@ -713,10 +715,25 @@ impl Harness {
             policy,
             artwork,
         );
+        let admin = store
+            .create_first_admin(
+                &crate::store::NewUser {
+                    username: "admin".into(),
+                    password_hash: "unused".into(),
+                    role: crate::users::Role::Admin,
+                    permissions: Vec::new(),
+                    require_two_factor: false,
+                    temporary_until: None,
+                },
+                Utc::now(),
+            )
+            .await
+            .unwrap();
         Self {
             providers,
             store,
             service,
+            admin,
             engine,
             dispatcher,
             download_dir,
@@ -748,7 +765,7 @@ impl Harness {
     async fn wait_for(&self, id: Uuid, pred: impl Fn(&Download) -> bool) -> Download {
         let deadline = Instant::now() + Duration::from_secs(15);
         loop {
-            let d = self.service.get(id).await.unwrap();
+            let d = self.service.get(&self.admin, id).await.unwrap();
             if pred(&d) {
                 return d;
             }
@@ -803,7 +820,12 @@ async fn downloads_a_file() {
     let h = Harness::new(loopback_policy(), |_| {}).await;
     let d = h
         .service
-        .submit(&server.url("/files/My%20Movie.mkv?token=abc"), None, None)
+        .submit(
+            &h.admin,
+            &server.url("/files/My%20Movie.mkv?token=abc"),
+            None,
+            None,
+        )
         .await
         .unwrap();
     assert_eq!(d.display_url, server.url("/files/My%20Movie.mkv?…"));
@@ -831,7 +853,7 @@ async fn missing_folders_are_recreated() {
     std::fs::remove_dir(&h.download_dir).unwrap();
     let d = h
         .service
-        .submit(&server.url("/files/file.bin"), None, None)
+        .submit(&h.admin, &server.url("/files/file.bin"), None, None)
         .await
         .unwrap();
     let d = h.wait_state(d.id, TransferState::Completed).await;
@@ -845,7 +867,7 @@ async fn hostile_content_disposition_is_sanitized() {
     let h = Harness::new(loopback_policy(), |_| {}).await;
     let d = h
         .service
-        .submit(&server.url("/disposition"), None, None)
+        .submit(&h.admin, &server.url("/disposition"), None, None)
         .await
         .unwrap();
     let d = h.wait_state(d.id, TransferState::Completed).await;
@@ -861,7 +883,7 @@ async fn existing_files_are_never_overwritten() {
     std::fs::write(h.download_dir.join("file.bin"), b"precious").unwrap();
     let d = h
         .service
-        .submit(&server.url("/files/file.bin"), None, None)
+        .submit(&h.admin, &server.url("/files/file.bin"), None, None)
         .await
         .unwrap();
     let d = h.wait_state(d.id, TransferState::Completed).await;
@@ -882,7 +904,7 @@ async fn transient_errors_are_retried() {
     let h = Harness::new(loopback_policy(), |_| {}).await;
     let d = h
         .service
-        .submit(&server.url("/files/a.bin"), None, None)
+        .submit(&h.admin, &server.url("/files/a.bin"), None, None)
         .await
         .unwrap();
     let d = h.wait_state(d.id, TransferState::Completed).await;
@@ -893,7 +915,7 @@ async fn transient_errors_are_retried() {
 
     let kinds: Vec<_> = h
         .service
-        .events(d.id)
+        .events(&h.admin, d.id)
         .await
         .unwrap()
         .into_iter()
@@ -920,7 +942,7 @@ async fn retries_are_bounded() {
     let h = Harness::new(loopback_policy(), |s| s.max_retries = 2).await;
     let d = h
         .service
-        .submit(&server.url("/files/a.bin"), None, None)
+        .submit(&h.admin, &server.url("/files/a.bin"), None, None)
         .await
         .unwrap();
     let d = h.wait_state(d.id, TransferState::Failed).await;
@@ -940,7 +962,7 @@ async fn permanent_errors_fail_immediately() {
     let h = Harness::new(loopback_policy(), |_| {}).await;
     let d = h
         .service
-        .submit(&server.url("/missing"), None, None)
+        .submit(&h.admin, &server.url("/missing"), None, None)
         .await
         .unwrap();
     let d = h.wait_state(d.id, TransferState::Failed).await;
@@ -955,7 +977,7 @@ async fn truncated_transfer_resumes_with_range() {
     let h = Harness::new(loopback_policy(), |_| {}).await;
     let d = h
         .service
-        .submit(&server.url("/files/a.bin"), None, None)
+        .submit(&h.admin, &server.url("/files/a.bin"), None, None)
         .await
         .unwrap();
     let d = h.wait_state(d.id, TransferState::Completed).await;
@@ -981,12 +1003,12 @@ async fn pause_keeps_partial_and_resume_continues() {
     let h = Harness::new(loopback_policy(), |_| {}).await;
     let d = h
         .service
-        .submit(&server.url("/files/big.bin"), None, None)
+        .submit(&h.admin, &server.url("/files/big.bin"), None, None)
         .await
         .unwrap();
     h.wait_progress(d.id, 100_000).await;
 
-    let paused = h.service.pause(d.id).await.unwrap();
+    let paused = h.service.pause(&h.admin, d.id).await.unwrap();
     assert_eq!(paused.state, TransferState::Paused);
     let partial = std::fs::metadata(h.part_path(d.id)).unwrap().len();
     assert!(partial > 0);
@@ -996,12 +1018,12 @@ async fn pause_keeps_partial_and_resume_continues() {
     );
     // Pausing again is a no-op.
     assert_eq!(
-        h.service.pause(d.id).await.unwrap().state,
+        h.service.pause(&h.admin, d.id).await.unwrap().state,
         TransferState::Paused
     );
 
     server.set_delay(Duration::ZERO);
-    h.service.resume(d.id).await.unwrap();
+    h.service.resume(&h.admin, d.id).await.unwrap();
     let d = h.wait_state(d.id, TransferState::Completed).await;
     assert_eq!(file_contents(&d), server.state.content);
     assert_eq!(
@@ -1017,16 +1039,16 @@ async fn changed_remote_file_restarts_from_zero() {
     let h = Harness::new(loopback_policy(), |_| {}).await;
     let d = h
         .service
-        .submit(&server.url("/files/big.bin"), None, None)
+        .submit(&h.admin, &server.url("/files/big.bin"), None, None)
         .await
         .unwrap();
     h.wait_progress(d.id, 100_000).await;
-    h.service.pause(d.id).await.unwrap();
+    h.service.pause(&h.admin, d.id).await.unwrap();
 
     // The remote file changes: If-Range no longer matches, server sends 200.
     *server.state.etag.lock().unwrap() = "\"v2\"".into();
     server.set_delay(Duration::ZERO);
-    h.service.resume(d.id).await.unwrap();
+    h.service.resume(&h.admin, d.id).await.unwrap();
     let d = h.wait_state(d.id, TransferState::Completed).await;
     assert_eq!(file_contents(&d), server.state.content);
 }
@@ -1038,13 +1060,13 @@ async fn server_without_validators_is_not_resumed() {
     let h = Harness::new(loopback_policy(), |_| {}).await;
     let d = h
         .service
-        .submit(&server.url("/norange/big.bin"), None, None)
+        .submit(&h.admin, &server.url("/norange/big.bin"), None, None)
         .await
         .unwrap();
     h.wait_progress(d.id, 100_000).await;
-    h.service.pause(d.id).await.unwrap();
+    h.service.pause(&h.admin, d.id).await.unwrap();
     server.set_delay(Duration::ZERO);
-    h.service.resume(d.id).await.unwrap();
+    h.service.resume(&h.admin, d.id).await.unwrap();
     let d = h.wait_state(d.id, TransferState::Completed).await;
     assert_eq!(file_contents(&d), server.state.content);
     assert!(
@@ -1060,11 +1082,11 @@ async fn cancel_removes_partial_data() {
     let h = Harness::new(loopback_policy(), |_| {}).await;
     let d = h
         .service
-        .submit(&server.url("/files/big.bin"), None, None)
+        .submit(&h.admin, &server.url("/files/big.bin"), None, None)
         .await
         .unwrap();
     h.wait_progress(d.id, 50_000).await;
-    let cancelled = h.service.cancel(d.id).await.unwrap();
+    let cancelled = h.service.cancel(&h.admin, d.id).await.unwrap();
     assert_eq!(cancelled.state, TransferState::Cancelled);
     assert!(!h.part_path(d.id).exists());
 
@@ -1072,11 +1094,11 @@ async fn cancel_removes_partial_data() {
     server.set_delay(Duration::ZERO);
     let d2 = h
         .service
-        .submit(&server.url("/files/small.bin"), None, None)
+        .submit(&h.admin, &server.url("/files/small.bin"), None, None)
         .await
         .unwrap();
     h.wait_state(d2.id, TransferState::Completed).await;
-    let err = h.service.cancel(d2.id).await.unwrap_err();
+    let err = h.service.cancel(&h.admin, d2.id).await.unwrap_err();
     assert_eq!(err.kind, ErrorKind::Conflict);
 }
 
@@ -1087,29 +1109,29 @@ async fn pause_and_cancel_queued_jobs() {
     let h = Harness::new(loopback_policy(), |s| s.max_concurrent = 1).await;
     let running = h
         .service
-        .submit(&server.url("/files/a.bin"), None, None)
+        .submit(&h.admin, &server.url("/files/a.bin"), None, None)
         .await
         .unwrap();
     let queued = h
         .service
-        .submit(&server.url("/files/b.bin"), None, None)
+        .submit(&h.admin, &server.url("/files/b.bin"), None, None)
         .await
         .unwrap();
     h.wait_progress(running.id, 1).await;
 
     assert_eq!(
-        h.service.get(queued.id).await.unwrap().state,
+        h.service.get(&h.admin, queued.id).await.unwrap().state,
         TransferState::Queued
     );
     assert_eq!(
-        h.service.pause(queued.id).await.unwrap().state,
+        h.service.pause(&h.admin, queued.id).await.unwrap().state,
         TransferState::Paused
     );
     assert_eq!(
-        h.service.cancel(queued.id).await.unwrap().state,
+        h.service.cancel(&h.admin, queued.id).await.unwrap().state,
         TransferState::Cancelled
     );
-    h.service.cancel(running.id).await.unwrap();
+    h.service.cancel(&h.admin, running.id).await.unwrap();
 }
 
 #[tokio::test]
@@ -1121,7 +1143,12 @@ async fn concurrency_is_bounded() {
     for i in 0..4 {
         ids.push(
             h.service
-                .submit(&server.url(&format!("/files/{i}.bin")), None, None)
+                .submit(
+                    &h.admin,
+                    &server.url(&format!("/files/{i}.bin")),
+                    None,
+                    None,
+                )
                 .await
                 .unwrap()
                 .id,
@@ -1132,14 +1159,14 @@ async fn concurrency_is_bounded() {
     loop {
         let downloading = h
             .store
-            .list_downloads(&[TransferState::Downloading], 10, 0)
+            .list_downloads(&[TransferState::Downloading], None, 10, 0)
             .await
             .unwrap()
             .len();
         max_seen = max_seen.max(downloading);
         let completed = h
             .store
-            .list_downloads(&[TransferState::Completed], 10, 0)
+            .list_downloads(&[TransferState::Completed], None, 10, 0)
             .await
             .unwrap()
             .len();
@@ -1159,18 +1186,18 @@ async fn concurrency_limit_changes_while_running() {
     let h = Harness::new(loopback_policy(), |s| s.max_concurrent = 1).await;
     let first = h
         .service
-        .submit(&server.url("/files/a.bin"), None, None)
+        .submit(&h.admin, &server.url("/files/a.bin"), None, None)
         .await
         .unwrap();
     let second = h
         .service
-        .submit(&server.url("/files/b.bin"), None, None)
+        .submit(&h.admin, &server.url("/files/b.bin"), None, None)
         .await
         .unwrap();
     h.wait_progress(first.id, 1).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(
-        h.service.get(second.id).await.unwrap().state,
+        h.service.get(&h.admin, second.id).await.unwrap().state,
         TransferState::Queued
     );
 
@@ -1182,17 +1209,17 @@ async fn concurrency_limit_changes_while_running() {
     h.engine.inner.limits.set_max_concurrent(1);
     let third = h
         .service
-        .submit(&server.url("/files/c.bin"), None, None)
+        .submit(&h.admin, &server.url("/files/c.bin"), None, None)
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(h.engine.is_running(first.id) && h.engine.is_running(second.id));
     assert_eq!(
-        h.service.get(third.id).await.unwrap().state,
+        h.service.get(&h.admin, third.id).await.unwrap().state,
         TransferState::Queued
     );
     for id in [first.id, second.id, third.id] {
-        h.service.cancel(id).await.unwrap();
+        h.service.cancel(&h.admin, id).await.unwrap();
     }
 }
 
@@ -1206,7 +1233,7 @@ async fn speed_limit_slows_transfers_down() {
     let started = Instant::now();
     let d = h
         .service
-        .submit(&server.url("/files/limited.bin"), None, None)
+        .submit(&h.admin, &server.url("/files/limited.bin"), None, None)
         .await
         .unwrap();
     let d = h.wait_state(d.id, TransferState::Completed).await;
@@ -1226,13 +1253,13 @@ async fn throttled_transfer_pauses_promptly() {
     h.engine.inner.limits.set_speed_limit(Some(4_000));
     let d = h
         .service
-        .submit(&server.url("/files/slow.bin"), None, None)
+        .submit(&h.admin, &server.url("/files/slow.bin"), None, None)
         .await
         .unwrap();
     h.wait_progress(d.id, 1).await;
     let asked = Instant::now();
     assert_eq!(
-        h.service.pause(d.id).await.unwrap().state,
+        h.service.pause(&h.admin, d.id).await.unwrap().state,
         TransferState::Paused
     );
     assert!(asked.elapsed() < Duration::from_secs(2));
@@ -1245,12 +1272,12 @@ async fn shutdown_requeues_running_transfers() {
     let mut h = Harness::new(loopback_policy(), |_| {}).await;
     let d = h
         .service
-        .submit(&server.url("/files/big.bin"), None, None)
+        .submit(&h.admin, &server.url("/files/big.bin"), None, None)
         .await
         .unwrap();
     h.wait_progress(d.id, 50_000).await;
     h.shutdown().await;
-    let d = h.service.get(d.id).await.unwrap();
+    let d = h.service.get(&h.admin, d.id).await.unwrap();
     assert_eq!(d.state, TransferState::Queued);
     assert!(d.downloaded_bytes > 0);
     assert_eq!(
@@ -1265,7 +1292,7 @@ async fn insufficient_disk_space_blocks() {
     let h = Harness::new(loopback_policy(), |s| s.min_free_bytes = u64::MAX / 2).await;
     let d = h
         .service
-        .submit(&server.url("/files/a.bin"), None, None)
+        .submit(&h.admin, &server.url("/files/a.bin"), None, None)
         .await
         .unwrap();
     let d = h.wait_state(d.id, TransferState::Blocked).await;
@@ -1273,7 +1300,7 @@ async fn insufficient_disk_space_blocks() {
 
     // Retrying is the user's way out once space is freed.
     assert_eq!(
-        h.service.retry(d.id, None).await.unwrap().state,
+        h.service.retry(&h.admin, d.id, None).await.unwrap().state,
         TransferState::Queued
     );
 }
@@ -1327,7 +1354,7 @@ async fn private_ip_literals_are_blocked_at_connect_time() {
     // Rejected at submission...
     let err = h
         .service
-        .submit(&server.url("/files/a"), None, None)
+        .submit(&h.admin, &server.url("/files/a"), None, None)
         .await
         .unwrap_err();
     assert_eq!(err.kind, ErrorKind::InvalidRequest);
@@ -1345,7 +1372,7 @@ async fn hostnames_resolving_to_private_addresses_are_blocked() {
     let h = Harness::new(NetworkPolicy::default(), |_| {}).await;
     let url = format!("http://localhost:{}/files/a", server.addr.port());
     // Submission cannot know where a hostname resolves, so it is accepted...
-    let d = h.service.submit(&url, None, None).await.unwrap();
+    let d = h.service.submit(&h.admin, &url, None, None).await.unwrap();
     // ...and blocked by the resolver at connection time.
     let d = h.wait_state(d.id, TransferState::Failed).await;
     assert_eq!(d.error.unwrap().kind, ErrorKind::InvalidRequest);
@@ -1371,7 +1398,7 @@ async fn redirects_to_forbidden_addresses_are_blocked() {
     for path in [to_ip, to_name] {
         let d = h
             .service
-            .submit(&origin.url(&path), None, None)
+            .submit(&h.admin, &origin.url(&path), None, None)
             .await
             .unwrap();
         let d = h.wait_state(d.id, TransferState::Failed).await;
@@ -1383,6 +1410,7 @@ async fn redirects_to_forbidden_addresses_are_blocked() {
     let d = h
         .service
         .submit(
+            &h.admin,
             &origin.url(&format!("/redirect?to={}", origin.url("/files/ok.bin"))),
             None,
             None,
@@ -1402,6 +1430,7 @@ async fn real_https_download() {
     let d = h
         .service
         .submit(
+            &h.admin,
             "https://www.rust-lang.org/static/images/rust-logo-blk.svg",
             None,
             None,
@@ -1442,7 +1471,12 @@ async fn onefichier_premium_download() {
     let h = onefichier_harness(&server, Some(TEST_API_KEY), Duration::ZERO).await;
     let d = h
         .service
-        .submit("http://www.1fichier.com/?abcde12345&af=42", None, None)
+        .submit(
+            &h.admin,
+            "http://www.1fichier.com/?abcde12345&af=42",
+            None,
+            None,
+        )
         .await
         .unwrap();
     assert_eq!(d.provider, "1fichier");
@@ -1469,13 +1503,20 @@ async fn onefichier_password_required_then_supplied() {
         serde_json::json!({"status": "KO", "message": "Password not provided. Resource not allowed #632"}),
     );
     let h = onefichier_harness(&server, Some(TEST_API_KEY), Duration::ZERO).await;
-    let d = h.service.submit(FILE_LINK, None, None).await.unwrap();
+    let d = h
+        .service
+        .submit(&h.admin, FILE_LINK, None, None)
+        .await
+        .unwrap();
     let d = h.wait_state(d.id, TransferState::Blocked).await;
     let err = d.error.unwrap();
     assert_eq!(err.kind, ErrorKind::AuthenticationFailed);
     assert!(err.message.contains("password"), "{}", err.message);
 
-    h.service.retry(d.id, Some("s3cret pass")).await.unwrap();
+    h.service
+        .retry(&h.admin, d.id, Some("s3cret pass"))
+        .await
+        .unwrap();
     let d = h.wait_state(d.id, TransferState::Completed).await;
     assert_eq!(file_contents(&d), server.state.content);
     let calls = server.api_calls();
@@ -1483,7 +1524,7 @@ async fn onefichier_password_required_then_supplied() {
     assert!(calls[0].body.get("pass").is_none());
     assert_eq!(calls[1].body["pass"], "s3cret pass");
 
-    let events = h.service.events(d.id).await.unwrap();
+    let events = h.service.events(&h.admin, d.id).await.unwrap();
     assert!(events.iter().all(|e| !e.message.contains("s3cret")));
 }
 
@@ -1521,7 +1562,11 @@ async fn onefichier_permanent_errors_are_not_retried() {
             serde_json::json!({"status": "KO", "message": message}),
         );
         let h = onefichier_harness(&server, Some(TEST_API_KEY), Duration::ZERO).await;
-        let d = h.service.submit(FILE_LINK, None, None).await.unwrap();
+        let d = h
+            .service
+            .submit(&h.admin, FILE_LINK, None, None)
+            .await
+            .unwrap();
         let d = h.wait_state(d.id, expected_state).await;
         assert_eq!(d.error.unwrap().kind, expected_kind, "{message}");
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -1543,7 +1588,11 @@ async fn onefichier_flood_protection_waits_minutes() {
     );
     let h = onefichier_harness(&server, Some(TEST_API_KEY), Duration::ZERO).await;
     let before = Utc::now();
-    let d = h.service.submit(FILE_LINK, None, None).await.unwrap();
+    let d = h
+        .service
+        .submit(&h.admin, FILE_LINK, None, None)
+        .await
+        .unwrap();
     let d = h.wait_state(d.id, TransferState::Retrying).await;
     assert_eq!(d.error.unwrap().kind, ErrorKind::ProviderRestricted);
     let wait = d.next_attempt_at.unwrap() - before;
@@ -1557,7 +1606,11 @@ async fn onefichier_flood_protection_waits_minutes() {
 async fn onefichier_without_api_key_blocks() {
     let server = TestServer::start([127, 0, 0, 1], content(10)).await;
     let h = onefichier_harness(&server, None, Duration::ZERO).await;
-    let d = h.service.submit(FILE_LINK, None, None).await.unwrap();
+    let d = h
+        .service
+        .submit(&h.admin, FILE_LINK, None, None)
+        .await
+        .unwrap();
     let d = h.wait_state(d.id, TransferState::Blocked).await;
     assert!(d.error.unwrap().message.contains("API key"));
     assert!(server.api_calls().is_empty());
@@ -1568,13 +1621,17 @@ async fn onefichier_resume_uses_a_fresh_token_and_size_check() {
     let server = TestServer::start([127, 0, 0, 1], content(2_000_000)).await;
     server.set_delay(Duration::from_millis(5));
     let h = onefichier_harness(&server, Some(TEST_API_KEY), Duration::ZERO).await;
-    let d = h.service.submit(FILE_LINK, None, None).await.unwrap();
+    let d = h
+        .service
+        .submit(&h.admin, FILE_LINK, None, None)
+        .await
+        .unwrap();
     h.wait_progress(d.id, 100_000).await;
-    h.service.pause(d.id).await.unwrap();
+    h.service.pause(&h.admin, d.id).await.unwrap();
     let partial = std::fs::metadata(h.part_path(d.id)).unwrap().len();
 
     server.set_delay(Duration::ZERO);
-    h.service.resume(d.id).await.unwrap();
+    h.service.resume(&h.admin, d.id).await.unwrap();
     let d = h.wait_state(d.id, TransferState::Completed).await;
     assert_eq!(file_contents(&d), server.state.content);
     assert_eq!(server.api_calls().len(), 2, "a new token per attempt");
@@ -1594,13 +1651,17 @@ async fn onefichier_resume_restarts_when_size_differs() {
     let server = TestServer::start([127, 0, 0, 1], content(2_000_000)).await;
     server.set_delay(Duration::from_millis(5));
     let h = onefichier_harness(&server, Some(TEST_API_KEY), Duration::ZERO).await;
-    let d = h.service.submit(FILE_LINK, None, None).await.unwrap();
+    let d = h
+        .service
+        .submit(&h.admin, FILE_LINK, None, None)
+        .await
+        .unwrap();
     h.wait_progress(d.id, 100_000).await;
-    h.service.pause(d.id).await.unwrap();
+    h.service.pause(&h.admin, d.id).await.unwrap();
 
     server.set_delay(Duration::ZERO);
     server.state.wrong_total_next.store(true, Ordering::SeqCst);
-    h.service.resume(d.id).await.unwrap();
+    h.service.resume(&h.admin, d.id).await.unwrap();
     let d = h.wait_state(d.id, TransferState::Completed).await;
     assert_eq!(file_contents(&d), server.state.content);
     let ranges = server.ranges();
@@ -1617,7 +1678,11 @@ async fn onefichier_html_error_page_is_not_saved() {
         serde_json::json!({"status": "OK", "url": server.url("/html")}),
     );
     let h = onefichier_harness(&server, Some(TEST_API_KEY), Duration::ZERO).await;
-    let d = h.service.submit(FILE_LINK, None, None).await.unwrap();
+    let d = h
+        .service
+        .submit(&h.admin, FILE_LINK, None, None)
+        .await
+        .unwrap();
     let d = h.wait_state(d.id, TransferState::Retrying).await;
     assert!(d.error.unwrap().message.contains("web page"));
     assert!(!h.part_path(d.id).exists());
@@ -1641,7 +1706,13 @@ async fn onefichier_api_calls_are_spaced() {
     .await;
     let mut ids = Vec::new();
     for _ in 0..3 {
-        ids.push(h.service.submit(FILE_LINK, None, None).await.unwrap().id);
+        ids.push(
+            h.service
+                .submit(&h.admin, FILE_LINK, None, None)
+                .await
+                .unwrap()
+                .id,
+        );
     }
     for id in ids {
         h.wait_state(id, TransferState::Completed).await;
@@ -1659,26 +1730,26 @@ async fn submission_validates_links_and_passwords() {
     let h = Harness::new(loopback_policy(), |_| {}).await;
     let err = h
         .service
-        .submit("https://1fichier.com/?SHOUT", None, None)
+        .submit(&h.admin, "https://1fichier.com/?SHOUT", None, None)
         .await
         .unwrap_err();
     assert_eq!(err.kind, ErrorKind::InvalidRequest);
     let err = h
         .service
-        .submit("https://example.com/file.bin", Some("pw"), None)
+        .submit(&h.admin, "https://example.com/file.bin", Some("pw"), None)
         .await
         .unwrap_err();
     assert!(err.message.contains("does not use a download password"));
     let err = h
         .service
-        .submit(FILE_LINK, Some(&"x".repeat(300)), None)
+        .submit(&h.admin, FILE_LINK, Some(&"x".repeat(300)), None)
         .await
         .unwrap_err();
     assert_eq!(err.kind, ErrorKind::InvalidRequest);
     // An empty password means none.
     assert!(
         h.service
-            .submit(FILE_LINK, Some(""), None)
+            .submit(&h.admin, FILE_LINK, Some(""), None)
             .await
             .unwrap()
             .download_password
@@ -1745,7 +1816,11 @@ async fn account_sign_in_and_download_prefers_account() {
 
     // An API key is configured too, but the account is preferred.
     let h = site_harness(&server, account, Some(TEST_API_KEY), |_| {}).await;
-    let d = h.service.submit(FILE_LINK, None, None).await.unwrap();
+    let d = h
+        .service
+        .submit(&h.admin, FILE_LINK, None, None)
+        .await
+        .unwrap();
     let d = h.wait_state(d.id, TransferState::Completed).await;
     assert_eq!(file_contents(&d), server.state.content);
     assert_eq!(d.filename.as_deref(), Some("Movie.2024.mkv"));
@@ -1768,7 +1843,11 @@ async fn account_download_through_the_download_form() {
     server.site().link_via_form = true;
     let account = signed_in_account(&server).await;
     let h = site_harness(&server, account, None, |_| {}).await;
-    let d = h.service.submit(FILE_LINK, None, None).await.unwrap();
+    let d = h
+        .service
+        .submit(&h.admin, FILE_LINK, None, None)
+        .await
+        .unwrap();
     let d = h.wait_state(d.id, TransferState::Completed).await;
     assert_eq!(file_contents(&d), server.state.content);
     let requests = server.site().page_requests.clone();
@@ -1792,7 +1871,13 @@ async fn account_session_expiry_signs_in_again_once() {
     let h = site_harness(&server, account, None, |s| s.max_concurrent = 3).await;
     let mut ids = Vec::new();
     for _ in 0..3 {
-        ids.push(h.service.submit(FILE_LINK, None, None).await.unwrap().id);
+        ids.push(
+            h.service
+                .submit(&h.admin, FILE_LINK, None, None)
+                .await
+                .unwrap()
+                .id,
+        );
     }
     for id in ids {
         let d = h.wait_state(id, TransferState::Completed).await;
@@ -1815,7 +1900,11 @@ async fn account_rejected_credentials_stop_automatic_sign_in() {
         site.valid_sessions.clear();
     }
     let h = site_harness(&server, account.clone(), None, |_| {}).await;
-    let first = h.service.submit(FILE_LINK, None, None).await.unwrap();
+    let first = h
+        .service
+        .submit(&h.admin, FILE_LINK, None, None)
+        .await
+        .unwrap();
     let first = h.wait_state(first.id, TransferState::Blocked).await;
     assert!(
         first
@@ -1824,7 +1913,11 @@ async fn account_rejected_credentials_stop_automatic_sign_in() {
             .message
             .contains("rejected the stored email or password")
     );
-    let second = h.service.submit(FILE_LINK, None, None).await.unwrap();
+    let second = h
+        .service
+        .submit(&h.admin, FILE_LINK, None, None)
+        .await
+        .unwrap();
     h.wait_state(second.id, TransferState::Blocked).await;
     assert_eq!(
         server.site().login_bodies.len(),
@@ -1841,7 +1934,7 @@ async fn account_rejected_credentials_stop_automatic_sign_in() {
         .await
         .unwrap();
     assert!(account.view().attention.is_none());
-    h.service.retry(second.id, None).await.unwrap();
+    h.service.retry(&h.admin, second.id, None).await.unwrap();
     h.wait_state(second.id, TransferState::Completed).await;
 }
 
@@ -1883,7 +1976,11 @@ async fn account_with_two_factor_authentication() {
     // When the session ends, a 2FA account cannot sign in by itself.
     server.site().valid_sessions.clear();
     let h = site_harness(&server, account, None, |_| {}).await;
-    let d = h.service.submit(FILE_LINK, None, None).await.unwrap();
+    let d = h
+        .service
+        .submit(&h.admin, FILE_LINK, None, None)
+        .await
+        .unwrap();
     let d = h.wait_state(d.id, TransferState::Blocked).await;
     assert!(d.error.unwrap().message.contains("two-factor"));
     assert_eq!(
@@ -1930,11 +2027,18 @@ async fn account_password_protected_file() {
     let account = signed_in_account(&server).await;
     let h = site_harness(&server, account, None, |_| {}).await;
 
-    let d = h.service.submit(FILE_LINK, None, None).await.unwrap();
+    let d = h
+        .service
+        .submit(&h.admin, FILE_LINK, None, None)
+        .await
+        .unwrap();
     let d = h.wait_state(d.id, TransferState::Blocked).await;
     assert!(d.error.unwrap().message.contains("password protected"));
 
-    h.service.retry(d.id, Some("wrong")).await.unwrap();
+    h.service
+        .retry(&h.admin, d.id, Some("wrong"))
+        .await
+        .unwrap();
     let d = h.wait_state(d.id, TransferState::Blocked).await;
     assert!(
         d.error
@@ -1943,7 +2047,10 @@ async fn account_password_protected_file() {
             .contains("rejected the download password")
     );
 
-    h.service.retry(d.id, Some("file-pass")).await.unwrap();
+    h.service
+        .retry(&h.admin, d.id, Some("file-pass"))
+        .await
+        .unwrap();
     let d = h.wait_state(d.id, TransferState::Completed).await;
     assert_eq!(file_contents(&d), server.state.content);
 }
@@ -1955,7 +2062,11 @@ async fn account_without_premium_needs_attention() {
     let account = signed_in_account(&server).await;
     assert_eq!(account.view().premium_until, None);
     let h = site_harness(&server, account, None, |_| {}).await;
-    let d = h.service.submit(FILE_LINK, None, None).await.unwrap();
+    let d = h
+        .service
+        .submit(&h.admin, FILE_LINK, None, None)
+        .await
+        .unwrap();
     let d = h.wait_state(d.id, TransferState::Blocked).await;
     assert!(
         d.error
@@ -1972,7 +2083,11 @@ async fn account_sign_out_falls_back_to_api_key() {
     account.sign_out().await.unwrap();
     assert!(!account.view().signed_in);
     let h = site_harness(&server, account, Some(TEST_API_KEY), |_| {}).await;
-    let d = h.service.submit(FILE_LINK, None, None).await.unwrap();
+    let d = h
+        .service
+        .submit(&h.admin, FILE_LINK, None, None)
+        .await
+        .unwrap();
     h.wait_state(d.id, TransferState::Completed).await;
     assert_eq!(server.api_calls().len(), 1);
     assert!(server.site().page_requests.is_empty());
@@ -2012,7 +2127,11 @@ async fn account_session_survives_restart() {
     );
     assert!(reloaded.view().signed_in);
     let h = site_harness(&server, reloaded, None, |_| {}).await;
-    let d = h.service.submit(FILE_LINK, None, None).await.unwrap();
+    let d = h
+        .service
+        .submit(&h.admin, FILE_LINK, None, None)
+        .await
+        .unwrap();
     h.wait_state(d.id, TransferState::Completed).await;
     assert_eq!(
         server.site().login_bodies.len(),
@@ -2151,7 +2270,11 @@ async fn api_downloads_spend_credits_only_when_the_account_uses_them() {
     let h = site_harness(&server, account.clone(), Some(TEST_API_KEY), |_| {}).await;
 
     // Unknown credits: no "cdn" parameter.
-    let d = h.service.submit(FILE_LINK, None, None).await.unwrap();
+    let d = h
+        .service
+        .submit(&h.admin, FILE_LINK, None, None)
+        .await
+        .unwrap();
     h.wait_state(d.id, TransferState::Completed).await;
     assert!(server.api_calls()[0].body.get("cdn").is_none());
 
@@ -2160,7 +2283,11 @@ async fn api_downloads_spend_credits_only_when_the_account_uses_them() {
         .refresh_cdn(Some(crate::config::Secret::new(TEST_API_KEY)))
         .await
         .unwrap();
-    let d = h.service.submit(FILE_LINK, None, None).await.unwrap();
+    let d = h
+        .service
+        .submit(&h.admin, FILE_LINK, None, None)
+        .await
+        .unwrap();
     h.wait_state(d.id, TransferState::Completed).await;
     assert_eq!(server.api_calls()[1].body["cdn"], 1);
 }

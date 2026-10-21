@@ -143,7 +143,8 @@ To restore, stop Direkt, replace `data` with the backup's contents (owned by
 `PUID:PGID`), and start it again. Downloads that were in progress at backup
 time are re-queued and resume or restart as the server allows.
 
-The backup contains the password hash, API tokens, the two-factor secret and
+The backup contains the accounts' password hashes, API token hashes,
+two-factor secrets and
 any provider keys entered in the web UI. Store it accordingly.
 
 Downloaded files and the media library are not part of this backup. Back

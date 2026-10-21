@@ -15,7 +15,7 @@
         <h2>New download</h2>
         <p>Paste a direct link or a 1fichier link. Direkt looks it up before anything starts.</p>
       </div>
-      {{ submit|safe }}
+      {% if can_submit %}{{ submit|safe }}{% else %}<p class="note">Your account can't add downloads. Ask an administrator if you need to.</p>{% endif %}
       <button type="button" class="pager-hint" data-pane="1">Swipe for activity<svg class="icon" aria-hidden="true"><use href="#i-back"/></svg></button>
     </section>
     <section class="pane pane-activity" aria-label="Activity">

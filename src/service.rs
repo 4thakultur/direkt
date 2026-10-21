@@ -9,6 +9,11 @@
 //! [`DownloadService::confirm`] then queues it with the type the user chose,
 //! and the password, when it is given there instead. The password never
 //! leaves the server.
+//!
+//! Every operation takes the acting [`User`]. A download belongs to the
+//! account that added it; others see it only with `view_all_downloads`, and
+//! control it only with `manage_all_downloads`. A download the account
+//! cannot see is reported as not found, so its existence is not revealed.
 
 use crate::domain::{Download, DownloadEvent, MediaType, PostState, TransferState};
 use crate::engine::{Engine, LiveSnapshot, StopReason, ThroughputSnapshot, filename_from_url};
@@ -18,6 +23,7 @@ use crate::media::{Artwork, ArtworkService, Lookup};
 use crate::net::{NetworkPolicy, redact_url, validate_submission_url};
 use crate::providers::{Provider, Providers, ResolveRequest, ResourceInfo};
 use crate::store::{NewDownload, PostDetails, Store, TransitionDetails};
+use crate::users::{Permission, User};
 use chrono::Utc;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -83,6 +89,8 @@ pub struct Preview {
 /// A preview waiting for confirmation. Holds the password: never serialized.
 #[derive(Clone)]
 struct Pending {
+    /// The account that asked for it; only it can confirm.
+    owner: i64,
     url: Url,
     provider: &'static str,
     password: Option<String>,
@@ -115,17 +123,19 @@ impl DownloadService {
     /// password-protected files on providers that support it.
     pub async fn submit(
         &self,
+        actor: &User,
         raw_url: &str,
         password: Option<&str>,
         media_type: Option<MediaType>,
     ) -> AppResult<Download> {
-        let (url, provider, password) = self.validate(raw_url, password)?;
+        let (url, provider, password) = self.validate(actor, raw_url, password)?;
         self.queue(NewDownload {
             display_url: redact_url(&url),
             url: url.into(),
             provider: provider.id().to_owned(),
             password,
             media_type,
+            owner_id: Some(actor.id),
             ..Default::default()
         })
         .await
@@ -135,8 +145,13 @@ impl DownloadService {
     /// provider, a suggested type, and a title and artwork when found. A link
     /// that is gone or forbidden is an error; anything else that cannot be
     /// read is reported in `notes`, and the download can still be confirmed.
-    pub async fn preview(&self, raw_url: &str, password: Option<&str>) -> AppResult<Preview> {
-        let (url, provider, password) = self.validate(raw_url, password)?;
+    pub async fn preview(
+        &self,
+        actor: &User,
+        raw_url: &str,
+        password: Option<&str>,
+    ) -> AppResult<Preview> {
+        let (url, provider, password) = self.validate(actor, raw_url, password)?;
         let _permit = self
             .preview_permits
             .acquire()
@@ -192,6 +207,7 @@ impl DownloadService {
         };
         self.describe(&mut preview, &notes).await;
         self.keep(Pending {
+            owner: actor.id,
             url,
             provider: provider.id(),
             password,
@@ -203,8 +219,13 @@ impl DownloadService {
     }
 
     /// Change a preview's type, looking the title and artwork up again.
-    pub async fn retype(&self, id: Uuid, media_type: MediaType) -> AppResult<Preview> {
-        let mut pending = self.pending(id)?;
+    pub async fn retype(
+        &self,
+        actor: &User,
+        id: Uuid,
+        media_type: MediaType,
+    ) -> AppResult<Preview> {
+        let mut pending = self.pending(actor, id)?;
         if pending.preview.media_type != media_type {
             pending.preview.media_type = media_type;
             self.describe(&mut pending.preview, &pending.inspect_notes)
@@ -218,11 +239,17 @@ impl DownloadService {
     /// and a non-empty `password` the one given with the preview.
     pub async fn confirm(
         &self,
+        actor: &User,
         id: Uuid,
         media_type: Option<MediaType>,
         password: Option<&str>,
     ) -> AppResult<Download> {
-        let mut pending = self.pending(id)?;
+        let mut pending = self.pending(actor, id)?;
+        // Permissions may have changed since the preview.
+        actor.require(Permission::SubmitDownloads)?;
+        if let Some(provider) = self.providers.get(pending.provider) {
+            require_provider(actor, provider.as_ref())?;
+        }
         if let Some(password) = normalize_password(password)? {
             if !pending.preview.accepts_password {
                 return Err(AppError::invalid(
@@ -252,6 +279,7 @@ impl DownloadService {
             title: preview.title,
             year: preview.year,
             artwork_id: preview.artwork_id,
+            owner_id: Some(actor.id),
         })
         .await
     }
@@ -260,18 +288,21 @@ impl DownloadService {
     /// artwork: the confirmation step, confirmed without asking.
     pub async fn submit_detected(
         &self,
+        actor: &User,
         raw_url: &str,
         password: Option<&str>,
     ) -> AppResult<Download> {
-        let preview = self.preview(raw_url, password).await?;
-        self.confirm(preview.id, None, None).await
+        let preview = self.preview(actor, raw_url, password).await?;
+        self.confirm(actor, preview.id, None, None).await
     }
 
     fn validate(
         &self,
+        actor: &User,
         raw_url: &str,
         password: Option<&str>,
     ) -> AppResult<(Url, &Arc<dyn Provider>, Option<String>)> {
+        actor.require(Permission::SubmitDownloads)?;
         let url = validate_submission_url(raw_url, &self.policy)?;
         let provider = self.providers.for_url(&url).ok_or_else(|| {
             AppError::new(
@@ -279,6 +310,7 @@ impl DownloadService {
                 "no download provider supports this URL",
             )
         })?;
+        require_provider(actor, provider.as_ref())?;
         let url = provider.canonicalize(&url)?;
         let password = normalize_password(password)?;
         if password.is_some() && !provider.supports_password() {
@@ -295,6 +327,7 @@ impl DownloadService {
             id = %download.id,
             url = %download.display_url,
             provider = %download.provider,
+            owner = ?download.owner_id,
             "download submitted"
         );
         self.engine.wake();
@@ -352,11 +385,11 @@ impl DownloadService {
         previews.insert(pending.preview.id, pending);
     }
 
-    fn pending(&self, id: Uuid) -> AppResult<Pending> {
+    fn pending(&self, actor: &User, id: Uuid) -> AppResult<Pending> {
         let previews = self.previews.lock().unwrap_or_else(|e| e.into_inner());
         previews
             .get(&id)
-            .filter(|p| p.created.elapsed() < PREVIEW_TTL)
+            .filter(|p| p.created.elapsed() < PREVIEW_TTL && p.owner == actor.id)
             .cloned()
             .ok_or_else(expired)
     }
@@ -368,24 +401,42 @@ impl DownloadService {
             .remove(&id)
     }
 
-    pub async fn get(&self, id: Uuid) -> AppResult<Download> {
+    /// A download the account can see.
+    pub async fn get(&self, actor: &User, id: Uuid) -> AppResult<Download> {
         self.store
             .get_download(id)
             .await?
-            .ok_or_else(|| AppError::not_found("download not found"))
+            .filter(|d| actor.can_see(d))
+            .ok_or_else(not_found)
     }
 
+    /// A download the account can control.
+    async fn managed(&self, actor: &User, id: Uuid) -> AppResult<Download> {
+        let download = self.get(actor, id).await?;
+        if !actor.can_manage(&download) {
+            return Err(AppError::new(
+                ErrorKind::Forbidden,
+                "you can only manage the downloads you added",
+            ));
+        }
+        Ok(download)
+    }
+
+    /// Downloads the account can see, newest first.
     pub async fn list(
         &self,
+        actor: &User,
         states: &[TransferState],
         limit: i64,
         offset: i64,
     ) -> AppResult<Vec<Download>> {
-        self.store.list_downloads(states, limit, offset).await
+        self.store
+            .list_downloads(states, actor.download_scope(), limit, offset)
+            .await
     }
 
-    pub async fn events(&self, id: Uuid) -> AppResult<Vec<DownloadEvent>> {
-        self.get(id).await?;
+    pub async fn events(&self, actor: &User, id: Uuid) -> AppResult<Vec<DownloadEvent>> {
+        self.get(actor, id).await?;
         self.store.list_events(id).await
     }
 
@@ -400,13 +451,15 @@ impl DownloadService {
     }
 
     /// Pause a queued, retrying or running download. Partial data is kept.
-    pub async fn pause(&self, id: Uuid) -> AppResult<Download> {
+    pub async fn pause(&self, actor: &User, id: Uuid) -> AppResult<Download> {
+        self.managed(actor, id).await?;
         self.stop(id, TransferState::Paused, StopReason::Pause, "pause")
             .await
     }
 
     /// Cancel a download that has not completed, and delete its partial data.
-    pub async fn cancel(&self, id: Uuid) -> AppResult<Download> {
+    pub async fn cancel(&self, actor: &User, id: Uuid) -> AppResult<Download> {
+        self.managed(actor, id).await?;
         self.stop(id, TransferState::Cancelled, StopReason::Cancel, "cancel")
             .await
     }
@@ -415,8 +468,11 @@ impl DownloadService {
     /// `delete_file`, a completed download's file is deleted from disk first;
     /// otherwise it stays. Other states are refused, so a running download
     /// can't be dropped by accident.
-    pub async fn delete(&self, id: Uuid, delete_file: bool) -> AppResult<()> {
-        let download = self.get(id).await?;
+    pub async fn delete(&self, actor: &User, id: Uuid, delete_file: bool) -> AppResult<()> {
+        let download = self.managed(actor, id).await?;
+        if delete_file {
+            actor.require(Permission::DeleteFiles)?;
+        }
         match download.state {
             TransferState::Cancelled => {}
             TransferState::Completed if download.post_state == PostState::Processing => {
@@ -448,15 +504,19 @@ impl DownloadService {
         Ok(())
     }
 
-    /// Delete every download in `state` (cancelled or completed) from the
-    /// list. Files stay on disk. Returns how many were deleted.
-    pub async fn delete_all(&self, state: TransferState) -> AppResult<usize> {
+    /// Delete every download in `state` (cancelled or completed) that the
+    /// account manages from the list. Files stay on disk. Returns how many
+    /// were deleted.
+    pub async fn delete_all(&self, actor: &User, state: TransferState) -> AppResult<usize> {
         if !matches!(state, TransferState::Cancelled | TransferState::Completed) {
             return Err(AppError::invalid(
                 "only cancelled or completed downloads can be deleted",
             ));
         }
-        let ids = self.store.delete_all_in(state).await?;
+        let ids = self
+            .store
+            .delete_all_in(state, actor.manage_scope())
+            .await?;
         if state == TransferState::Cancelled {
             for &id in &ids {
                 self.forget_partial(id).await;
@@ -465,6 +525,7 @@ impl DownloadService {
         tracing::info!(
             count = ids.len(),
             state = state.as_str(),
+            by = %actor.username,
             "downloads deleted by user"
         );
         Ok(ids.len())
@@ -504,8 +565,8 @@ impl DownloadService {
 
     /// Organize a completed download again: after organizing failed, or when
     /// it was skipped (for example before a library folder was set).
-    pub async fn organize(&self, id: Uuid) -> AppResult<Download> {
-        let download = self.get(id).await?;
+    pub async fn organize(&self, actor: &User, id: Uuid) -> AppResult<Download> {
+        let download = self.managed(actor, id).await?;
         if download.state != TransferState::Completed {
             return Err(AppError::conflict(
                 "only completed downloads can be organized",
@@ -541,15 +602,26 @@ impl DownloadService {
     }
 
     /// Resume a paused download.
-    pub async fn resume(&self, id: Uuid) -> AppResult<Download> {
+    pub async fn resume(&self, actor: &User, id: Uuid) -> AppResult<Download> {
+        self.managed(actor, id).await?;
         self.requeue(id, &[TransferState::Paused], "resume").await
     }
 
     /// Retry a failed, blocked or cancelled download from the queue,
     /// optionally with a new download password.
-    pub async fn retry(&self, id: Uuid, password: Option<&str>) -> AppResult<Download> {
+    pub async fn retry(
+        &self,
+        actor: &User,
+        id: Uuid,
+        password: Option<&str>,
+    ) -> AppResult<Download> {
+        let download = self.managed(actor, id).await?;
+        // A retry downloads again, with the server's account if the host
+        // uses one.
+        if let Some(provider) = self.providers.get(&download.provider) {
+            require_provider(actor, provider.as_ref())?;
+        }
         if let Some(password) = normalize_password(password)? {
-            let download = self.get(id).await?;
             let supported = self
                 .providers
                 .get(&download.provider)
@@ -582,6 +654,11 @@ impl DownloadService {
         .await
     }
 
+    /// A download, whoever owns it. Callers check access first.
+    async fn load(&self, id: Uuid) -> AppResult<Download> {
+        self.store.get_download(id).await?.ok_or_else(not_found)
+    }
+
     async fn stop(
         &self,
         id: Uuid,
@@ -590,12 +667,12 @@ impl DownloadService {
         verb: &str,
     ) -> AppResult<Download> {
         for _ in 0..MAX_STATE_RACES {
-            let download = self.get(id).await?;
+            let download = self.load(id).await?;
             match download.state {
                 state if state == target => return Ok(download),
                 TransferState::Downloading => {
                     if self.engine.stop_running(id, reason).await {
-                        return self.get(id).await;
+                        return self.load(id).await;
                     }
                     // Claimed but not yet registered with the engine, or just
                     // finished: look again shortly.
@@ -637,7 +714,7 @@ impl DownloadService {
         allowed_from: &[TransferState],
         verb: &str,
     ) -> AppResult<Download> {
-        let download = self.get(id).await?;
+        let download = self.load(id).await?;
         if !allowed_from.contains(&download.state) {
             return Err(AppError::conflict(format!(
                 "cannot {verb} a download that is {}",
@@ -664,6 +741,18 @@ impl DownloadService {
 }
 
 const MAX_PASSWORD_CHARS: usize = 256;
+
+fn not_found() -> AppError {
+    AppError::not_found("download not found")
+}
+
+/// Hosts that use the server's own account need `premium_providers`.
+fn require_provider(actor: &User, provider: &dyn Provider) -> AppResult<()> {
+    if provider.uses_server_account() {
+        actor.require(Permission::PremiumProviders)?;
+    }
+    Ok(())
+}
 
 /// Treat an empty password as none and reject unusable ones.
 fn expired() -> AppError {

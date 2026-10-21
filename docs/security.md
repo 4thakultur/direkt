@@ -5,7 +5,7 @@
 When no administrator exists, Direkt writes a random one-time setup token to
 `<data_dir>/setup-token` (mode `0600`) and logs that file's path, never the
 token itself. Open the web UI, enter the token, and choose a username and
-password. Afterwards the token file is deleted.
+password for the first administrator. Afterwards the token file is deleted.
 
 This keeps a stranger from claiming a freshly started instance that is already
 reachable from the internet.
@@ -16,20 +16,95 @@ With Docker Compose:
 docker compose exec direkt cat /data/setup-token
 ```
 
+## Accounts, roles and permissions
+
+Every other account is created by an administrator, under **Users** (or
+`POST /api/v1/users`). Nobody can sign up on their own.
+
+There are two roles:
+
+- **Administrator**: can do everything, including managing accounts.
+- **User**: can do what an administrator ticked for the account:
+
+| Permission | Lets the account |
+|------------|------------------|
+| `submit_downloads` | Add downloads. |
+| `premium_providers` | Download from hosts that use the server's own account, API key or credits (1fichier). Without it, only direct links. |
+| `view_all_downloads` | See everyone's downloads, not only their own. |
+| `manage_all_downloads` | Pause, resume, retry, cancel, organize and remove everyone's downloads. Includes `view_all_downloads`. |
+| `delete_files` | Delete completed files from disk, for downloads they can manage. |
+| `manage_settings` | Change server settings: the 1fichier account and keys, the TMDB key, the speed limit, simultaneous downloads and the confirmation step. |
+| `api_tokens` | Create personal API tokens. |
+
+New users get `submit_downloads` and `premium_providers` unless the
+administrator chooses otherwise. Every download belongs to the account that
+added it, and everyone can always see and manage their own. A download an
+account can't see answers `404`, so its existence isn't revealed. Changes to
+an account take effect on its next request.
+
+Permissions are checked in the services that the web UI and the API share,
+and again on whole route groups (settings, tokens, accounts), so a page that
+hides a button is never the only guard.
+
+### Temporary passwords and the first sign-in
+
+Creating an account makes a random temporary password (16 characters, about
+79 bits), shown once to the administrator, who hands it over in person or
+over a channel they trust. It works for 72 hours. At the first sign-in, the
+account can do nothing but:
+
+1. choose a password of its own (the temporary one is refused), then
+2. set up an authenticator app, if the administrator ticked **Require
+   two-factor authentication**, and save its recovery codes.
+
+Until both are done, every page leads to `/welcome`, and the API answers
+`403 forbidden`. Choosing the password ends the session that used the
+temporary one and starts a new one.
+
+### Password rules
+
+Every password a person chooses (first administrator, first sign-in,
+password change) must have at least 12 characters, at least 6 different
+characters, must not contain the username, and must mix three of:
+lowercase letters, capital letters, digits and symbols. A passphrase of 20
+characters or more needs no mix.
+
+### Managing accounts
+
+On an account's page an administrator can change its role and permissions,
+require two-factor authentication (the account then sets it up on its next
+request), issue a new temporary password (which signs it out), reset its
+two-factor authentication (for a lost phone), disable it (it is signed out,
+can't sign in, and its API tokens stop working until it is enabled again),
+or delete it (its sessions and API tokens go; its downloads and files stay,
+without an owner).
+
+To avoid lock-outs, administrators can't demote, disable, delete, or reset
+their own account there, and Direkt refuses any change that would leave no
+enabled administrator.
+
 ## Lost password
 
+An administrator can issue a new temporary password from the account's page.
+If nobody who can is available:
+
 ```sh
-direkt reset-admin            # or: docker compose exec direkt direkt reset-admin
+direkt reset-password alice   # or: docker compose exec direkt direkt reset-password alice
 ```
 
-This deletes the administrator account, every session, and every API token.
-Restart Direkt and complete setup again.
+This prints a temporary password for the account and signs it out. Its next
+sign-in must replace it.
+
+As a last resort, `direkt reset-admin` deletes every administrator account
+with its sessions and API tokens. Other accounts and all downloads stay.
+Restart Direkt and complete setup again to create a new administrator.
 
 ## Two-factor authentication
 
-Under **Settings → Two-factor authentication**, the administrator can require
-a 6-digit code from an authenticator app (Google Authenticator, Microsoft
-Authenticator, Aegis, 1Password, and others) at every new sign-in.
+Under **Settings → Two-factor authentication**, every account can require a
+6-digit code from an authenticator app (Google Authenticator, Microsoft
+Authenticator, Aegis, 1Password, and others) at each of its new sign-ins.
+An administrator can also require it for an account (see above).
 
 1. Enter the password and choose **Set up**.
 2. Scan the QR code with the app, or type the setup key shown below it. On a
@@ -37,9 +112,9 @@ Authenticator, Aegis, 1Password, and others) at every new sign-in.
 3. Enter the code the app shows, then save the ten recovery codes that
    appear. They are shown only once.
 
-Turning it on logs out every other session, so anyone signed in elsewhere
-must sign in again with a code. The browser that turned it on stays signed
-in.
+Turning it on logs out every other session of the account, so anyone signed
+in elsewhere as it must sign in again with a code. The browser that turned it
+on stays signed in.
 
 Details:
 
@@ -56,35 +131,45 @@ Details:
   from many addresses.
 - Each recovery code signs in once, typed with or without its hyphen. Make
   new ones (which voids the old ones) under Settings with the password.
-- Turning it off needs the password and a code or recovery code.
+- Turning it off needs the password and a code or recovery code, and isn't
+  possible while an administrator requires it.
 - API tokens are not affected: they are made from a signed-in session.
   Revoke any you no longer trust.
 - The shared secret is stored in the database as is, because checking a code
   needs it. Anyone who has a copy of the database or a backup can make codes,
   so protect `data_dir` and its backups.
 
-Lost the phone and the recovery codes?
+Lost the phone and the recovery codes? An administrator can reset it from
+the account's page, or on the server:
 
 ```sh
-direkt reset-2fa              # or: docker compose exec direkt direkt reset-2fa
+direkt reset-2fa alice        # or: docker compose exec direkt direkt reset-2fa alice
 ```
 
-This turns two-factor authentication off and keeps the account, sessions and
-API tokens. Sign in with the password and set it up again.
+This turns two-factor authentication off for the account and keeps its
+password, sessions and API tokens. Sign in with the password and set it up
+again (automatically, if it is required).
 
 ## Sessions and tokens
 
-- Passwords are hashed with Argon2id. Sessions last 30 days. Changing the
-  password ends every other session.
+- Passwords are hashed with Argon2id. Sessions last 30 days. Changing an
+  account's password ends its other sessions.
+- An API token acts as the account that created it, with that account's
+  current permissions. It stops working while the account is disabled, and
+  is deleted with the account.
 - The session cookie is `HttpOnly` and `SameSite=Strict`. Set
   `server.secure_cookies = true` when the UI is reached over HTTPS.
 - With two-factor authentication on, `direkt_2fa` holds a sign-in that
   waits for its code (see above).
-- The only other cookie, `direkt_theme`, holds the chosen UI theme (`steve`
-  or `classic` for Beyond). It carries no secret, and an unknown value falls back to
-  Steve. Changing it requires a session.
+- The only other cookie, `direkt_theme`, holds the chosen UI theme (`dark`
+  or `light`). It carries no secret, and an unknown value falls back to Dark.
+  Changing it requires a session.
 - Session and API tokens are 256-bit random values. Only their SHA-256 hashes
   are stored.
+- Usernames are unique ignoring case. A wrong username and a wrong password
+  get the same answer in the same time. "This account is disabled" and
+  "this temporary password has expired" are only said after a correct
+  password.
 - Each client gets 5 unsuccessful login, setup-token, or password-change
   attempts per 15 minutes. Attempts are counted *before* the password is
   checked, so parallel requests cannot exceed the limit. IPv6 clients are
