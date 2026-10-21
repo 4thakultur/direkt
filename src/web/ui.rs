@@ -35,6 +35,9 @@ const HTMX_JS: &str = include_str!("../../static/htmx-2.0.4.min.js");
 const CLASSIC_CSS: &str = include_str!("../../static/classic.css");
 const STEVE_CSS: &str = include_str!("../../static/steve.css");
 const APP_JS: &str = include_str!("../../static/app.js");
+const FAVICON_SVG: &str = include_str!("../../static/favicon.svg");
+const FAVICON_ICO: &[u8] = include_bytes!("../../static/favicon.ico");
+const APPLE_TOUCH_ICON: &[u8] = include_bytes!("../../static/apple-touch-icon.png");
 /// Most downloads shown in the queue sections (everything not finished).
 const QUEUE_LIMIT: i64 = 500;
 /// Most finished downloads shown per history section.
@@ -49,6 +52,16 @@ pub fn public_routes() -> Router<AppState> {
         .route("/static/classic.css", get(|| css(CLASSIC_CSS)))
         .route("/static/steve.css", get(|| css(STEVE_CSS)))
         .route("/static/app.js", get(app_js))
+        .route(
+            "/static/favicon.svg",
+            get(|| icon("image/svg+xml", FAVICON_SVG.as_bytes())),
+        )
+        .route(
+            "/static/apple-touch-icon.png",
+            get(|| icon("image/png", APPLE_TOUCH_ICON)),
+        )
+        // Browsers and feed readers ask for this path without being told.
+        .route("/favicon.ico", get(|| icon("image/x-icon", FAVICON_ICO)))
 }
 
 pub fn protected_routes() -> Router<AppState> {
@@ -470,6 +483,16 @@ async fn app_js() -> impl IntoResponse {
             (header::CACHE_CONTROL, "no-cache"),
         ],
         APP_JS,
+    )
+}
+
+async fn icon(content_type: &'static str, bytes: &'static [u8]) -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, content_type),
+            (header::CACHE_CONTROL, "public, max-age=86400"),
+        ],
+        bytes,
     )
 }
 

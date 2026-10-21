@@ -339,6 +339,16 @@ async fn static_assets() {
     let app_js = app.get("/static/app.js", &[]).await;
     assert_eq!(app_js.status, StatusCode::OK);
     assert!(app_js.header("content-type").starts_with("text/javascript"));
+    for (path, content_type) in [
+        ("/favicon.ico", "image/x-icon"),
+        ("/static/favicon.svg", "image/svg+xml"),
+        ("/static/apple-touch-icon.png", "image/png"),
+    ] {
+        let icon = app.get(path, &[]).await;
+        assert_eq!(icon.status, StatusCode::OK, "{path}");
+        assert_eq!(icon.header("content-type"), content_type, "{path}");
+        assert!(icon.header("cache-control").starts_with("public"), "{path}");
+    }
 }
 
 #[tokio::test]
