@@ -55,15 +55,28 @@ From the file name, in this order:
 
 ## Matching is conservative
 
-A search result counts only if its title (or original title) matches exactly,
-ignoring punctuation and case (`Cyberpunk: Edgerunners` matches, `Hades™ II`
-matches "Hades II"), and, when the name has a year, the release year is within
-one year. Otherwise the menu shows no artwork rather than a wrong one. Episodes
-of one show share the show's artwork.
+A search result counts only if its title (or original title) matches the
+name's title, ignoring case, accents, punctuation and spacing
+(`Cyberpunk: Edgerunners` matches, `Hades™ II` matches "Hades II",
+`L_ère.d_Ultron` matches "L'Ère d'Ultron"), and, when the name has a year, the
+release year is within one year. When the name has a year, a leading article
+may also be missing: `Avengers.2012` matches "The Avengers" (2012). An exact
+match always wins over one that needs the article dropped.
+
+Release names often carry a localized title while TMDB answers with the
+English one: `Avengers.L_ère.d_Ultron.2015` finds "Avengers: Age of Ultron".
+When no result's title matches, Direkt checks the translated titles of the
+first three results (one extra request each) and uses the translation that
+matches, so this shows as "Avengers : L'Ère d'Ultron" and media organization
+files it under that name.
+
+Otherwise the menu shows no artwork rather than a wrong one. Episodes of one
+show share the show's artwork.
 
 ## Privacy and caching
 
-- TMDB receives only the parsed title and year; Steam only the parsed game
+- TMDB receives only the parsed title and year (and, for the translation
+  check, the ids of its own search results); Steam only the parsed game
   title. The download link and password are never sent to them.
 - Direkt downloads the image itself and caches it, with its title, in
   `<data_dir>/artwork`. Your browser loads it from Direkt (`/artwork/<id>`,

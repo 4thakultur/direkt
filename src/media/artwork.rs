@@ -325,13 +325,56 @@ pub(crate) mod tests {
         }
         let results = match q.get("query").map(String::as_str) {
             Some("Cyberpunk Edgerunners") => serde_json::json!([
-                { "name": "Cyberpunk 2077", "first_air_date": "2020-01-01", "backdrop_path": "/wrong.jpg" },
-                { "name": "Cyberpunk: Edgerunners", "first_air_date": "2022-09-13",
+                { "id": 1, "name": "Cyberpunk 2077", "first_air_date": "2020-01-01", "backdrop_path": "/wrong.jpg" },
+                { "id": 105248, "name": "Cyberpunk: Edgerunners", "first_air_date": "2022-09-13",
                   "backdrop_path": "/edgerunners.jpg", "poster_path": "/poster.jpg" },
             ]),
             _ => serde_json::json!([]),
         };
         axum::Json(serde_json::json!({ "page": 1, "results": results })).into_response()
+    }
+
+    async fn search_movie(
+        State(mock): State<Arc<Mock>>,
+        Query(q): Query<StdHashMap<String, String>>,
+    ) -> Response {
+        mock.searches.fetch_add(1, Ordering::SeqCst);
+        let results = match (
+            q.get("query").map(String::as_str),
+            q.get("year").map(String::as_str),
+        ) {
+            (Some("Avengers"), Some("2012")) => serde_json::json!([
+                { "id": 1, "title": "Ultimate Avengers 2", "release_date": "2012-01-01",
+                  "backdrop_path": "/wrong.jpg" },
+                { "id": 24428, "title": "The Avengers", "original_title": "The Avengers",
+                  "release_date": "2012-04-25", "backdrop_path": "/avengers.jpg" },
+            ]),
+            (Some("Avengers L ère d Ultron"), Some("2015")) => serde_json::json!([
+                { "id": 99861, "title": "Avengers: Age of Ultron",
+                  "release_date": "2015-04-22", "backdrop_path": "/ultron.jpg" },
+            ]),
+            _ => serde_json::json!([]),
+        };
+        axum::Json(serde_json::json!({ "page": 1, "results": results })).into_response()
+    }
+
+    async fn translations(
+        State(mock): State<Arc<Mock>>,
+        axum::extract::Path(id): axum::extract::Path<u64>,
+        Query(q): Query<StdHashMap<String, String>>,
+    ) -> Response {
+        mock.searches.fetch_add(1, Ordering::SeqCst);
+        if q.get("api_key").map(String::as_str) != Some(KEY) {
+            return StatusCode::UNAUTHORIZED.into_response();
+        }
+        let translations = match id {
+            99861 => serde_json::json!([
+                { "iso_639_1": "en", "data": { "title": "" } },
+                { "iso_639_1": "fr", "data": { "title": "Avengers : L'Ère d'Ultron" } },
+            ]),
+            _ => serde_json::json!([]),
+        };
+        axum::Json(serde_json::json!({ "id": id, "translations": translations })).into_response()
     }
 
     async fn search_steam(
@@ -358,7 +401,11 @@ pub(crate) mod tests {
         let mock = Arc::new(Mock::default());
         let app = Router::new()
             .route("/3/search/tv", get(search_tv))
+            .route("/3/search/movie", get(search_movie))
+            .route("/3/movie/{id}/translations", get(translations))
             .route("/img/edgerunners.jpg", get(image))
+            .route("/img/avengers.jpg", get(image))
+            .route("/img/ultron.jpg", get(image))
             .route("/steam/search", get(search_steam))
             .route("/steamimg/1145350/header.jpg", get(image))
             .with_state(mock.clone());
@@ -413,6 +460,45 @@ pub(crate) mod tests {
         // Cached, title included: no second search.
         assert_eq!(artwork.find(&g).await, Lookup::Found(found));
         assert_eq!(mock.searches.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn localized_and_article_less_titles_are_found() {
+        let (base, mock) = mock_server().await;
+        let dir = tempfile::tempdir().unwrap();
+        let artwork = service(
+            &base,
+            dir.path().into(),
+            SecretCell::new(Some(Secret::new(KEY))),
+        );
+        let movie = |name: &str| crate::media::parse::parse_filename(name).unwrap();
+
+        let g =
+            movie("Avengers.2012.MULTi.VFF.2160p.DV.BluRay.4KLight.TrueHD.Atmos.7.1.x265-J4CK.mkv");
+        let Lookup::Found(found) = artwork.find(&g).await else {
+            panic!("The Avengers not found");
+        };
+        assert_eq!(
+            (found.title.as_str(), found.year),
+            ("The Avengers", Some(2012))
+        );
+        assert_eq!(
+            mock.searches.load(Ordering::SeqCst),
+            1,
+            "no translation lookup"
+        );
+
+        let g = movie(
+            "Avengers.L_ère.d_Ultron.2015.MULTi.VFF.2160p.DV.BluRay.4KLight.TrueHD.Atmos.7.1.x265-J4CK.mkv",
+        );
+        let Lookup::Found(found) = artwork.find(&g).await else {
+            panic!("Age of Ultron not found");
+        };
+        assert_eq!(
+            (found.title.as_str(), found.year),
+            ("Avengers : L'Ère d'Ultron", Some(2015))
+        );
+        assert_eq!(mock.searches.load(Ordering::SeqCst), 3);
     }
 
     #[tokio::test]
