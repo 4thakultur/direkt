@@ -221,6 +221,8 @@ input, select {
 input::placeholder { color: var(--dim); }
 input:focus, select:focus { box-shadow: 0 0 0 4px var(--ring); background: var(--surface); }
 input:disabled, select:disabled { color: var(--dim); }
+input[readonly] { color: var(--dim); cursor: default; }
+input[readonly]:focus { box-shadow: none; background: var(--fill); }
 select {
   -webkit-appearance: none;
   appearance: none;

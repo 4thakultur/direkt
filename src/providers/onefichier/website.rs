@@ -218,16 +218,13 @@ impl Website {
         &self,
         session: &Secret,
     ) -> Result<Option<String>, TransferError> {
-        static VALID_UNTIL: LazyLock<Regex> = LazyLock::new(|| {
-            Regex::new(r"(?i)subscription is valid until\s*<[^<]*>(\d{4}-\d{2}-\d{2})").unwrap()
-        });
         let page = self
             .request(
                 self.client.get(self.url("console/abo.pl")),
                 &session_cookie(session),
             )
             .await?;
-        Ok(VALID_UNTIL.captures(&page.body).map(|c| c[1].to_owned()))
+        Ok(subscription_end(&page.body))
     }
 
     /// Ask the file page for a direct download link.
@@ -670,6 +667,19 @@ fn classify_file_page(page: &Page) -> Result<(), TransferError> {
 
 /// Read `<span class="tier-name">` and `<span class="tier-feat">` from a file
 /// page. Password-protected files may show neither.
+/// End of the subscription from the subscription page: the current plan's
+/// badge ("Your plan, until 2027-10-21"), or the older wording ("Your
+/// subscription is valid until <b>2027-10-21</b>").
+fn subscription_end(html: &str) -> Option<String> {
+    static VALID_UNTIL: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(
+            r"(?i)(?:your plan, until|subscription is valid until\s*<[^<>]*>)\s*(\d{4}-\d{2}-\d{2})",
+        )
+        .unwrap()
+    });
+    VALID_UNTIL.captures(html).map(|c| c[1].to_owned())
+}
+
 fn parse_file_info(html: &str) -> FileInfo {
     static NAME: LazyLock<Regex> =
         LazyLock::new(|| Regex::new(r#"<span class="tier-name">([^<]{1,1024})</span>"#).unwrap());
@@ -1059,6 +1069,22 @@ mod tests {
             Some(false)
         );
         assert_eq!(checkbox_checked("<p>nothing</p>", "own_credit"), None);
+    }
+
+    #[test]
+    fn reads_subscription_end() {
+        // Markup of the live page (2026-10).
+        let html = r#"<span class="tier-head"><b class="tier-name">Premium</b><em class="tier-from">everything in Premium Light, plus</em><em class="tier-badge">Your plan, until 2027-10-21</em></span>"#;
+        assert_eq!(subscription_end(html).as_deref(), Some("2027-10-21"));
+        // The older wording.
+        assert_eq!(
+            subscription_end("<p>Your subscription is valid until <b>2027-01-31</b></p>")
+                .as_deref(),
+            Some("2027-01-31")
+        );
+        // Plans offered to an account without a subscription.
+        let free = r#"<span class="tier-head"><b class="tier-name">Premium</b><em class="tier-from">everything in Premium Light, plus</em></span>"#;
+        assert_eq!(subscription_end(free), None);
     }
 
     #[test]

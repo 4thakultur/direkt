@@ -451,7 +451,7 @@ async fn site_subscription(State(state): State<Arc<ServerState>>, headers: Heade
         return html(format!("{LOGGED_IN_NAV}<p>You have no subscription.</p>"));
     }
     html(format!(
-        "{LOGGED_IN_NAV}<p>Your subscription is valid until <b>2027-01-31</b></p>"
+        r#"{LOGGED_IN_NAV}<b class="tier-name">Premium</b><em class="tier-badge">Your plan, until 2027-01-31</em>"#
     ))
 }
 
