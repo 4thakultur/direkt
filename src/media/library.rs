@@ -97,7 +97,7 @@ pub fn plan(
     };
     if !VIDEO_EXTENSIONS.contains(&ext.as_str()) {
         return if is_archive(&ext) {
-            skip("archives are not extracted, so it stays in the download folder")
+            skip("this kind of archive is not extracted, so it stays in the download folder")
         } else {
             skip("not a video file, so it stays in the download folder")
         };
@@ -252,7 +252,7 @@ fn extension(file_name: &str) -> Option<String> {
     (!stem.is_empty() && !ext.is_empty()).then(|| ext.to_ascii_lowercase())
 }
 
-fn is_video(file_name: &str) -> bool {
+pub fn is_video(file_name: &str) -> bool {
     extension(file_name).is_some_and(|e| VIDEO_EXTENSIONS.contains(&e.as_str()))
 }
 
@@ -419,7 +419,7 @@ mod tests {
             "Movie.2019.mkv.001",
         ] {
             let note = skip_note(archive, Some(MediaType::Tv)).unwrap();
-            assert!(note.contains("archives"), "{archive}: {note}");
+            assert!(note.contains("archive"), "{archive}: {note}");
         }
         assert!(
             skip_note("Show.S01E01.srt", Some(MediaType::Tv))

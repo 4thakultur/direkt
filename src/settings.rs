@@ -15,8 +15,10 @@
 //!
 //! Miscellaneous preferences ([`MiscSettings`]): the unit speeds are shown
 //! in, an overall speed limit, how many downloads run at once (the
-//! configuration file's value until changed here), and whether the web UI
-//! asks for confirmation before a download starts. They apply immediately.
+//! configuration file's value until changed here), whether the web UI asks
+//! for confirmation before a download starts, and whether archives are
+//! deleted once extracted (read by the organizer from a [`FlagCell`]). They
+//! apply immediately.
 
 use crate::config::{LibraryEnv, MAX_CONCURRENT_RANGE, Secret, validate_onefichier_key};
 use crate::engine::Limits;
@@ -28,6 +30,7 @@ use crate::store::Store;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
 const ONEFICHIER_KEY: &str = "onefichier.api_key";
@@ -36,6 +39,7 @@ const SPEED_UNIT: &str = "ui.speed_unit";
 const CONFIRM_DOWNLOADS: &str = "ui.confirm_downloads";
 const SPEED_LIMIT: &str = "downloads.speed_limit";
 const MAX_CONCURRENT: &str = "downloads.max_concurrent";
+const DELETE_ARCHIVES: &str = "media.delete_extracted_archives";
 
 /// Lowest speed limit, in bytes per second (10 kB/s).
 pub const MIN_SPEED_LIMIT: u64 = 10_000;
@@ -336,6 +340,10 @@ pub struct MiscSettings {
     /// The web UI shows a confirmation menu (type, title, artwork) before a
     /// download starts. When off, Download starts it with the detected type.
     pub confirm_downloads: bool,
+    /// Delete an archive (all its volumes) once every video in it has been
+    /// extracted into the library. Off by default: the archive stays in the
+    /// download folder.
+    pub delete_extracted_archives: bool,
 }
 
 /// A change to [`MiscSettings`]. Fields left out keep their value.
@@ -349,6 +357,26 @@ pub struct MiscUpdate {
     #[schema(example = 3)]
     pub max_concurrent: Option<usize>,
     pub confirm_downloads: Option<bool>,
+    pub delete_extracted_archives: Option<bool>,
+}
+
+/// An on/off setting shared between the settings service and the component
+/// using it.
+#[derive(Debug, Clone, Default)]
+pub struct FlagCell(Arc<AtomicBool>);
+
+impl FlagCell {
+    pub fn new(value: bool) -> Self {
+        Self(Arc::new(AtomicBool::new(value)))
+    }
+
+    pub fn get(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
+
+    pub fn set(&self, value: bool) {
+        self.0.store(value, Ordering::Relaxed);
+    }
 }
 
 /// The library folders, shared between the settings service and the
@@ -415,6 +443,7 @@ pub struct SettingsService {
     library: LibraryCell,
     /// The library folders as checked at startup.
     library_view: LibrarySettings,
+    delete_archives: FlagCell,
 }
 
 /// Settings from the environment, which take precedence over stored ones.
@@ -447,6 +476,7 @@ impl SettingsService {
             speed_unit: stored(&store, SPEED_UNIT, SpeedUnit::default(), SpeedUnit::parse).await?,
             confirm_downloads: stored(&store, CONFIRM_DOWNLOADS, true, |v| v.parse().ok()).await?,
         };
+        let delete_archives = stored(&store, DELETE_ARCHIVES, false, |v| v.parse().ok()).await?;
         let speed_limit = stored(&store, SPEED_LIMIT, None, |v| {
             v.parse::<u64>()
                 .ok()
@@ -485,12 +515,18 @@ impl SettingsService {
             preferences: Arc::new(RwLock::new(preferences)),
             library: LibraryCell::new(library),
             library_view,
+            delete_archives: FlagCell::new(delete_archives),
         })
     }
 
     /// The cell the organizer reads the library folders from.
     pub fn library_cell(&self) -> LibraryCell {
         self.library.clone()
+    }
+
+    /// The flag the organizer reads before deleting an extracted archive.
+    pub fn delete_archives_cell(&self) -> FlagCell {
+        self.delete_archives.clone()
     }
 
     pub fn library(&self) -> LibrarySettings {
@@ -505,6 +541,7 @@ impl SettingsService {
             max_concurrent: self.limits.max_concurrent(),
             default_max_concurrent: self.limits.default_max_concurrent(),
             confirm_downloads: preferences.confirm_downloads,
+            delete_extracted_archives: self.delete_archives.get(),
         }
     }
 
@@ -517,6 +554,9 @@ impl SettingsService {
         }
         if let Some(confirm) = update.confirm_downloads {
             changes.push((CONFIRM_DOWNLOADS, Some(confirm.to_string())));
+        }
+        if let Some(delete) = update.delete_extracted_archives {
+            changes.push((DELETE_ARCHIVES, Some(delete.to_string())));
         }
         if let Some(limit) = update.speed_limit {
             if limit != 0 && !(MIN_SPEED_LIMIT..=MAX_SPEED_LIMIT).contains(&limit) {
@@ -556,12 +596,16 @@ impl SettingsService {
         if let Some(n) = update.max_concurrent {
             self.limits.set_max_concurrent(n);
         }
+        if let Some(delete) = update.delete_extracted_archives {
+            self.delete_archives.set(delete);
+        }
         let misc = self.misc();
         tracing::info!(
             speed_limit = misc.speed_limit,
             max_concurrent = misc.max_concurrent,
             speed_unit = misc.speed_unit.as_str(),
             confirm_downloads = misc.confirm_downloads,
+            delete_extracted_archives = misc.delete_extracted_archives,
             "settings updated"
         );
         Ok(misc)
@@ -984,6 +1028,11 @@ mod tests {
         assert_eq!(defaults.speed_limit, None);
         assert_eq!(defaults.max_concurrent, 3);
         assert!(defaults.confirm_downloads);
+        assert!(
+            !defaults.delete_extracted_archives,
+            "archives are kept by default"
+        );
+        let organizer_flag = settings.delete_archives_cell();
 
         let changed = settings
             .update_misc(MiscUpdate {
@@ -991,10 +1040,13 @@ mod tests {
                 speed_limit: Some(2_000_000),
                 max_concurrent: Some(5),
                 confirm_downloads: Some(false),
+                delete_extracted_archives: Some(true),
             })
             .await
             .unwrap();
         assert_eq!(changed.speed_limit, Some(2_000_000));
+        assert!(changed.delete_extracted_archives);
+        assert!(organizer_flag.get(), "the organizer sees it now");
         assert_eq!(limits.speed_limit(), Some(2_000_000), "engine sees it now");
         assert_eq!(limits.max_concurrent(), 5);
 
@@ -1002,6 +1054,7 @@ mod tests {
         let reloaded_limits = Limits::new(3);
         let reloaded = load(reloaded_limits.clone()).await.unwrap();
         assert_eq!(reloaded.misc(), changed);
+        assert!(reloaded.delete_archives_cell().get());
         assert_eq!(reloaded_limits.max_concurrent(), 5);
         assert_eq!(reloaded_limits.speed_limit(), Some(2_000_000));
 

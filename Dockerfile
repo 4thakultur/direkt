@@ -28,9 +28,12 @@ LABEL org.opencontainers.image.title="Direkt" \
       org.opencontainers.image.description="Self-hostable direct download manager" \
       org.opencontainers.image.licenses="AGPL-3.0-only"
 
-# CA certificates for HTTPS downloads; nothing else is needed at runtime.
-RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates \
+# CA certificates for HTTPS downloads, and 7-Zip to extract archives. RAR
+# support for 7-Zip (7zip-rar) is in Debian's non-free area, under the unRAR
+# license.
+RUN sed -i 's/^Components: main$/Components: main non-free/' /etc/apt/sources.list.d/debian.sources \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates 7zip 7zip-rar \
  && rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /usr/local/bin/direkt /usr/local/bin/direkt

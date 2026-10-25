@@ -3,6 +3,7 @@
 //! and no network access happens.
 
 use super::*;
+use crate::domain::PostState;
 use crate::engine::{Engine, EngineSettings};
 use crate::net::NetworkPolicy;
 use crate::providers::Providers;
@@ -1200,6 +1201,68 @@ impl TestApp {
 }
 
 #[tokio::test]
+async fn extracted_archives_can_be_deleted_but_organized_files_cannot() {
+    let (app, cookie) = TestApp::with_admin().await;
+    let auth = cookie_header(&cookie);
+    let dl = app.download_dir();
+    let archive = dl.join("Show.S01.1080p.zip");
+    let video = dl.join("Some.Movie.2019.mkv");
+    let archive_id = app.completed_download(&archive).await;
+    let video_id = app.completed_download(&video).await;
+    // Both organized: the archive's videos were extracted into the library
+    // and it stayed; the movie itself was moved there.
+    for id in [&archive_id, &video_id] {
+        let id = uuid::Uuid::parse_str(id).unwrap();
+        let d = app.store.get_download(id).await.unwrap().unwrap();
+        let now = chrono::Utc::now();
+        if d.post_state == PostState::None {
+            app.store
+                .transition_post(id, PostState::None, PostState::Pending, None, now)
+                .await
+                .unwrap();
+        }
+        app.store
+            .transition_post(id, PostState::Pending, PostState::Processing, None, now)
+            .await
+            .unwrap();
+        app.store
+            .transition_post(id, PostState::Processing, PostState::Completed, None, now)
+            .await
+            .unwrap();
+    }
+    let dash = app.get("/ui/dashboard", &auth).await;
+    assert!(
+        dash.body
+            .contains(&format!("/ui/downloads/{archive_id}/delete-file/confirm"))
+    );
+    assert!(
+        !dash
+            .body
+            .contains(&format!("/ui/downloads/{video_id}/delete-file/confirm"))
+    );
+    let dialog = app
+        .get(
+            &format!("/ui/downloads/{archive_id}/delete-file/confirm"),
+            &auth,
+        )
+        .await;
+    assert!(
+        dialog.body.contains("extracted into your library stay"),
+        "{}",
+        dialog.body
+    );
+    let r = app
+        .post_form(
+            &format!("/ui/downloads/{archive_id}/delete-file"),
+            &auth,
+            "",
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    assert!(!archive.exists());
+}
+
+#[tokio::test]
 async fn completed_downloads_can_be_removed_with_or_without_their_file() {
     let (app, cookie) = TestApp::with_admin().await;
     let auth = cookie_header(&cookie);
@@ -2151,6 +2214,47 @@ impl TestApp {
         )
         .await
     }
+}
+
+#[tokio::test]
+async fn delete_archives_setting_via_page_and_api() {
+    let (app, cookie) = TestApp::with_admin().await;
+    let auth = cookie_header(&cookie);
+    let page = app.get("/settings", &auth).await;
+    assert!(page.body.contains("Delete archives after extraction"));
+    assert!(
+        page.body
+            .contains(r#"name="delete_extracted_archives" value="on">"#),
+        "off by default"
+    );
+    let r = app
+        .post_form("/settings/archives", &auth, "delete_extracted_archives=on")
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    assert!(r.body.contains("id=\"library\" open"), "section stays open");
+    assert!(
+        r.body
+            .contains(r#"name="delete_extracted_archives" value="on" checked"#)
+    );
+    let misc = app.get("/api/v1/settings/misc", &auth).await.json();
+    assert_eq!(misc["delete_extracted_archives"], true);
+
+    // Saving the miscellaneous section leaves it alone.
+    let r = app
+        .post_form(
+            "/settings/misc",
+            &auth,
+            "speed_unit=binary&speed_limit=&speed_limit_unit=MiB&max_concurrent=1",
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    let misc = app.get("/api/v1/settings/misc", &auth).await.json();
+    assert_eq!(misc["delete_extracted_archives"], true);
+
+    let r = app.post_form("/settings/archives", &auth, "").await;
+    assert_eq!(r.status, StatusCode::OK);
+    let misc = app.get("/api/v1/settings/misc", &auth).await.json();
+    assert_eq!(misc["delete_extracted_archives"], false);
 }
 
 #[tokio::test]

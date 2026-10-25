@@ -174,9 +174,16 @@
       moves it into the folder below, the way Jellyfin and Plex expect, so a
       library scan picks it up without any help. It uses the type and title
       from the confirmation menu, and the file name for the season and episode.
-      Existing files are never replaced. Games, music, software and archives
-      stay in the download folder.
+      Archives of movies and series are extracted first. Existing files are
+      never replaced. Games, music and software stay in the download folder.
     </p>
+    <form method="post" action="/settings/archives" class="stack">
+      <label class="check">
+        <input type="checkbox" name="delete_extracted_archives" value="on"{% if library.delete_archives %} checked{% endif %}>
+        <span><span class="choice-name">Delete archives after extraction</span><span class="choice-desc">Once every video in an archive is in the library, delete the archive and all its parts from the download folder. When off, it stays there until you delete it. An archive is never deleted when a video in it could not be placed.</span></span>
+      </label>
+      <button type="submit" class="primary">Save</button>
+    </form>
     <dl class="details">
       {% for f in library.folders %}
       <dt>{{ f.label }}</dt>

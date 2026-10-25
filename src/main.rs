@@ -3,6 +3,7 @@
 use direkt::auth::AuthService;
 use direkt::config::{Config, LogFormat};
 use direkt::engine::{Engine, EngineSettings, Limits};
+use direkt::media::archive::SevenZip;
 use direkt::media::{ArtworkService, Organizer};
 use direkt::net::NetworkPolicy;
 use direkt::providers::{OneFichierAccount, Providers};
@@ -256,10 +257,19 @@ async fn serve(config: Config, config_path: &Path) -> anyhow::Result<()> {
         client.clone(),
         settings.tmdb_key(),
     );
+    let sevenzip = SevenZip::find();
+    match &sevenzip {
+        Some(z) => {
+            tracing::info!(program = %z.program().display(), "archives are extracted with 7-Zip")
+        }
+        None => tracing::warn!("7-Zip (7z) not found; archives are not extracted"),
+    }
     let organizer = Organizer::new(
         store.clone(),
         settings.library_cell(),
         artwork.clone(),
+        sevenzip,
+        settings.delete_archives_cell(),
         engine.completions(),
     );
     let organizing = organizer.start();

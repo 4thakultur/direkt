@@ -6,6 +6,7 @@
 //! parser, the chosen type and the title found to place the file where
 //! Jellyfin and Plex find it ([`library`]).
 
+pub mod archive;
 mod artwork;
 mod fetch;
 pub mod library;

@@ -404,6 +404,21 @@ impl Store {
             .transpose()
     }
 
+    /// The completed download of the file at `path` whose post-processing
+    /// was skipped: the first volume of a split archive, waiting for the
+    /// others.
+    pub async fn skipped_with_file(&self, path: &str) -> AppResult<Option<Uuid>> {
+        let id: Option<String> = sqlx::query_scalar(
+            "SELECT id FROM downloads WHERE state = 'completed' AND post_state = 'skipped'
+             AND file_path = ?1 ORDER BY completed_at DESC, rowid DESC LIMIT 1",
+        )
+        .bind(path)
+        .fetch_optional(&self.pool)
+        .await?;
+        id.map(|id| Uuid::parse_str(&id).map_err(|_| corrupt("invalid download id")))
+            .transpose()
+    }
+
     /// Record where post-processing is about to move the file. Only applies
     /// while it is `Processing`; returns whether a row was updated.
     pub async fn set_post_target(

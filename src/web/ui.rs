@@ -14,6 +14,7 @@ use crate::auth::{Enrollment, LoginOutcome, PASSWORD_RULES, TwoFactorStatus};
 use crate::domain::{Download, DownloadEvent, MediaType, PostState, TransferState};
 use crate::engine::{HISTORY_SECS, LiveSnapshot, ThroughputSnapshot};
 use crate::error::{AppError, ErrorKind};
+use crate::media::archive;
 use crate::service::Preview;
 use crate::settings::{
     FolderSetting, LibrarySettings, MiscSettings, MiscUpdate, OneFichierSettings, SECRET_MASK,
@@ -77,6 +78,7 @@ pub fn protected_routes() -> Router<AppState> {
         .route("/settings/tmdb", post(save_tmdb))
         .route("/settings/tmdb/remove", post(remove_tmdb))
         .route("/settings/misc", post(save_misc))
+        .route("/settings/archives", post(save_archives))
         .route("/settings/onefichier", post(save_onefichier))
         .route("/settings/onefichier/remove", post(remove_onefichier))
         .route("/settings/onefichier/sign-in", post(sign_in_onefichier))
@@ -394,6 +396,16 @@ struct DownloadView {
     owner: Option<String>,
 }
 
+/// Whether `d` is an archive whose videos were extracted into the library:
+/// its file is still the archive, in the download folder.
+fn is_extracted_archive(d: &Download) -> bool {
+    d.post_state == PostState::Completed
+        && d.file_path
+            .as_deref()
+            .and_then(|p| std::path::Path::new(p).file_name())
+            .is_some_and(|n| archive::role(&n.to_string_lossy()).is_some())
+}
+
 /// The file extension in capitals if it looks like one, else `FILE`.
 fn tile_badge(name: &str) -> String {
     name.rsplit_once('.')
@@ -428,11 +440,11 @@ impl DownloadView {
         let deletable_completed =
             manage && d.state == Completed && d.post_state != PostState::Processing;
         // An organized file is in the media library, which Direkt never
-        // deletes from.
+        // deletes from. An extracted archive stays in the download folder.
         let can_delete_file = deletable_completed
             && viewer.user.can(Permission::DeleteFiles)
             && d.file_path.is_some()
-            && d.post_state != PostState::Completed;
+            && (d.post_state != PostState::Completed || is_extracted_archive(&d));
         let can_organize = manage
             && d.state == Completed
             && matches!(d.post_state, PostState::Failed | PostState::Skipped);
@@ -1339,10 +1351,18 @@ async fn confirm_action(
         ),
         "delete-file" => (
             "Delete file?",
-            format!(
-                "\u{201c}{name}\u{201d} is deleted from disk and removed from the list. \
-                 This can\u{2019}t be undone."
-            ),
+            if is_extracted_archive(&d) {
+                format!(
+                    "The archive \u{201c}{name}\u{201d} is deleted from disk and removed from \
+                     the list. The videos extracted into your library stay. This can\u{2019}t \
+                     be undone."
+                )
+            } else {
+                format!(
+                    "\u{201c}{name}\u{201d} is deleted from disk and removed from the list. \
+                     This can\u{2019}t be undone."
+                )
+            },
             d.file_path.clone(),
             "Delete file",
             "Keep file",
@@ -1597,6 +1617,7 @@ const SECTION_PASSWORD: &str = "password";
 const SECTION_TWO_FACTOR: &str = "two-factor";
 const SECTION_APPEARANCE: &str = "appearance";
 const SECTION_MISC: &str = "misc";
+const SECTION_LIBRARY: &str = "library";
 
 async fn settings_with(
     state: &AppState,
@@ -1612,8 +1633,10 @@ async fn settings_with(
     if page.can_manage_settings {
         page.onefichier = state.settings.onefichier();
         page.tmdb = state.settings.tmdb();
+        let misc = state.settings.misc();
         page.library = LibraryView::from(state.settings.library());
-        page.misc = MiscView::from(&state.settings.misc());
+        page.library.delete_archives = misc.delete_extracted_archives;
+        page.misc = MiscView::from(&misc);
         page.cdn = page.onefichier.cdn.as_ref().map(CdnDisplay::from);
         page.has_credits = page
             .onefichier
@@ -2020,6 +2043,8 @@ impl MiscForm {
             speed_limit: Some(speed_limit),
             max_concurrent: Some(max_concurrent),
             confirm_downloads: Some(self.confirm_downloads.is_some()),
+            // Set in the media library section.
+            delete_extracted_archives: None,
         })
     }
 }
@@ -2049,6 +2074,8 @@ struct LibraryView {
     summary: &'static str,
     /// Whether any set folder had a problem at startup.
     any_problem: bool,
+    /// Archives are deleted once extracted.
+    delete_archives: bool,
 }
 
 struct FolderView {
@@ -2098,8 +2125,40 @@ impl From<LibrarySettings> for LibraryView {
             ],
             summary,
             any_problem,
+            delete_archives: false,
         }
     }
+}
+
+#[derive(Deserialize)]
+struct ArchivesForm {
+    /// A checkbox: present only when ticked.
+    #[serde(default)]
+    delete_extracted_archives: Option<String>,
+}
+
+async fn save_archives(
+    State(state): State<AppState>,
+    Extension(user): Extension<User>,
+    theme: Theme,
+    Form(form): Form<ArchivesForm>,
+) -> Response {
+    let delete = form.delete_extracted_archives.is_some();
+    let result = state
+        .settings
+        .update_misc(MiscUpdate {
+            delete_extracted_archives: Some(delete),
+            ..Default::default()
+        })
+        .await
+        .map(|_| {
+            if delete {
+                "Saved. Archives are deleted once all their videos are in the library."
+            } else {
+                "Saved. Archives stay in the download folder after extraction."
+            }
+        });
+    section_result(&state, theme, &user, SECTION_LIBRARY, result).await
 }
 
 #[derive(Deserialize)]

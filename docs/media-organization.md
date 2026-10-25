@@ -76,7 +76,8 @@ Placement is conservative. A file is never put into a library on a guess:
 | A "movie" without a year, a "movie" named `S01E01`, or a "series" without `SxxEyy` | Fallback folder, with a note. Without a fallback folder, the download is marked *Organizing failed* and stays put. |
 | Type *Unsorted*, or an unrecognizable name | Fallback folder (same as above) |
 | Game, music, software | Stays in the download folder |
-| Archive (`.zip`, `.rar`, …) or another non-video file | Stays, with a note. Direkt does not extract archives. |
+| Archive (`.zip`, `.rar`, `.7z`, split volumes) of a movie or series | Extracted; each video inside is placed by the rules above. See [Archives](#archives). |
+| Disk image (`.iso`), `.gz`/`.xz` file, or another non-video file | Stays, with a note. |
 | The destination file already exists | *Organizing failed*: Direkt never replaces a library file. The download stays in the download folder. |
 | The movie or TV library folder doesn't exist (for example, a missing mount) | *Organizing failed*. Direkt never creates the library folder itself, only the show, movie and season folders inside it. |
 
@@ -84,6 +85,68 @@ Titles are made safe as folder and file names. `Title: Subtitle` becomes
 `Title - Subtitle`, and characters such as `/ \ * ? " < > |` and control or
 invisible characters are removed. Direkt never creates a folder through a
 symlink.
+
+## Archives
+
+Season packs and some movies come as archives. Direkt extracts `.zip`,
+`.rar`, `.7z` and `.tar` archives, and archives split into volumes
+(`.part1.rar`, `.part2.rar`, …; `.rar` + `.r00`, `.r01`, …; `.zip` + `.z01`;
+`.001`, `.002`, …), with 7-Zip. The Docker image includes it (Debian's
+`7zip`, plus `7zip-rar` from non-free for RAR). Outside Docker, install it
+yourself so that `7z` (or `7zz`) is on the `PATH`. Without it, archives stay
+in the download folder with a note, and Direkt logs a warning at startup.
+
+For an archive of a movie or a series (chosen on the confirmation menu, or
+recognized from the name):
+
+1. Direkt lists the archive first and refuses to extract one with absolute
+   paths, `..`, links, encrypted (password-protected) entries or more than
+   10,000 files. It also checks that the download folder has room for the
+   extracted files.
+2. It extracts into a private hidden folder next to the archive
+   (`.direkt-extract-<id>`), so moving the videos into a library on the same
+   filesystem is a rename.
+3. Each video inside, except samples (`Sample/` folders, `*sample*` files),
+   is placed by the rules above, with the title from the confirmation menu.
+   Episodes named only `S01E03.mkv` get the show's name from the archive's
+   name. Videos that can't be identified go to the fallback folder. Other
+   files (`.nfo`, subtitles, images) are not kept.
+4. The temporary folder is removed. By default **the archive stays in the
+   download folder**: it is the download's file, so the trash button on the
+   download deletes it (the extracted videos stay in the library).
+
+### Deleting archives after extraction
+
+Turn on **Settings → Media library → Delete archives after extraction** (or
+`PATCH /api/v1/settings/misc` with `"delete_extracted_archives": true`) to
+have Direkt delete an archive once it is extracted. It is off by default and
+applies from the next extraction.
+
+- The archive is deleted only when **every** video in it was placed (in the
+  library or the fallback folder). When one could not be, the archive stays
+  so that *Organize again* can retry.
+- All the parts of a split archive are deleted (the files in the download
+  folder named as its volumes), not only the first.
+- The deletion happens after the result is recorded. The download then
+  points to where its videos went: the movie file, or the folder that holds
+  the episodes (for example the season folder). If Direkt stops in between,
+  the archive is simply kept.
+- The downloads of the other volumes stay in the list; their files are gone,
+  so remove them from the list.
+- Only regular files directly in the download folder are deleted.
+
+When some videos can't be placed (for example, the episode is already in
+the library), the download is *Organizing failed* with the reason; the others
+are already in the library. *Organize again* redoes the extraction and skips
+the videos already placed (same name and size in the library).
+
+A split archive is usually downloaded as one download per volume. Later
+volumes say which first volume they belong to. The first volume's download
+extracts the set: if some volumes are still downloading, it waits (skipped,
+"waiting for the other parts"), and the last volume to finish queues it
+again. Volumes must keep their names, in the same folder.
+
+Archives of games, music and software are never extracted.
 
 ## States
 
@@ -120,14 +183,22 @@ stops in the middle of organizing:
   (`.<name>.direkt-partial`) next to the destination and only then gives it
   its final name. An interrupted copy never leaves a truncated video in the
   library. The next attempt replaces the leftover temporary file.
+- an interrupted extraction is redone from the start: 7-Zip is stopped on
+  shutdown, the leftover `.direkt-extract-<id>` folder is cleared, and
+  videos that already reached the library are recognized by name and size.
 
 ## Limitations
 
 - Naming follows one fixed convention (the one Jellyfin and Plex recommend).
   It is not configurable yet.
-- Archives are not extracted. Season packs shipped as `.zip`/`.rar` stay in
-  the download folder.
-- Subtitles and other companion files are not moved. Direkt downloads single
-  files, so they are separate downloads.
+- Password-protected archives are not extracted. Nested archives (an
+  archive inside the archive) are not extracted either.
+- Unless archives are deleted after extraction, an extracted archive is
+  kept in the download folder until you delete it. Either way a season pack
+  needs room for both the archive and its videos while it is extracted.
+- Subtitles and other files inside an archive are not moved with the
+  videos.
+- Subtitles and other companion files downloaded separately are not moved.
+  Direkt downloads single files, so they are separate downloads.
 - An organized file can be removed from the list, but Direkt won't delete it
   from the library.

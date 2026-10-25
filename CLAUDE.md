@@ -177,12 +177,12 @@ Keep the following features separate from MVP implementation requirements:
 - Notifications of any kind. Telegram is the first planned channel after v1 (section 3.1); other channels come later still.
 - Browser extensions, bookmarklets, and mobile applications.
 - Sonarr, Radarr, and other media automation integrations.
-- Archive extraction and password-protected archive management.
+- Password-protected archive management. (Plain archives of movies and series are extracted; see `docs/media-organization.md`.)
 - Advanced scheduling and bandwidth shaping.
 - Permission systems beyond the two roles (administrator, user) and the fixed set of per-user permissions, which the project owner scheduled and which are implemented (see `docs/security.md`): no groups, custom roles, quotas, or self-registration.
 - A dynamic third-party plugin marketplace.
 - Distributed workers or multi-instance coordination.
-- Automatic cleanup policies that delete completed downloads.
+- Automatic cleanup policies that delete completed downloads. (Exception, scheduled by the project owner: the opt-in "delete archives after extraction" setting, off by default.)
 - Advanced duplicate detection across different providers.
 - Sophisticated media matching beyond filename parsing and optional metadata lookup.
 - Built-in VPN management or proxy orchestration.
